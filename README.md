@@ -2,6 +2,13 @@
 
 > **在真实桌面上，出现一个 Minecraft 风格的微缩世界；你用手机摄像头看着它，用手指和 AI 角色一起建造。**
 
+**仓库**：<https://github.com/60777flowers/fangcun>　｜　**许可**：代码 MIT（素材除外，见 [LICENSE](LICENSE)）　｜　**协作**：[CONTRIBUTING.md](CONTRIBUTING.md)
+
+```bash
+git clone https://github.com/60777flowers/fangcun.git
+```
+
+
 一句话定位：**AR 桌面微缩沙盒**（tabletop AR sandbox）——不是 PC 游戏、不是投屏、不是 VR。
 
 ```
@@ -102,6 +109,18 @@ node shot.mjs        # 用 headless Chrome 渲染一帧 → preview/m0.png
 
 ## 尚未决定的事
 
-- 开源还是闭源、用什么许可（当前仓库为 private，无 LICENSE）
+- 商用 build 的角色方案（当前模型仅限非商业）
+
 - 正式角色美术：VRoid 自捏 / 外包定制 / 用户自选
 - **占位模型 `preview/assets/RobotExpressive.glb` 来自 three.js 官方示例，仅用于开发，不得随产品发布**
+
+---
+
+## 许可
+
+- **代码与文档：[MIT](LICENSE)** © 2026 Fangcun (方寸) contributors
+- **素材不在 MIT 范围内**：
+  - `效果图/` —— AI 生成的视频帧（含第三方水印），仅作设计参考，不作为产品素材分发
+  - 角色模型 —— 版权归原作者（当前「蓝色小肥鱼」© 木子恶魔/MZEM），且**禁止二次配布** → 本仓库不含任何 `.vrm`
+  - `preview/assets/RobotExpressive.glb` —— three.js 官方示例，仅开发占位，不得随产品发布
+- 详见 [LICENSE](LICENSE) 末尾的「关于素材」一节。

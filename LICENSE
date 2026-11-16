@@ -1,0 +1,35 @@
+MIT License
+
+Copyright (c) 2026 Fangcun (方寸) contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+NOTE ON ASSETS / 关于素材（不属于 MIT 许可范围）
+
+MIT 仅覆盖本仓库中的**源代码与文档**。以下内容**不在 MIT 覆盖范围内**，各自保留原有权利：
+
+1. `效果图/` —— 项目视觉参考图（AI 生成的视频帧，含第三方平台水印）。仅作内部设计参考，不作为产品素材分发。
+2. 任何第三方角色模型（`.vrm` 等）—— 版权归原作者（如「蓝色小肥鱼」© 木子恶魔/MZEM），
+   且其许可禁止二次配布，因此**本仓库不包含任何模型文件**（`.gitignore` 已排除 `*.vrm`）。
+3. `preview/assets/RobotExpressive.glb` —— three.js 官方示例模型，仅用于开发占位，不得随产品发布。
+4. 第三方依赖（three.js / @pixiv/three-vrm 等）—— 遵循各自许可（MIT 等）。
+
+若要把本项目用于商业用途，请自行替换掉上述素材。

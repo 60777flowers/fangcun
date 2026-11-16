@@ -1,5 +1,6 @@
 # 桌面 AR 微缩 Minecraft · 开发文档
 
+> **仓库：https://github.com/60777flowers/fangcun**　｜　代码许可 MIT（素材除外）
 > 版本：**v0.3**（2026-11-16）｜状态：**已过一轮对抗性审阅，P0 已修**（审阅报告：`reports/report-h-doc-review.md`）
 > 读者：接手开发的同学。**目标：读完这份文档 + 跑通 §2，就能在不问原作者的情况下开始写代码。**
 > 视觉唯一标准：`效果图/3.png`（全景构图）、`效果图/2.png`（角色正面）、`效果图/1.png`（角色背面/发光/矿洞）。**"像不像"的争论一律以这三张为准。**
@@ -957,6 +958,21 @@ async function switchCharacter(id: string) {
 5. **提交信息**：`feat(mesher): greedy meshing` / `fix(sync): 回滚时未清 pending`。
 6. **渲染循环里不许分配对象**（`new Vector3()` 提到循环外）—— 手机上直接掉帧。
 7. **不许引入未在 §7.3 登记许可的素材**。
+8. **模型文件（`*.vrm` / `*.zip`）一律不入库** —— 版权原因，见 §8.12；CI 会检查。
+
+### 13.1 仓库与协作
+
+| 项 | 值 |
+|---|---|
+| 仓库 | <https://github.com/60777flowers/fangcun> |
+| 主分支 | `main`（保护，走 PR） |
+| 分支命名 | `feat/<短描述>` / `fix/<短描述>` / `docs/<短描述>` |
+| 提交信息 | Conventional Commits：`feat(mesher): greedy meshing` |
+| PR 要求 | ≤400 行；`typecheck` + `test` + `bench` 全绿；改了 `voxel-core/intent.ts` 必须三端同步 |
+| 协作细则 | [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| 任务看板 | GitHub Issues；里程碑见 §9 |
+
+> **架构改动必须先改 ADR（§10），再改代码。** 没有 ADR 的架构 PR 不合并。
 
 ---
 
