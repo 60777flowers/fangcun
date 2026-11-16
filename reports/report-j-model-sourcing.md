@@ -280,7 +280,7 @@ git log --all --diff-filter=D --name-only
 
 用户描述的画风（粗描边、赛璐璐）很像 MMD 圈子产物，但：
 
-- 全网扫描**未发现**任何 `大肥鱼` 的 `.pmx` 配布（§2.2 的 12 个仓库 + 模之屋条目 + B 站检索，全部无）；
+- **本次扫描范围内**（GitHub 12 个仓库的文件树 + 模之屋条目 + B 站检索 + BOOTH + Sketchfab）**未发现**任何 `大肥鱼` 的 `.pmx` 配布；注意 B 站/贴吧/QQ 群未能有效检索（§7 #9），因此**不能**断言「网上不存在」；
 - MMD 模型进 Web 需要 `pmx → glTF` 转换（`babylon-mmd` / Blender MMD Tools），且**没有 VRM humanoid 映射**，SpringBone 要重建，工程量约为直接接 VRM 的 4–6 倍；
 - 我们的目标平台是 Web/AR，VRM 1.0 是唯一「有标准骨骼 + 标准弹簧 + 标准表情 + 官方 Web 运行时」的格式。
 
@@ -422,6 +422,10 @@ assets/characters/                     # 随包发布，只读，升级时整体
 ```
 
 **为什么 `license` 是对象而不是一个字符串**：因为现实里「许可」至少是三维的（商用 / 可否修改 / 可否再分发），一个 SPDX 字符串表达不了 CC BY-NC-SA 之外的那些自定义条款（A 就是典型：VRM 元数据 + Aplaybox 页面 + 插件授权三层）。UI 上直接渲染成三个徽章。
+
+> ⚠️ **两个必须注意的落地细节**
+> 1. **示例里的 `motions` 是「有动作包时」的写法**。实测 DeepSeek-chan 与 BlueFatFish 的 `animations` **都是 0**，所以真正内置时的 `motions` 应全部为 `null`，走 §5.5 的 **L1 程序化动画**。写 `.vrma` 只是展示扩展位。
+> 2. **VRMA 动作数据的许可是独立的一套权利**，和模型授权不是一回事。若要用别人打包的 `.vrma`（例如某些插件自带的动作包），必须单独核实其来源与许可，不能因为「模型是 CC BY-NC-SA」就推定「动作也能随便用」。自建 VRMA（用 Blender/Unity 自己 K 帧）最干净。
 
 #### 5.1.3 用户注册表 `index.user.json`（同 schema，可只写差异）
 

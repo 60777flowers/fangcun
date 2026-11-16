@@ -679,6 +679,8 @@ assets/characters/               # 内置（随包发布）
 ```
 
 **规则**：
+- **一个角色可以有多个 skin**（`character.skins[]`：默认装 / 女仆装 / 便服…），切换 skin 不换骨架、不重载模型。
+- **统一 `CharacterSource` 抽象**：`builtin`（随包，只读）/ `userdir`（`%APPDATA%\AR-MC\characters`，**升级永不覆盖**）/ `indexeddb`（**纯 Web 无 worldd 时用**）。上层只认接口，不认来源。
 - **产品默认只激活 1 个角色**（`active: "dafeiyu"`），注册表可以有很多个，但**同一时刻只渲染一个**。
 - 注册表**合并**两个来源（内置 + 用户），同 `id` 时**用户覆盖内置**（用户永远能改）。
 - 用户目录在 `worldd` 侧：`<DSH_HOME>/ar-mc/characters/`（Windows: `C:\Users\<user>\.dsh\ar-mc\characters\`），**升级不覆盖**。
@@ -718,6 +720,8 @@ async function switchCharacter(id: string) {
 | 三角面 ≤ 20k | "模型面数偏高（{n}），可能掉帧，仍要继续吗？" |
 | `character.json` 可解析 | "配置文件格式不对，请照模板改" |
 | `license` 非空 | "请填写模型许可；自己用没关系，随产品发布必须填" |
+| 贴图 ≤ 2048²（移动端降到 1024²） | "贴图太大了（{n}²），手机上会占 {v} MB 显存，已自动压缩" |
+| 拒绝 `.pmx`（MMD 格式） | "这是 MMD 模型，本应用不支持；请导出为 VRM 或 glTF" |
 
 #### 8.8.5 用户自助换模型（3 步）
 
@@ -727,7 +731,24 @@ async function switchCharacter(id: string) {
 
 > 进阶：手机端支持**拖拽上传**单个 `.vrm`（自动生成默认 `character.json`，`heightBlocks` 取 1.2）。
 
-#### 8.8.6 许可责任划分
+#### 8.8.6 许可三元组（数据字段 + CI 门禁）
+
+`license` 不写一句话，写成**三个布尔**，让 CI 能自动判：
+
+```json
+"license": {
+  "spdx": "CC-BY-NC-SA-4.0",
+  "commercial": false,      // 能否商用
+  "modify": true,           // 能否修改
+  "redistribute": true,     // 能否随包分发
+  "attribution": ["ニケ", "上善无形", "ZipZipPipe"],
+  "source": "https://github.com/tegnike/deepseek-chan-vrm"
+}
+```
+
+> **CI 门禁**：`builtin: true` 的角色如果 `redistribute: false` → **构建直接失败**；`commercial: true` 的构建里出现 `commercial: false` 的角色 → **也失败**。
+
+#### 8.8.7 许可责任划分
 
 - **内置角色**：必须随包附许可证明（`character.json.license` + `LICENSES/` 原文），发布前人工核。
 - **用户导入**：用户自负；UI 明示"你导入的模型版权由你负责"，**禁止**随产品分发用户目录内容。
@@ -780,6 +801,41 @@ async function switchCharacter(id: string) {
 | **合计** | | **≈4 天出 v0；8–13 天到可发布** |
 
 > 外包（日本）报价量级：**10 万–数十万日元 / 1–3 个月**。作为对比，先自己走一遍这条 ¥0 路径，能把"到底要什么"搞清楚再外包，能省一半钱。
+
+### 8.12 已寻源：三个真实可得的模型（2026-11-16，子代理 J 实测）
+
+**结论：用户说的"蓝色大肥鱼女仆"确实存在，而且找到了 —— 但它的许可不允许我们内置。**
+
+| 候选 | 来源 | 格式 / 体积 | 头身比 | 许可（读的是**文件 meta**，不是站点标签） | 能否内置 | 能否修改 |
+|---|---|---|---|---|---|---|
+| **BlueFatFish**「蓝色小肥鱼」 | 模之屋 aplaybox（作者 木子恶魔）；实际分发在 `drliuhuan/dsh-plugin-vrmpet3d` 的 `assets/models/BlueFatFish.vrm.br` | VRM 1.0 / 18.5 MB | **2.41**（最贴参考图） | `avatarPermission: onlyAuthor`、`allowRedistribution: false`、`modification: prohibited`、`commercialUsage: personalNonProfit`、须署名 | ❌ **不行**（禁止再分发） | ❌ 禁止 |
+| **DeepSeek-chan** | GitHub [`tegnike/deepseek-chan-vrm`](https://github.com/tegnike/deepseek-chan-vrm) 21★ | VRM 1.0 / 33.6 MB + `.blend` | 3.4（半 Q 版） | **CC BY-NC-SA 4.0**（可改、可再分发、须署名三人、**禁商用**、同协议传染） | ✅ **可以**（非商业） | ✅ |
+| **鲸鱼娘 Live2D** | [`Andersen216/dsh-whale-girl-live2d`](https://github.com/Andersen216/dsh-whale-girl-live2d) 95★ | Live2D `.moc3` | — | 代码 MIT / **素材 CC BY-NC-SA** | ✅（非商业） | 见协议 |
+| **VRoid「ヴィータ」** | VRoid 官方示例 | VRM 1.0 | — | **可商用 / 可再分发 / 免署名** | ✅ **商用兜底** | ✅ |
+
+**DeepSeek-chan 的三人署名**（写 LICENSE 时必须全列）：3D 模型 **ニケ** ／ 角色原作 **上善无形**（原创 OC「溟月」）／ 女仆版设计 **ZipZipPipe**。
+
+> ⚠️ **贴图才是移动端瓶颈，不是面数**：DeepSeek-chan 有 **6 张 4096² 贴图**，按 RGBA 上传约 **402 MB 显存** → **移动端必须降到 1024²**（面数 92k 反而不是瓶颈）。
+> ⚠️ **两个 3D 模型的动画片段数都是 0** —— 所以 **程序化 idle / 走 / 尾摆是主路径，不是兜底**。`drliuhuan/dsh-plugin-vrmpet3d` 里另有 **28 个 `.vrma.br`** 动作库，可作为可选素材，但**用前必须单独核那批动画的许可**。
+
+### 8.12.1 因此的分层策略（这也是插槽存在的商业理由）
+
+| 场景 | 用哪个 | 动作 |
+|---|---|---|
+| **开发 / 内测打包** | **DeepSeek-chan** | 内置，附 `LICENSES/cc-by-nc-sa-4.0.md` + 三人署名；**贴图重编码到 ≤1.5 MB**（原始 33.6 MB 太大） |
+| **给用户看的"最强示范"** | **BlueFatFish** | **不内置**。文档写清"自己去模之屋下载，放进 `characters/` 目录"——这正是 §8.8 插槽的用处 |
+| **商用发布** | 自研或买断 | 走 §8.11 的 VRoid 路径，或买授权；**CC BY-NC-SA 一律不能用于商用** |
+
+> 一句话：**"能内置的不好看，好看的不能内置"** —— 这不是选型困难，这是版权现实。所以模型必须是插槽。
+
+### 8.12.2 用户自备 BlueFatFish 的操作（写进用户文档）
+
+1. 去 <https://www.aplaybox.com/details/model/ayXkRzVflmnd> 下载 `BlueFatFish.vrm`（需登录/关注作者，按站点规则）
+2. 放进 `%USERPROFILE%\.dsh\ar-mc\characters\bluefatfish\`，同目录写一个 `character.json`（`heightBlocks: 1.2`、`license.spdx: "LicenseRef-OnlyAuthor"`）
+3. 手机端「角色」→ 选它
+
+> ⚠️ 必须在 UI 上提示：**该模型许可为"仅作者授权"，仅限个人非商业使用、禁止修改**。我们不分发、不代下载。
+
 
 ## 9. 里程碑
 
