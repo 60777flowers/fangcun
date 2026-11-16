@@ -18,8 +18,9 @@
 | 首发平台 | Android 优先：支持 ARCore 的设备走 Chrome/WebXR 平面追踪与 anchors；不支持该能力的设备优先验证打印桌面定位标记的摄像头跟踪模式。用户已认可“非 ARCore 用打印标记尝试兼容”的方向；两种方案仍须在真实设备完成稳定性/性能验收后，才可作为正式支持项 |
 | 角色 | 一个 3D 大肥鱼角色；开发期可使用合法占位模型；发行模型必须另过素材许可门禁 |
 | 玩家输入 | 手机触屏直接参与方块建造；玩家本身不渲染为世界角色 |
-| AI | PC 上的 DSH 是大脑；通过受限工具与玩家共用同一个世界状态 |
-| 暂不包含 | iOS 真 AR、Windows 独立桌宠窗口、真实 PC Minecraft 联动、多人联机、语音、长期记忆、生存/战斗/红石 |
+| AI | PC 上的 DSH 是大脑；通过受限工具与玩家共用同一个世界状态；当前 v0 是单用户、单个 AI 桌宠 |
+| 未来接口（不扩大当前 v0） | 人格卡、多个 AI 实例、每个实例独立家园与权限、跨用户异步串门的邀请/消息/访问票据与审计事件接口先进入 schema/数据边界；当前不开放对应 UI、账号系统、互访授权服务或公网服务 |
+| 暂不包含 | iOS 真 AR、Windows 独立桌宠窗口、真实 PC Minecraft 联动、多人实时联机、跨用户异步串门运行时、语音、跨会话长期记忆、生存/战斗/红石 |
 
 以上是产品范围，不代表对应技术已完成。Android 的 ARCore/WebXR 与打印标记跟踪均为待验证技术路线；平板/手机型号覆盖、遮挡与漂移表现、标记尺寸/打印方式、真机性能、iOS 方案、3D 正式素材和部署方式仍需验证。非 ARCore 模式必须明确依赖打印并保持标记在摄像头可见范围内；失去可靠 tracking 时暂停世界输入，不能假称已锚定。
 
@@ -29,7 +30,8 @@
 - v0 使用自建有限体素世界，不接真实 Minecraft 服务端；本项目不是完整 MC 克隆。
 - MVP 首先支持同一局域网的一台 PC 和一台 Android 设备。公网访问不在首发承诺内。
 - Android 交付目标是可手动安装的 APK（便于用户在没有 ADB 的设备上测试）；构建系统和包签名/升级策略待 M0/M1 后单独确定。开发中优先保持跨设备 capability detection 与 provider abstraction，不做仅针对单一平板型号的分支。
-- 一个会话中的 AI 方块修改先预览、再由用户明确确认；禁止 AI 任意执行脚本、未确认破坏或覆盖玩家建筑。
+- AI 是具有主动性的桌宠：可以主动观察世界、提出想建造/装饰自己小家的目标，并在自己的专属家园地块内自主完成安全施工；它要向玩家告知选址和进度，不能越过世界边界、权限和预算。AI 选择家园位置时必须避开玩家已有建筑；首次选址/迁移要展示给玩家并允许否决。
+- AI 对自己专属家园地块内的“只放置空格、不破坏/覆盖任何已占用格”的家园装饰事务，可走受限的自动批准路径；玩家首次确认把某片空地区域授予 AI 后，worldd 记录该 plot 的 owner/instance、坐标范围、允许方块、预算与可撤销事务策略。AI 选址阶段只能提出候选区域；首次 grant/revoke 由用户明确确认。涉及拆除、覆盖、玩家建筑、共享区域、地块外扩建或高风险结构时，必须先预览并由用户明确确认。任何情况下禁止 AI 执行任意脚本、shell/eval/RCON 或越权写入。
 
 若产品负责人以后调整这些工程建议，需先更新 ADR 和本文，不允许各模块自行分叉。
 
@@ -40,13 +42,22 @@
 1. PC 启动方寸世界服务及 DSH 连接；用户在 Android Chrome 打开配对链接。
 2. 用户授权摄像头，在真实桌面检测水平面并放置/确认微缩岛锚点。
 3. 玩家用触屏选方块、点格子放置；能拆除允许拆除的方块，操作结果在 AI/PC 检视端一致。
-4. 玩家发出“帮我盖一个小木屋”之类的文字请求；AI 先生成受限建造计划和可视预览。
-5. 玩家确认后服务端一次性校验并提交；大肥鱼在场景内移动/做建造动作并显示简短气泡。
-6. 玩家可取消尚未提交的计划、撤销最近一笔未被覆盖的 AI 建造；断线后重连获得权威状态。
+4. 大肥鱼可以主动观察世界、发起“想给自己搭个小木屋/摆点装饰”的自主目标；AI 选择合适的空地提出家园选址。用户可否决/重选；通过一次选址后建立受限 AI home plot。
+5. 家园地块内，AI 可自主规划并直接执行**仅占用空格、不会拆/改/遮盖既有方块**的小型家园建设与装饰；向用户汇报目标、施工过程/完成结果并显示简短气泡。玩家可以暂停/撤销可安全回滚的 AI 操作。
+6. 超出 AI home plot、扩大地块、触及玩家/共享区域或任何破坏/覆盖/越预算的方案，必须先展示 diff 预览并由用户明确确认，再由服务端原子提交。
+7. 玩家仍可随时发起“帮我盖一个小木屋”等协作请求；AI 生成受限计划，按第 5/6 项权限规则自动执行或等候确认。
+8. 玩家可取消尚未提交的高风险计划、撤销最近一笔未被覆盖的 AI 建造；断线后重连获得权威状态。
 
-### 2.2 MVP 非目标
+### 2.2 单 AI v0 与未来 companion 扩展边界
 
-不做任意 MC 合成/怪物/生存规则、开放互联网多人、语音 ASR/TTS、跨会话偏好记忆、自动清理或改写玩家建筑、手机本地运行 DSH、游戏截图上传给模型、iOS 同期支持、用户模型在线市场、发布正式商业角色美术。
+- **v0 运行时基数**：一个本地用户/世界、一个 AI companion instance、一个用户确认的 AI home plot。数据结构从一开始带 `companionId` 与 `plotId`，避免以后把所有权限硬编码到全局 AI。
+- **人格卡**：预留 versioned `PersonaCard`（稳定 ID、displayName、system/persona text 的受信配置、允许的动作/语气/记忆策略与资产引用）；运行时只加载本机白名单卡片。人格卡不是工具授权，提示词不得授予世界写权限。
+- **多个 AI**：未来 instance 可各自持有 persona/home/state/预算；worldd 永远由 capability/owner/plot 授权判定，而不是信任 persona prompt 或客户端传来的 owner 字段。v0 不展示/运行多个 AI。
+- **异步串门接口**：预留 `VisitInvitation/VisitEvent` 数据契约：`visitId, worldId, hostCompanionId, guestCompanionId, hostUserId, invitedAt, expiresAt, scope, status, rev`。未来服务只发短期签名、单次、只读或限权的访问票据；邀请/接受双方用户显式授权；默认共享只读事件，不附带 world token、文件、长期 memory、模型凭证或对 guest 世界的写权限。入站建议先进入 host 收件箱，经 host 确认后仍只经受限 plan/approval/plot 规则修改世界。v0 不实现账号、联网、互访 UI 或消息投递服务。
+
+### 2.3 MVP 非目标
+
+不做任意 MC 合成/怪物/生存规则、实时多人联机、跨用户异步串门的产品运行时、语音 ASR/TTS、任意长期对话记忆、AI 自动清理/改写玩家建筑、手机本地运行 DSH、游戏截图上传给模型、iOS 同期支持、用户模型在线市场、发布未授权角色美术。v0 允许在本用户明确同意的 AI home plot 内进行有限主动建造；不等同开放互联网多人或跨用户代理访问。
 
 ## 3. 总体架构
 
@@ -59,10 +70,11 @@ Android Chrome / ARCore WebXR
                     │ HTTPS + WSS（同源反向代理/同一安全上下文）
                     ▼
 PC 方寸 Host
-  ├─ worldd：有限世界权威、事务仲裁、存档/WAL、配对与限流
-  ├─ DSH adapter：仅限 schema 化工具；worldd 是唯一写入口
+  ├─ worldd：有限世界权威、事务仲裁、AI home plot 权限、存档/WAL、配对与限流
+  ├─ DSH adapter：仅限 schema 化 observe/plan/commit/say；worldd 是唯一写入口
+  ├─ companion runtime：v0 单个 AI instance + persona card + autonomy/attention loop
   ├─ local inspector/mock-ai：真实客户端协议，不绕过权限
-  └─ local data：世界存档、短期事件/审计；无云端同步
+  └─ local data：世界存档、plot/instance、短期事件/审计；v0 无云端同步或跨用户访问
 ```
 
 **AR 渲染边界：**WebXR 相机背景由浏览器/系统合成，普通页面通常拿不到背景纹理。MVP 不承诺对真实桌面摄像头画面做移轴、模糊或任意后期；仅对虚拟物体实现卡通材质、接触阴影与基础光照。实景遮挡/深度也不作为首发能力，除非设备实测证明可用且另有明确验收。
@@ -90,7 +102,9 @@ PC 方寸 Host
 - 所有修改由服务端串行仲裁。放置只允许目标为空；拆除需携带 `expectedBlock`/`baseRev` 条件。冲突、越界、权限错误均拒绝整笔事务。
 - 客户端 `clientId + seq` 是幂等键。ACK 确认该请求及结果，但**不推进已应用的世界 revision**；只有按序 commit/delta 可推进 replica revision。重复旧 rev 丢弃，发现 revision 缺口立即请求快照。
 - 客户端可先显示待确认 ghost，不将预测值写成权威体素；拒绝/超时只需清理 ghost，不会发生不可逆的副本回滚错误。
-- AI 计划包括 `planId`、`baseRev`、canonical diff hash、预览、材料清单和短 TTL。玩家确认 UI 必须展示准确的占格/破坏/材料摘要；明确确认后由 UI 发 `approve_plan`，服务端创建绑定用户 session、planId/hash/baseRev 的短时单次 `approvalId`。AI/MCP 不能自行构造批准，也不能复用其他 session 的批准。commit 时服务端校验审批来源/过期/一次性使用，并重算/重验 hash、边界、权限、目标占用及 base revision；revision 已变化就要求重做计划。
+- 所有 AI plan 包含 `planId`、`companionId`、`scope`、`baseRev`、canonical diff hash、目标摘要/预览、预算和 TTL。用户批准票据必须绑定 user session + companionId + worldId + plotId/高风险 scope + plan/hash/baseRev，一次性且短期；AI/MCP 不能自签批准。
+- `scope=home_plot` 且只放置空格、所有 op 都位于该用户当前授权 plot 内、预算/频率/方块白名单通过的安全装饰计划，可走服务端策略自动批准，无逐笔用户确认；计划仍进入可见审计/undo 队列，用户可暂停自动施工、收回 plot grant、拆除尚未冲突的最近事务。任何拆除、覆盖、出 plot、扩地/选址、玩家/共享区域写入、越预算的计划均必须经用户清晰预览和一次性批准。
+- 首次 AI home 选址必须提出候选地块并由用户批准/重选；plot grant/revoke 在 worldd 持久化并对不同 instance 隔离。服务端 commit 重验计划范围、哈希、权限、预算、空格和 base revision，禁止模型用自然语言或 persona 文本绕过策略。
 - Undo 仅允许在当前格子仍等于该事务写入值时原子反向应用；否则拒绝并说明冲突，不覆盖后续玩家修改。
 
 ### 4.3 网络消息（命名和 schema 的唯一来源）
@@ -142,6 +156,8 @@ packages/
   render-voxel/          chunk mesh、材质、阴影与性能降级
   render-character/      单角色 loader/动画/行为状态
   ar-provider/           WebXR 生命周期、hit-test、anchors、transform
+  companion-schema/      PersonaCard、CompanionInstance、HomePlot、future Visit contract
+  companion-runtime/     主动目标/attention、plot planner、动作意图队列与打断
   dsh-adapter/           MCP host 接入、请求取消与结果映射
   qa-fixtures/           确定性地图、mock 模型/AI、协议场景
 ```
@@ -152,10 +168,13 @@ packages/
 |---|---|---|---|---|
 | `world-schema` | 全栈/数据 | 无运行时依赖；定义 `WorldSpec`、方块 ID、坐标、存档与版本升级 | 唯一 schema、坐标变换、迁移规则 | 原点/边界、index↔coord 往返、快照编解码 |
 | `protocol` | 全栈/服务端 | 依赖 schema；输出 client/server/MCP 共用的类型和 validator | 版本化消息、DSL、error codes、fixture | fuzz/schema reject、向前/向后版本拒绝、codec round-trip |
-| `voxel-core` | 体素工程师 | 纯 TS；不得依赖 three/fs/ws/LLM | seed map、结构 DSL compiler、事务 diff/undo | 属性测试、越界/预算/清除语义、确定性构景 |
+| `voxel-core` | 体素工程师 | 纯 TS；不得依赖 three/fs/ws/LLM | seed map、受限结构 DSL compiler、事务 diff/undo | 属性测试、越界/预算/清除语义、确定性构景 |
+| `companion-schema` | 数据/服务端 | 无 UI/LLM/IO；只依赖 world-schema | PersonaCard、CompanionInstance、HomePlotGrant、Visit* versioned validators | fail-closed schema、owner/scope、bounds/budget、visit read-only contract |
 | `worldd` | Node 服务端 | 依赖 schema/protocol/core；唯一写世界入口 | session、事务队列、WAL/快照、pairing API | 并发、幂等、恢复、鉴权、限流、恶意 payload |
 | `render-voxel` | Three.js 客户端 | 读 replica 与 WorldSpec；不直接连 MCP/写真值 | chunk mesh、hit highlight、pending ghost、XR render path | voxel fixture golden image、变更影响范围、移动设备 profile |
 | `ar-provider` | Android/WebXR | 只产生 pose/hit-test/capabilities；不解释业务方块/仲裁 | typed lifecycle/anchor/session adapter | 权限拒绝、tracking lost、pause/resume、relocalization、设备矩阵 |
+| `companion-schema` | 数据/服务端 | 只定义人格/实例/家园地块/未来串门契约；不授予写权限 | versioned PersonaCard、CompanionInstance、HomePlot、VisitInvitation/Event schemas | unknown fields/version、owner/plot binding、expiry、权限边界 |
+| `companion-runtime` | AI/服务端 | 只产生受限意图；所有 world writes 经 worldd | autonomy loop、attention queue、home candidate/plan、interrupt/cancel | 主动性、预算、plot-only auto commit、玩家建筑保护、重启恢复 |
 | `render-character` | 角色/客户端 | 读 actor state/授权 manifest；不调用世界写接口 | 单模型加载、动作状态映射、资源释放/回退 | 模型合法性、缺失资源、反复装卸、帧时和内存 |
 | `dsh-adapter` | DSH 集成 | 依赖 protocol 与本机权限；所有写操作经 worldd | MCP tool definitions、取消/超时/错误翻译、prompt boundaries | mock tool end-to-end、拒绝未确认 commit、越权和注入测试 |
 | `client` / Host | 前端/桌面集成 | UI 编排、局域网配对；不持有 durable world truth | 安装/启动/配对/状态 UI、PWA 或本地 HTTPS host | fresh install、扫码兑换、断网、关闭与重启 |
@@ -186,11 +205,13 @@ packages/
 - 建造单格选择高亮、空格放置 ghost 和可拆限制；真实 AR 下按桌面坐标显示。
 - DoD：固定 seed 下截图稳定；网格变更不修改未受影响区域；桌面测试视图与 Android AR 各自有视觉基线；角色缺失时回退合法占位，不阻断世界。
 
-### M3：worldd、同步、存档、安全（服务端/协议）
+### M3：worldd、同步、存档、安全与 companion identity（服务端/协议）
 
 - 服务端事务串行队列；一条路径处理玩家、AI、undo；快照 + 增量日志恢复；认证、速率限制、payload 上限、Origin 校验和 WSS。
 - 持久化承诺：ACK 之前事务须写入 WAL 并完成约定的 durable flush；启动先校验快照 hash，再重放 WAL；周期快照采用临时文件 + 原子替换；损坏时备份恢复并报告，不静默清空。
 - session credential 短期、一次性兑换、可撤销、最小权限；日志脱敏；连接只监听必要接口，MCP loopback only。
+- 落地 `CompanionInstance`/`PersonaCard`/`HomePlotGrant` 本地 schema 和迁移版本。v0 seed 一个 companion instance，但 ID/owner/权限不能使用全局单例；plot grant 与 world rev/审计记录一同持久化，用户能暂停/撤销。
+- 协议保留 `visit invitation/event` namespace 及 versioned schema，但 v0 server 必须 feature-disabled；没有 remote account、friend graph、互访凭证验证路径时，拒绝所有 network-origin visit 请求。
 - DoD：两个客户端同格竞争、重复 seq/rev、乱序包、掉包/断网/重连、服务重启、WAL 截断/快照损坏的确定性测试通过；ACK 过的状态重启后不丢；非 ACK 状态允许中断但须如实告知。
 
 ### M4：手机 AR 建造 UX（Android/客户端）
@@ -200,12 +221,14 @@ packages/
 - 提供岛放置、确认/移动/重置、放置/拆除、物品栏、网络/AR 状态条、连接重试和用户可理解的拒绝信息。
 - DoD：权限拒绝后可重试；session pause/resume 恢复；重定位后世界不跳变；一百次交替放置/拆除后服务端和画面一致；断线时禁止误报已保存。
 
-### M5：大肥鱼 AI 共建（DSH/AI/服务端/角色）
+### M5：大肥鱼 AI 主动家园与共建（DSH/AI/服务端/角色）
 
-- DSH 只经 `world_observe/build_plan/build_commit/build_cancel/world_undo/companion_say` 受限调用；`build_commit` 必须携带 worldd 签发、一次性、session/plan/hash/baseRev 绑定的 `approvalId`；只有玩家 UI 的明确确认路径可以请求签发。prompt 把世界聊天、方块标签和用户结构名作为不可信数据，不允许内容越权改系统规则。
-- AI 构建默认只占空格；预览必须显示占格、冲突和材料，用户确认后才能提交；目标大于配置上限或触及玩家改动即拒绝/重计划。
+- DSH 只经 `world_observe/build_plan/build_commit/build_cancel/world_undo/companion_say` 受限调用；另由 `companion-runtime` 产生结构化 `companion_intent`（observe/choose_home/propose_home/build_home/say/idle/walk/build/talk），不能直接调用 worldd 写接口。
+- `build_commit` 必须携带 worldd 签发、一次性、session/companion/plot/plan/hash/baseRev 绑定的 `approvalId`；plot-only safe auto-commit 是策略层批准，不能由模型或 persona 自行伪造。prompt 把玩家文本、方块标签、结构名和未来访客事件作为不可信数据，不允许内容越权改系统规则。
+- 预留并测试一个 AI autonomy loop：周期 observe → 选择小目标（包括主动装饰家园）→ 评估 plot/预算/冲突 → 生成 plan → 安全自动施工或请求人工确认 → 广播进度/气泡 → 可取消/undo；watchdog/attention 参考 `dsh-game`/`whale-craft`，但不引入 Mineflayer 身体层。
+- AI 构建默认只占空格；预览必须显示占格、冲突和材料，plot 内安全计划可自动执行但必须审计；目标大于配置上限或触及玩家改动即拒绝/重计划。
 - 角色行为由服务端事件驱动有限状态（idle/walk/build/talk）；位置由客户端插值，AI 不能任意 teleport；对话按长度/频率限速。无需模型动画片段时用程序化站立/行走/建造动作，不把无动画 VRM 当已有动画。
-- DoD：20 个固定 build 请求中 ≥90% 生成合法 plan；不存在未确认 commit；计划过期/玩家同格修改时拒绝并可重计划；Mock AI 可在不调用真实模型情况下跑完整流程；实际 LLM 的延迟单独报告，不承诺固定秒数。
+- DoD：单用户单 companion 的 20 个固定请求中 ≥90% 生成合法 plan；至少覆盖主动选择家园、plot 内装饰自动提交、plot 外扩建需确认、玩家建筑保护、暂停/撤销和重计划；不允许未授权/越界 commit；Mock AI 可在不调用真实模型情况下跑完整 autonomy loop；实际 LLM 延迟单独报告，不承诺固定秒数。人格卡、第二 companion 和 visit schema 只做契约/拒绝未知版本测试，不作为 v0 可用功能。
 
 ### M6：视觉资产、性能与发行候选（视觉/资产/QA）
 
@@ -234,7 +257,7 @@ packages/
 
 上述阈值是项目建议，不是当前实现成绩。自动化测量脚本、设备型号/系统/浏览器版本和原始日志需随验收结果提交。
 
-**当前研发状态（2026-11-16）：**Node/TypeScript workspace 的 clean install、严格类型检查、30 个单元测试和本机 Chrome 桌面交互 smoke 已通过；PC 沙盒支持放置/拆除、AI-style 本地 proposal 预览/确认。Android WebXR/marker provider 仍只有纯类型/状态门控，没有原生或 WebXR 集成；当前环境未安装 Android SDK/Gradle，也没有 APK；LAN/TLS/WSS、持久化、实际 DSH/MCP 与角色资产均未完成。Samsung Tab S8 未启用 ADB，本轮尚未对平板实测。
+**研发状态（2026-11-16）：**第一阶段 Node/TypeScript workspace 的 clean install、严格类型检查、30 个单元测试和本机 Chrome 桌面交互 smoke 已通过，GitHub 分支 `feat/phase1-voxel-sandbox` 已推送。第二阶段已新增 `companion-schema` 草案与 ADR-0002：单用户单 AI 是运行时目标，人格卡、多 AI、异步串门只预留接口；AI home plot 需要用户先批准位置，之后 AI 可在已授权地块只放置空格、自主装饰。该 schema 目前是数据契约，不代表 autonomic runtime 已实现。Android WebXR/marker provider 仍只有纯类型/状态门控，没有原生或 WebXR 集成；当前环境未安装 Android SDK/Gradle，也没有 APK；LAN/TLS/WSS、持久化、实际 DSH/MCP 与角色资产均未完成。Samsung Tab S8 未启用 ADB，本轮尚未对平板实测。
 
 ## 7. 交付与协作约定
 
@@ -250,7 +273,7 @@ packages/
 |---|---|---|
 | P0 | Android 手机对 LAN HTTPS/WSS 的易用性无可靠现成结论 | M0 实机验证配对/TLS；未定前不发“零安装零配置”承诺 |
 | P0 | 共享坐标/协议与旧文档矛盾 | 先落 schema/ADR/test，再并行写模块 |
-| P0 | AI 覆盖/清除玩家建筑或 prompt injection | 原子 plan-confirm-commit；allowlist；无 arbitrary code；负向安全测试 |
+| P0 | AI 覆盖/清除玩家建筑、主动性越权或 prompt injection | companion/plot capability；plot-only safe auto policy；高风险原子 plan-confirm-commit；allowlist；无 arbitrary code；负向安全测试 |
 | P0 | token query/明文 WS/MCP 暴露 | WSS、一次性最小权限凭证、loopback MCP、脱敏日志、Origin/限速 |
 | P0 | 效果图公开仓库分发权、角色/动画素材许可链不完整 | 发行前权利人/许可文件逐资产确认；清不掉权就不进 release 包，公开仓库图像需另行处理 |
 | P0 | DSH 对话/动作可能发送到外部模型提供方 | 数据流告知、明确用户配置的模型边界、默认不保留 journal/摄像头帧 |

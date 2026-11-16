@@ -27,8 +27,8 @@ git clone https://github.com/60777flowers/fangcun.git
 
 ## 当前项目状态
 
-> **产品方向已确认：**在真实物理桌面上用 Android 设备摄像头呈现 MC 风格微缩方块世界；玩家参与建设，大肥鱼 AI 在同一世界协作建设。支持 ARCore 的设备优先用 WebXR 平面追踪；不支持的设备将评估打印定位标记的摄像头跟踪兼容模式，但该路线仍待技术 spike 与设备验收。v0 不含真实 PC Minecraft 联动、Windows 独立桌宠窗口、iOS 真 AR、多人、语音。
-> **实现状态：**已搭建共享 TypeScript 工作区，落地 16³ WorldSpec、分阶段协议消息校验/有界 frame codec、确定性岛屿、原子体素事务与内存版 `WorldAuthority`；PC 桌面沙盒已可运行。尚无持久化/WAL、联网会话、HTTPS/WSS 配对、真实 Android ARCore/WebXR、原生打印标记 provider、DSH/MCP 适配或正式角色资产。不得把计划写成已交付能力。
+> **产品方向已确认：**在真实物理桌面上用 Android 设备摄像头呈现 MC 风格微缩方块世界；玩家参与建设，大肥鱼 AI 在同一世界协作建设，AI 是有主动性的桌宠，可在用户授权的专属家园地块内主动建造装饰。v0 仍是单用户单 AI；人格卡/多 AI/跨用户异步串门只预留扩展接口，不做成可用功能。支持 ARCore 的设备优先用 WebXR；非 ARCore 打印标记仍待技术 spike 与设备验收。不含真实 PC Minecraft、iOS 真 AR、多人实时联机、语音。
+> **实现状态：**已搭建第一阶段共享 TypeScript 工作区、协议/体素核心和 PC 桌面沙盒；下一阶段将实现单 companion 的主动家园循环和受限 DSH adapter。尚无持久化/WAL、联网会话、HTTPS/WSS 配对、真实 Android ARCore/WebXR、原生打印标记 provider、实际 DSH/MCP 适配或正式角色资产。人格卡、多 AI、异步串门目前只有接口规划。不得把计划写成已交付能力。
 
 ## 现在该读哪份文件
 
@@ -61,6 +61,7 @@ npm run simulator
 - `packages/protocol`：intent/commit、hello/welcome/ack/resync/ping/pong、plan approval 消息校验与有上限 UTF-8 frame codec；完整网络服务握手/广播仍未实现。
 - `packages/voxel-core`：确定性 14×14 岛、原子事务、玩家/AI 建造区规则、快照和 replica commit 应用。
 - `packages/worldd`：内存权威协调器原型，包含 `clientId + seq` 幂等、revision 检查；不包含 WAL、网络监听或身份认证。
+- `packages/companion-schema`（第二阶段草案）：versioned PersonaCard、CompanionInstance、HomePlotGrant 和只读异步 Visit contract；不包含 AI runtime、账号或联网串门。
 
 桌面模拟器已可本地运行；真实 Android AR 页面尚未宣称完成。后续 Android 交付按可手动安装 APK 规划，不依赖 ADB；先通过 capability detection 覆盖 ARCore/WebXR 与打印标记 provider，不为 Tab S8 写专用逻辑。真实设备矩阵、HTTPS/WSS 配对与 M0 录屏仍需实测。
 
