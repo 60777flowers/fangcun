@@ -2,6 +2,8 @@
 node_modules/
 dist/
 build/
+*.tsbuildinfo
+coverage/
 *.log
 .DS_Store
 Thumbs.db
@@ -14,10 +16,13 @@ preview/patch*.mjs
 preview/splice*.mjs
 preview/apply*.mjs
 
-# 第三方参考源码（克隆留档，体积大，按需自行拉取）
+# 第三方参考源码/素材（克隆留档，体积大或权利未核实，不进入发布仓库）
 refsrc/
+MC_mod参考/
+MC_Mod/
+MC_mod/
 
-# 视觉参考图已入库（项目负责人确认）：仅作设计参考，不属于 MIT 许可范围
+# 视觉参考图当前已跟踪，但公开再分发权利链尚未确认；此注释不构成许可
 # 注意：模型文件仍然不入库（见下方 *.vrm）
 
 # 本地环境

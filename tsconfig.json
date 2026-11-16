@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/ar-provider" },
+    { "path": "./packages/world-schema" },
+    { "path": "./packages/protocol" },
+    { "path": "./packages/voxel-core" },
+    { "path": "./packages/worldd" }
+  ]
+}

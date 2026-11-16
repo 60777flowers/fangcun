@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#101716">
+  <title>Voxel Sandbox · Desktop Preview</title>
+  <link rel="stylesheet" href="/apps/simulator/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#world" aria-label="Voxel Sandbox home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>FIELD<span class="brand-light"> / WORLD</span></span>
+      </a>
+      <div class="topbar-status">
+        <span class="preview-label"><span class="status-dot"></span>DESKTOP PREVIEW</span>
+        <span class="divider" aria-hidden="true"></span>
+        <span class="ar-state"><span class="ar-icon" aria-hidden="true">AR</span>AR unavailable</span>
+      </div>
+    </header>
+
+    <section class="workspace" id="world" aria-labelledby="page-title">
+      <div class="world-column">
+        <div class="world-heading">
+          <div>
+            <p class="eyebrow">LOCAL SANDBOX <span class="eyebrow-line"></span> WORLD 01</p>
+            <h1 id="page-title">A little room<br>to <em>make.</em></h1>
+          </div>
+          <p class="world-note">A small island, an open sky.<br>Build something that belongs here.</p>
+        </div>
+
+        <div class="scene-wrap">
+          <div class="scene-meta" aria-hidden="true">
+            <span>ISLAND / 14 × 14</span>
+            <span class="scene-meta-right">LOCAL WORLD <span class="live-dot"></span></span>
+          </div>
+          <canvas id="world-canvas" width="900" height="610" tabindex="0" role="group" aria-label="Isometric voxel island, 14 columns by 14 rows. Use the grid below to focus a tile, then place or break blocks."></canvas>
+          <div class="scene-bottom" aria-hidden="true">
+            <span>CLICK A TILE TO SELECT</span>
+            <span>X / Z · Y ≥ 4 BUILD ZONE</span>
+          </div>
+          <p id="canvas-status" class="sr-only" role="status" aria-live="polite"></p>
+        </div>
+
+        <div class="world-stats" aria-label="World statistics">
+          <div class="stat"><span class="stat-label">REVISION</span><strong id="world-rev">00</strong></div>
+          <div class="stat"><span class="stat-label">BLOCKS</span><strong id="block-count">784</strong></div>
+          <div class="stat stat-world"><span class="stat-label">WORLD ID</span><strong id="world-id">local-preview</strong></div>
+          <span class="stats-note">Changes are local to this browser session.</span>
+        </div>
+
+        <div class="grid-access">
+          <div class="grid-access-heading">
+            <div><span class="eyebrow">KEYBOARD ACCESS</span><span class="grid-access-help">Focus a tile, then use Place or Break.</span></div>
+            <span class="grid-access-size">14 × 14</span>
+          </div>
+          <div class="tile-grid" id="tile-grid" role="group" aria-label="14 by 14 island tile selection"></div>
+        </div>
+      </div>
+
+      <aside class="tool-rail" aria-label="Build tools">
+        <section class="tool-section material-section" aria-labelledby="materials-title">
+          <div class="section-heading"><span class="section-index">01</span><h2 id="materials-title">Material</h2><span class="heading-rule"></span></div>
+          <p class="section-caption">Choose a block for your next move.</p>
+          <div class="materials" role="radiogroup" aria-label="Block material">
+            <button class="material-option is-selected" type="button" role="radio" aria-checked="true" data-material="planks" aria-label="Oak planks, selected">
+              <span class="swatch swatch-planks" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Oak planks</strong><small>PLANKS</small></span><span class="material-key">1</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="stone" aria-label="Stone">
+              <span class="swatch swatch-stone" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Stone</strong><small>STONE</small></span><span class="material-key">2</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="glass" aria-label="Glass">
+              <span class="swatch swatch-glass" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Glass</strong><small>GLASS</small></span><span class="material-key">3</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="leaves" aria-label="Leaves">
+              <span class="swatch swatch-leaves" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Leaves</strong><small>LEAVES</small></span><span class="material-key">4</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="tool-section action-section" aria-labelledby="action-title">
+          <div class="section-heading"><span class="section-index">02</span><h2 id="action-title">Action</h2><span class="heading-rule"></span></div>
+          <p class="section-caption">Target <span id="target-coord">No tile selected</span></p>
+          <div class="action-buttons">
+            <button class="primary-action" id="place-button" type="button" disabled><span class="action-glyph" aria-hidden="true">＋</span>Place block</button>
+            <button class="secondary-action" id="break-button" type="button" disabled><span class="action-glyph break-glyph" aria-hidden="true">−</span>Break block</button>
+          </div>
+          <p class="action-hint"><span aria-hidden="true">↳</span> Build cells begin above the grass, at y 4.</p>
+          <div class="mode-switch" role="group" aria-label="Tile click mode">
+            <button type="button" class="mode-button is-active" data-mode="select" aria-pressed="true">Select</button>
+            <button type="button" class="mode-button" data-mode="place" aria-pressed="false">Place on click</button>
+            <button type="button" class="mode-button" data-mode="break" aria-pressed="false">Break on click</button>
+          </div>
+        </section>
+
+        <section class="tool-section proposal-section" aria-labelledby="proposal-title">
+          <div class="section-heading"><span class="section-index">03</span><h2 id="proposal-title">AI build proposal</h2><span class="heading-rule"></span></div>
+          <p class="section-caption">Browser-generated AI-style plan. Nothing is placed until you confirm.</p>
+          <form id="proposal-form" class="proposal-form">
+            <label class="sr-only" for="proposal-prompt">Describe a small build</label>
+            <input id="proposal-prompt" name="prompt" type="text" maxlength="120" autocomplete="off" placeholder="A small cabin by the shore" value="A small cabin">
+            <button class="generate-button" type="submit"><span aria-hidden="true">✳</span>Generate preview</button>
+          </form>
+          <div id="proposal-panel" class="proposal-panel" hidden aria-live="polite">
+            <div class="proposal-summary"><span class="proposal-state"><span class="proposal-dot"></span>PREVIEW ONLY</span><span id="proposal-rev" class="proposal-rev"></span></div>
+            <p id="proposal-description" class="proposal-description"></p>
+            <div class="proposal-count-row"><span>Proposed cells</span><strong id="proposal-count">0</strong></div>
+            <div class="proposal-count-row"><span>Skipped occupied</span><strong id="proposal-skipped">0</strong></div>
+            <div class="proposal-count-row"><span>Materials</span><strong id="proposal-materials">—</strong></div>
+            <p id="proposal-stale" class="proposal-stale" hidden>World changed since this preview. Regenerate before confirming.</p>
+            <div class="proposal-actions"><button id="confirm-proposal" class="confirm-button" type="button">Confirm build</button><button id="cancel-proposal" class="cancel-button" type="button">Cancel</button></div>
+          </div>
+          <p class="proposal-footnote">Generated locally with a fixed set of safe build patterns. No AI service or network request is used.</p>
+        </section>
+
+        <footer class="rail-footer"><span class="footer-mark" aria-hidden="true">F</span><span>FANGCUN <span>·</span> EXPERIMENTAL DESKTOP VIEW</span></footer>
+      </aside>
+    </section>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script type="importmap">
+    {
+      "imports": {
+        "@fangcun/world-schema": "../../packages/world-schema/dist/index.js",
+        "@fangcun/protocol": "../../packages/protocol/dist/index.js",
+        "@fangcun/voxel-core": "../../packages/voxel-core/dist/index.js"
+      }
+    }
+  </script>
+  <script type="module" src="/apps/simulator/app.js"></script>
+</body>
+</html>

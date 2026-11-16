@@ -1,7 +1,9 @@
-# 桌面 AR 微缩 Minecraft：调查报告 v2
+# 桌面 AR 微缩 Minecraft：调查报告档案 v2
+
+> **状态：历史调查材料，不是当前实施真源。** 用户已确认物理桌面 AR 方块世界、玩家参与建造、Android ARCore/WebXR 优先、单个 3D 大肥鱼；真实 PC Minecraft、Windows 独立桌宠窗口、iOS 真 AR 均不在 v0。当前范围/接口/验收见 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md)，独立审核见 [docs/REVIEW.md](docs/REVIEW.md)。本报告中的 AR SDK 能力/许可、M0 指标、尺寸、估时和“待决”表必须按证据重新验证，不构成已经实现或已获许可的声明。
 
 > 2026-11-16 ｜ v1 见 `reports/REPORT-v1-desktop-pc.md`（保留，不再维护）
-> 本版根据**效果图**重写。开发细节见 **[docs/DEV.md](docs/DEV.md)**。
+> 本版根据效果图形成的**历史调查快照**；主张、工作量和 SDK 结论不得视为当前验证结果。实现真源见 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md)，审核见 [docs/REVIEW.md](docs/REVIEW.md)。
 
 ---
 
@@ -68,7 +70,7 @@
 > **不做这两样，AR 一定"贴纸感"；做了，同一几何立刻变"模型"。这是全项目 ROI 最高的 15 行代码。**
 > 另外调参经验：移轴强度 `k≈2/高度`、清晰带 `r≈0.50` 是"岛清晰、远近虚"的甜点；`k=5` 会把岛本身也糊掉。
 
-> **实测结论：渲染完全不是瓶颈。** 一个 1,300 三角形的微缩世界对中端手机毫无压力。瓶颈在 **①像不像（美术）②AR 钉不钉得住（锚定）**。
+> **已知证据边界：**本机 headless Chrome/PC 截图只测得静态场景的几何规模，不能推出中端手机 GPU、热态或 AR 合成性能。手机端瓶颈、角色/阴影成本及锚定稳定性均待 M0/M6 真机测量。
 > 复现：`cd preview && npm i && node shot.mjs`
 
 ---
@@ -112,17 +114,17 @@
 ### 3.4 可复用的基础设施（真正能省工的部分）
 | 层 | 用什么 | 说明 |
 |---|---|---|
-| 3D 渲染 | **three.js r187**（MIT） | ✅ M0 已验证 |
-| **AR** | three.js 自带 **`ARButton` + WebXR hit-test**（官方示例仅 40 行，已核验源码） | **唯一同时满足"免费 + 有平面检测 + 生态最大"的组合** |
-| 移轴/景深 | `VerticalTiltShiftShader` + `HorizontalTiltShiftShader`（r187 自带）、`postprocessing` 的 `DepthOfFieldEffect`（Zlib） | **M0 已用上，见 §2** |
-| 体素 | 自写 mesher（M0 已写，444 方块 → 1,300 三角形 / 12 draw call） | 世界很小，不必上引擎 |
+| 3D 渲染 | **three.js r187**（MIT） | PC headless 静态 M0 已运行；不代表 WebXR/移动端已验证 |
+| **AR** | Android 候选：three.js `ARButton` + WebXR hit-test | 调查候选，须经目标机 spike 验证 |
+| 移轴/景深 | `VerticalTiltShiftShader` + `HorizontalTiltShiftShader`（r187 自带）、`postprocessing` 的 `DepthOfFieldEffect`（Zlib） | 静态预览用过；WebXR 相机合成路径另行处理 |
+| 体素 | 自写 mesher（静态 M0：444 方块 → 1,300 三角形 / 12 draw call） | 尚未包含动态重建/正式核心包 |
 | 标记物 AR | `js-aruco2` 2.0.0、`jsqr` 1.4.0、`mind-ar` 1.2.5 | ⚠️ **见 §4 的坑** |
 
-**拼装工作量：3–5 人日**（G 的估算，与我 M0 的实测一致）。
+**历史估计：3–5 人日，未经端到端实测，不作为排期。** M0 静态场景截图不验证 WebXR、LAN 安全部署、真机锚定或 AR 渲染集成；当前排期以 M0 spike 的实际结果重新估算。
 
 ---
 
-## 4. 手机 AR 的现实约束：**iOS 分叉必须现在决定**
+## 4. 手机 AR 现实约束（历史调查；iOS 不属于当前 v0）
 
 | 平台 | WebXR `immersive-ar` | 证据 |
 |---|---|---|
@@ -130,46 +132,45 @@
 | **iOS Safari** | ❌ **3.2 → 27.2 全版本不支持** | caniuse 原始 JSON 逐版本 `n`；**WebKit bug 208988 已于 2026-04-01 关闭**，工程师注明只覆盖 visionOS/WPE/WebKitGTK，**iOS 不在其中** |
 | 微信/抖音内置浏览器 | ❌ 基本跑不了 WebXR | — |
 
-### 4.1 但 iOS 不是没救：8th Wall 已经开源了（这条推翻了我上一版的判断）
+### 4.1 历史 iOS 方案假设：8th Wall / SLAM（当前未经核实，不作选型结论）
 
-> ⚠️ **一处需要更正的事实**：我上一版写"8th Wall 已死、直接作废"——**这是错的**（来源是 G 报告的过时结论）。
-> 我核了官方公告与文档：`8thwall.com` → **`8thwall.org`**，"Goodbye 8thwall.com. Hello 8thwall.org."，**托管服务下线但同时以 MIT 开源并免费商用**；npm 上 `@8thwall/engine@0.1.0` 已在。
+> ⚠️ **历史调查中的结论互相冲突，尚未形成可采信的许可/能力意见。** 本节只保留当时的调查记录；`engine` 与 SLAM `binary` 的实际许可、能力、版本、取得方式和商业/再分发条件都须重新核验。不要据此宣称“SLAM 已 MIT 开源/免费商用”，也不要据此将其作为 iOS 首发依赖。
 
 | 事实 | 值 |
 |---|---|
-| 许可 | **MIT，免费商用**（含带 SLAM 的二进制） |
-| 平台要求 | **iOS Safari 16.4+**、Android；**完全不碰 WebXR**（只依赖 WebGL / getUserMedia / WASM SIMD） |
-| 能力 | 6DOF SLAM、平面检测、图像追踪 |
-| 代价 | 引入一个第三方引擎（体积/构建复杂度），但换来 **iOS 真 AR** |
+| 许可 | **未核实**；旧记录“MIT 含 SLAM binary”与其他材料冲突 |
+| 平台要求 | **历史来源声称 iOS Safari 16.4+**；固定版本当前未核实 |
+| 能力 | **历史来源声称** 6DOF SLAM/平面检测/图像追踪；需 POC 复核 |
+| 代价 | 体积、许可、构建方式、持续维护状态均待核实 |
 
-→ **"最省事覆盖双平台真 AR"的答案就是它。** 备选：Zappar（商业授权，定价页未取到）、自研 marker（不推荐，见下）。
+→ **旧调查意见已撤回，不能据此选择双平台 SDK。** v0 只按 Android WebXR 做风险验证；iOS 另过许可与真机门禁。
 
 ### 4.2 一个会改变选型的细节：**WebXR 里你改不了摄像头画面**
 
-- WebXR 的 AR 会话把相机画面交给浏览器合成，**页面拿不到摄像头纹理** → **做不了"真实世界的移轴"**（效果图里那个桌面虚化，恰恰需要后期处理整张画面）。
-- `getUserMedia` 路线（画布 + 摄像头视频当背景）**可以**对整屏做后期 → **移轴、调色、噪点都能上**。
+- WebXR immersive AR 通常由浏览器/系统合成相机背景；网页未必能读取摄像头纹理。v0 不把“真实背景可后期”作为 WebXR 能力承诺，先以目标设备的官方 API/POC 验证。
+- 独立 `getUserMedia` 合成可能允许对视频画面做后期，但不等价于稳定 6DOF 平面跟踪/桌面锚定；需分别验证跟踪、权限、性能和许可。
 
 > 这意味着：**要效果图那种"照片级微缩感"，纯 WebXR 反而不够**；`getUserMedia` 路线（8th Wall 也属于这路）在**画质**上更自由，代价是锚定精度要自己扛。
 
 ### 4.3 被否掉的两条路
 
 1. **MindAR / AR.js 做桌面放置** —— ❌ 它们**没有平面检测**（只有图像/人脸/标记/地理）。而且 MindAR 的 npm 停在 **2024-01**、仓库 2024-06 后无提交。**最容易踩的坑**，因为 demo 最像 WebAR。
-2. **只做 Android** —— 能省 **1.5–2.5 周**（约占整项目 15–25%），**不是"一半"**。如果目标用户里有 iPhone，这笔省得不值。
+2. **只做 Android** —— 旧报告估算可省 1.5–2.5 周，但未实测；v0 已确认 Android 优先，工期按 M0 结果另行估算。
 
-**架构含义（不变）**：AR 锚定做成**可插拔的 `AnchorProvider`**（`webxr` / `8thwall` / `photo`），渲染层不知道底下用哪种。
+**历史架构建议（未实现）**：旧稿曾建议抽象多种 `AnchorProvider`；当前 v0 只要求 Android WebXR POC，不为尚未批准/核实的 8th Wall 或 photo provider 提前实现抽象层。后续 provider 必须先定义能力、许可和真机验收。
 
 **三条路径的代价**：
 | 路径 | 内容 | 工作量 | 复用 |
 |---|---|---|---|
-| **甲：纯合成** | M0 已做（照片背景 + 触摸建造） | 0.5–1 人日 | — |
-| **乙：WebXR 真 AR** | 甲的场景套 hit-test | **3–5 人日** | **与甲 100% 复用** |
-| 丙：Unity AR Foundation | 两端都行 | 8–12 人日 | **完全重写**（M0 作废） |
+| **甲：纯合成** | 旧方案设想的照片背景 + 触摸建造；M0 并未实现摄像头合成或触摸建设 | 历史估计，不作排期 | 未验证 |
+| **乙：WebXR 真 AR** | Android WebXR hit-test/anchor POC | 历史估计 3–5 人日，未经实测 | 需 M0 验证后决定复用比例 |
+| 丙：Unity AR Foundation | 曾调查的替代方向 | 历史估计 8–12 人日，未经实测 | 是否重写尚未评估 |
 
-> **建议：甲 → 乙（Android）→ 加 `8thwall` provider 补 iOS。** 丙只在"确定要上架且要极致锚定"时才考虑。
+> **当前决定：先做 Android WebXR spike；iOS 方案不在 v0，且不据此推荐 8th Wall。** Unity/marker/合成路线若未来需要，须独立评估许可和目标设备。
 
 ---
 
-## 5. 目标架构（详见 docs/DEV.md §4）
+## 5. 历史目标架构草案（实施请勿照抄；以 docs/IMPLEMENTATION-PLAN.md 为准）
 
 ```
 手机（浏览器）: AR 客户端 = 锚定 + 体素渲染 + **3D 角色** + 点按输入 + 气泡 UI
@@ -211,7 +212,7 @@ PC:            DSH = 大肥鱼的大脑（persona + voxel_* 工具 + 记忆）
 
 ---
 
-## 8. 两周验证路径（按"最早证伪"排序）
+## 8. 历史两周验证草案（非排期承诺；待重新估算）
 
 | 天 | 做什么 | 证伪什么 |
 |---|---|---|
@@ -227,15 +228,17 @@ PC:            DSH = 大肥鱼的大脑（persona + voxel_* 工具 + 记忆）
 
 ---
 
-## 9. 待决（等你拍板）
+## 9. 当前决策与仍待验证项
 
-| # | 问题 | 选项 | 我的建议 |
+| # | 状态 | 决策/验证项 | 当前口径 |
 |---|---|---|---|
-| D1 | **先 Android 还是必须 iOS** | A) Android 优先，iOS 用 photo 模式兜底<br>B) 一开始就做 marker（两端一致） | **A**：先把"像不像 + 好不好玩"验证掉，AR 精度最后再补 |
-| D2 | **世界权威在 PC 还是手机** | A) PC（能接 DSH）<br>B) 手机（能脱离 PC 单机玩） | **A 先做，B 留到 v0.3**（ARCH 已把 core 写成纯函数，将来可搬） |
-| D3 | **要不要真 MC 语义** | A) 自建体素（建造玩具）<br>B) 真 MC 服务端（合成/怪物） | **A**；B 作为 v2 "硬核模式" |
-| D4 | **大肥鱼美术** | 自绘 / 买断 / 授权 / 先用占位 | **先用占位跑通全链路**，等玩法验证完再投美术 |
-| D5 | **AI 的"人格"要多强** | 只做建造助手 / 有性格会吐槽 / 会主动关心你 | 先做"会吐槽的建造助手"，**人格靠 prompt + 场景内气泡呈现**，不急着做长期记忆 |
+| D1 | **已确认** | 产品形态 | 真实物理桌面 AR 微缩方块沙盒；玩家和大肥鱼 AI 同场建设 |
+| D2 | **已确认** | v0 平台 | Android ARCore/WebXR 优先；不承诺 iOS 同期 |
+| D3 | **已确认** | v0 世界 | 自建有限体素世界，不接真实 MC server |
+| D4 | **待验证/发行阻断** | 角色资产 | 单个 3D 大肥鱼是产品目标；运行时/发行模型必须有可审计授权，性能待目标机测量 |
+| D5 | **待实现验证** | AI 共建体验 | 先用受限 build plan → 用户确认 → commit；不默认主动关怀或长期记忆 |
+| D6 | **待技术验证** | LAN 配对与安全上下文 | M0 实机验证 HTTPS/WSS/配对凭证；不得据旧草案承诺零配置 |
+| D7 | **后续产品** | iOS AR、Windows 独立桌宠、真实 PC Minecraft | 不纳入 v0；分别立项和验收 |
 
 ---
 
@@ -243,8 +246,8 @@ PC:            DSH = 大肥鱼的大脑（persona + voxel_* 工具 + 记忆）
 
 | 报告 | 回答什么 | 状态 |
 |---|---|---|
-| `report-e-ar-stack.md` | AR 底座选型（WebXR vs marker vs 陀螺仪）、桌面融合（阴影/光照/遮挡/景深）、性能预算与体素渲染方案 | 进行中 |
-| `report-f-world-sync.md` | 世界权威三方案打分、真 MC 镜像的延迟数字、体素数据结构与同步协议、AI 建造的 JSON schema | 进行中 |
-| `report-g-ar-mc-prior-art.md` | 桌面 AR 玩 MC 的既有实现考古（Minecraft Earth buildplate 全解剖、GitHub 全景、可复用库、死路清单） | 进行中 |
+| `report-e-ar-stack.md` | AR 底座、桌面融合与性能调查 | 调查档案；设备支持、8th Wall 许可/能力需重核 |
+| `report-f-world-sync.md` | 世界权威、同步与建造 schema | 调查档案；协议伪代码不与新计划契约兼容，不得直接照抄 |
+| `report-g-ar-mc-prior-art.md` | AR/Minecraft 历史先例 | 调查档案；不代表当前选型已验证 |
 
-> 本报告 §3/§4 已给出**初步结论**；三份报告到位后会把"待定稿"的地方替换成实测数字（尤其：iOS 兜底的真实可行性、hit-test 在真桌上的稳定性、AI 建造指令的最优粒度）。
+> 本报告及子报告保留了**调查快照与未结论假设**；不得将旧稿中的“进行中/待定稿”或技术推测当作当前开发状态。AR 真机锚定、LAN TLS/WSS、AI 协作与性能需按 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) 重新验证。

@@ -1,4 +1,7 @@
-# 桌面 MC × AI 陪玩：全量调查计划
+# 桌面 MC × AI 陪玩：历史调查计划
+
+> **状态：调查档案，非当前产品需求或实施计划。** 用户已确认当前产品是“在真实物理桌面上以 AR 呈现大肥鱼 AI 建设的方块世界，并由玩家参与建设”，Android ARCore/WebXR 优先。v0 不接真实 PC Minecraft。当前实施范围见 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md)，审核记录见 [docs/REVIEW.md](docs/REVIEW.md)。
+> 本文中的原始 MC/手机问题用于保留需求来源，不得覆盖已确认的当前产品定义。
 
 > 目标（用户原话复述）：做一个「在桌面玩 Minecraft，并且能让 AI 一起玩」的东西。
 > 需要全量调查：(1) 桌面 MC 的开源项目；(2)「大肥鱼陪玩 MC」所用的 MC / mod。
