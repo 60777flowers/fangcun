@@ -1,4 +1,4 @@
-import { WORLD_SPEC, isCoord, type BlockId, type Coord } from "@fangcun/world-schema";
+import { BLOCK_IDS, WORLD_SPEC, isCoord, type BlockId, type Coord } from "@fangcun/world-schema";
 
 export const COMPANION_SCHEMA_VERSION = 1 as const;
 
@@ -25,17 +25,24 @@ export type CompanionInstance = Readonly<{
   createdAt: string;
 }>;
 
+export type CellBounds = Readonly<{ min: Coord; maxExclusive: Coord }>;
+
+/** Validated grant-shaped data; authorization still requires loading it from trusted worldd storage. */
 export type HomePlotGrant = Readonly<{
   schemaVersion: 1;
+  grantId: string;
+  grantRev: number;
   plotId: string;
   worldId: string;
   ownerUserId: string;
+  approvedByUserId: string;
   companionId: string;
-  bounds: Readonly<{ min: Coord; max: Coord }>;
+  bounds: CellBounds;
   allowedBlockIds: readonly BlockId[];
   maxBlocksPerPlan: number;
   maxBlocksPerDay: number;
   createdAt: string;
+  expiresAt: string;
   revokedAt?: string;
 }>;
 
@@ -65,7 +72,7 @@ export type VisitEventV1 = Readonly<{
 
 export type ValidationResult<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: string }>;
 
-const BLOCK_ID_SET = new Set<string>(["grass", "dirt", "stone", "planks", "log", "leaves", "sand", "glass"]);
+const BLOCK_ID_SET = new Set<string>(BLOCK_IDS);
 const VISIT_SCOPE = new Set(["read-summary", "send-greeting"]);
 const VISIT_STATUSES = new Set(["pending", "accepted", "declined", "expired", "revoked"]);
 
@@ -106,25 +113,43 @@ export function validateCompanionInstance(input: unknown): ValidationResult<Comp
 }
 
 export function isInsidePlot(grant: HomePlotGrant, coord: Coord): boolean {
-  const { min, max } = grant.bounds;
-  return isCoord(coord) && coord.x >= min.x && coord.x < max.x && coord.y >= min.y && coord.y < max.y && coord.z >= min.z && coord.z < max.z;
+  const { min, maxExclusive } = grant.bounds;
+  return isCoord(coord) && coord.x >= min.x && coord.x < maxExclusive.x && coord.y >= min.y && coord.y < maxExclusive.y && coord.z >= min.z && coord.z < maxExclusive.z;
+}
+
+export function isCanonicalUtc(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+export function isGrantActive(grant: HomePlotGrant, nowMs: number): boolean {
+  return !grant.revokedAt && Number.isFinite(nowMs) && nowMs >= Date.parse(grant.createdAt) && nowMs < Date.parse(grant.expiresAt);
 }
 
 export function validateHomePlotGrant(input: unknown): ValidationResult<HomePlotGrant> {
-  if (!record(input) || !exactKeys(input, ["schemaVersion", "plotId", "worldId", "ownerUserId", "companionId", "bounds", "allowedBlockIds", "maxBlocksPerPlan", "maxBlocksPerDay", "createdAt", ...(Object.hasOwn(input, "revokedAt") ? ["revokedAt"] : [])])) return { ok: false, error: "invalid_plot_shape" };
+  if (!record(input) || !exactKeys(input, ["schemaVersion", "grantId", "grantRev", "plotId", "worldId", "ownerUserId", "approvedByUserId", "companionId", "bounds", "allowedBlockIds", "maxBlocksPerPlan", "maxBlocksPerDay", "createdAt", "expiresAt", ...(Object.hasOwn(input, "revokedAt") ? ["revokedAt"] : [])])) return { ok: false, error: "invalid_plot_shape" };
   if (input.schemaVersion !== 1 || !text(input.plotId) || !text(input.worldId) || !text(input.ownerUserId) || !text(input.companionId)
-    || !record(input.bounds) || !exactKeys(input.bounds, ["min", "max"]) || !isCoord(input.bounds.min) || !isCoord(input.bounds.max)
-    || !input.bounds.min || !input.bounds.max) return { ok: false, error: "invalid_plot" };
+    || !text(input.grantId) || !Number.isSafeInteger(input.grantRev) || (input.grantRev as number) < 1
+    || !text(input.approvedByUserId) || !record(input.bounds) || !exactKeys(input.bounds, ["min", "maxExclusive"]) || !isCoord(input.bounds.min) || !isCoord(input.bounds.maxExclusive)
+    || !isCanonicalUtc(input.createdAt) || !isCanonicalUtc(input.expiresAt) || Date.parse(input.expiresAt as string) <= Date.parse(input.createdAt as string)
+    || (input.revokedAt !== undefined && (!isCanonicalUtc(input.revokedAt) || Date.parse(input.revokedAt as string) < Date.parse(input.createdAt as string)))
+    || !input.bounds.min || !input.bounds.maxExclusive) return { ok: false, error: "invalid_plot" };
   const min = input.bounds.min as Coord;
-  const max = input.bounds.max as Coord;
+  const max = input.bounds.maxExclusive as Coord;
   const { origin, size } = WORLD_SPEC;
-  if (![min, max].every((coord) => coord.x >= origin.x && coord.x < origin.x + size.x && coord.y >= WORLD_SPEC.terrainTopY && coord.y < origin.y + size.y && coord.z >= origin.z && coord.z < origin.z + size.z)
-    || max.x <= min.x || max.y <= min.y || max.z <= min.z) return { ok: false, error: "plot_out_of_bounds" };
+  // Bounds are half-open AABBs: min must reference an in-world build cell;
+  // max may equal the exclusive world edge.
+  if (min.x < origin.x || min.x >= origin.x + size.x || min.y < WORLD_SPEC.terrainTopY || min.y >= origin.y + size.y || min.z < origin.z || min.z >= origin.z + size.z
+    || max.x > origin.x + size.x || max.y > origin.y + size.y || max.z > origin.z + size.z
+    || max.x <= min.x || max.y <= min.y || max.z <= min.z
+    || max.x - min.x > 6 || max.y - min.y > 8 || max.z - min.z > 6
+    || (max.x - min.x) * (max.y - min.y) * (max.z - min.z) > 288) return { ok: false, error: "plot_out_of_bounds" };
   if (!Array.isArray(input.allowedBlockIds) || input.allowedBlockIds.length < 1 || input.allowedBlockIds.length > 8 || !input.allowedBlockIds.every((id) => typeof id === "string" && BLOCK_ID_SET.has(id))) return { ok: false, error: "invalid_plot_blocks" };
   if (!Number.isSafeInteger(input.maxBlocksPerPlan) || (input.maxBlocksPerPlan as number) < 1 || (input.maxBlocksPerPlan as number) > 64
     || !Number.isSafeInteger(input.maxBlocksPerDay) || (input.maxBlocksPerDay as number) < (input.maxBlocksPerPlan as number) || (input.maxBlocksPerDay as number) > 256
-    || !isoDate(input.createdAt) || (input.revokedAt !== undefined && !isoDate(input.revokedAt))) return { ok: false, error: "invalid_plot_budget_or_date" };
-  return { ok: true, value: Object.freeze({ ...input, bounds: Object.freeze({ min: Object.freeze({ ...min }), max: Object.freeze({ ...max }) }), allowedBlockIds: Object.freeze([...input.allowedBlockIds]) }) as HomePlotGrant };
+    || (input.revokedAt !== undefined && Date.parse(input.revokedAt as string) < Date.parse(input.createdAt as string))) return { ok: false, error: "invalid_plot_budget_or_date" };
+  if (new Set(input.allowedBlockIds).size !== input.allowedBlockIds.length) return { ok: false, error: "duplicate_plot_block" };
+  return { ok: true, value: Object.freeze({ ...input, bounds: Object.freeze({ min: Object.freeze({ ...min }), maxExclusive: Object.freeze({ ...max }) }), allowedBlockIds: Object.freeze([...input.allowedBlockIds]) }) as HomePlotGrant };
 }
 
 export function validateVisitInvitation(input: unknown): ValidationResult<VisitInvitationV1> {

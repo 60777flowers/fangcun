@@ -4,7 +4,7 @@ import { isInsidePlot, validateCompanionInstance, validateHomePlotGrant, validat
 
 const persona = { schemaVersion: 1, personaId: "playful-fish", version: 1, displayName: "大肥鱼", personaText: "调皮、温暖。", toneTags: ["playful"], allowedEmotes: ["wave", "happy"], memoryPolicy: "session-only" };
 const instance = { schemaVersion: 1, companionId: "fish-1", ownerUserId: "local-user", worldId: "world-1", personaId: "playful-fish", state: "idle", autonomyEnabled: true, createdAt: "2026-11-16T12:00:00.000Z" };
-const plot = { schemaVersion: 1, plotId: "home-1", worldId: "world-1", ownerUserId: "local-user", companionId: "fish-1", bounds: { min: { x: 0, y: 4, z: 0 }, max: { x: 4, y: 12, z: 4 } }, allowedBlockIds: ["planks", "glass", "leaves"], maxBlocksPerPlan: 32, maxBlocksPerDay: 128, createdAt: "2026-11-16T12:00:00.000Z" };
+const plot = { schemaVersion: 1, grantId: "grant-1", grantRev: 1, plotId: "home-1", worldId: "world-1", ownerUserId: "local-user", approvedByUserId: "local-user", companionId: "fish-1", bounds: { min: { x: 0, y: 4, z: 0 }, maxExclusive: { x: 4, y: 12, z: 4 } }, allowedBlockIds: ["planks", "glass", "leaves"], maxBlocksPerPlan: 32, maxBlocksPerDay: 128, createdAt: "2026-11-16T12:00:00.000Z", expiresAt: "2026-11-23T12:00:00.000Z" };
 
 test("persona cards are style-only data and reject capability-shaped extras", () => {
   assert.equal(validatePersonaCard(persona).ok, true);
@@ -24,7 +24,7 @@ test("home plot grants are bounded, budgeted, owner-bound and half-open", () => 
     assert.equal(isInsidePlot(valid.value, { x: 0, y: 4, z: 0 }), true);
     assert.equal(isInsidePlot(valid.value, { x: 4, y: 4, z: 0 }), false);
   }
-  assert.equal(validateHomePlotGrant({ ...plot, bounds: { min: { x: 0, y: 3, z: 0 }, max: { x: 4, y: 12, z: 4 } } }).ok, false);
+  assert.equal(validateHomePlotGrant({ ...plot, bounds: { min: { x: 0, y: 3, z: 0 }, maxExclusive: { x: 4, y: 12, z: 4 } } }).ok, false);
   assert.equal(validateHomePlotGrant({ ...plot, allowedBlockIds: ["command_block"] }).ok, false);
   assert.equal(validateHomePlotGrant({ ...plot, maxBlocksPerDay: 31 }).ok, false);
 });
