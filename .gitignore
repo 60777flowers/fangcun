@@ -1,0 +1,29 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+Thumbs.db
+
+# 临时/实验目录（不进库）
+_tmp/
+preview/_tmp/
+preview/patch*.json
+preview/patch*.mjs
+preview/splice*.mjs
+preview/apply*.mjs
+
+# 第三方参考源码（克隆留档，体积大，按需自行拉取）
+refsrc/
+
+# 视觉参考图：AI 生成的视频截图，带第三方平台水印
+# → 不随仓库分发，由项目负责人单独提供（见 README）
+效果图/
+
+# 本地环境
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/

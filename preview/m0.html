@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>M0 · 桌面微缩 Minecraft</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#14110e;}
+  canvas{display:block;}
+  #vignette{position:fixed;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse 62% 58% at 50% 48%, rgba(0,0,0,0) 38%, rgba(0,0,0,.30) 78%, rgba(0,0,0,.62) 100%);}
+#hint{position:fixed;left:12px;bottom:10px;color:#fff9;font:12px/1.6 ui-sans-serif,system-ui;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="vignette"></div>
+<div id="hint">M0 · 3D 角色（占位模型）+ 程序化贴图</div>
+<script type="importmap">
+{ "imports": {
+  "three": "./node_modules/three/build/three.module.js",
+  "three/addons/": "./node_modules/three/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { VerticalTiltShiftShader } from 'three/addons/shaders/VerticalTiltShiftShader.js';
+import { HorizontalTiltShiftShader } from 'three/addons/shaders/HorizontalTiltShiftShader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+/* ============================================================
+   1. 程序化像素贴图（16×16）—— 不依赖任何 Minecraft 官方素材
+   ============================================================ */
+const S = 16;
+function tex(draw, {repeat=true}={}) {
+  const c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d'); draw(g, c);
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = THREE.NearestFilter;
+  t.minFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const rnd = (a,b)=>a+Math.random()*(b-a);
+function noise(g, base, spread, n=80){
+  g.fillStyle = base; g.fillRect(0,0,S,S);
+  for(let i=0;i<n;i++){
+    const v = Math.floor(rnd(-spread, spread));
+    g.fillStyle = `rgba(${v>0?255:0},${v>0?255:0},${v>0?255:0},${Math.abs(v)/255})`;
+    g.fillRect(Math.floor(rnd(0,S)), Math.floor(rnd(0,S)), 1, 1);
+  }
+}
+const TEX = {
+  grass_top: tex(g=>{ noise(g,'#5f9c3a',40,120); for(let i=0;i<26;i++){g.fillStyle='rgba(120,175,70,.55)';g.fillRect(Math.floor(rnd(0,S)),Math.floor(rnd(0,S)),1,1);} }),
+  grass_side: tex(g=>{ noise(g,'#8a6240',30,70); g.fillStyle='#5f9c3a'; g.fillRect(0,0,S,4); for(let x=0;x<S;x++){ const h=3+Math.floor(rnd(0,3)); g.fillStyle= Math.random()>.5?'#6aa83f':'#568f34'; g.fillRect(x,0,1,h);} }),
+  dirt: tex(g=>{ noise(g,'#8a6240',30,90); for(let i=0;i<18;i++){g.fillStyle='rgba(70,48,30,.5)';g.fillRect(Math.floor(rnd(0,S)),Math.floor(rnd(0,S)),2,1);} }),
+  stone: tex(g=>{ noise(g,'#8d8d8d',26,110); }),
+  planks: tex(g=>{ noise(g,'#b3854f',16,50); g.strokeStyle='rgba(90,60,32,.55)'; for(let y=3;y<S;y+=4){g.beginPath();g.moveTo(0,y+.5);g.lineTo(S,y+.5);g.stroke();} g.fillStyle='rgba(90,60,32,.35)'; g.fillRect(7,0,1,S); }),
+  log: tex(g=>{ noise(g,'#6b4a2b',18,60); g.fillStyle='rgba(40,26,14,.55)'; for(let x=1;x<S;x+=3){g.fillRect(x,0,1,S);} }),
+  leaves: tex(g=>{ noise(g,'#3f7a33',38,140); for(let i=0;i<26;i++){g.fillStyle='rgba(20,45,16,.6)';g.fillRect(Math.floor(rnd(0,S)),Math.floor(rnd(0,S)),1,1);} }),
+  chest: tex(g=>{ noise(g,'#7a5230',12,25); g.fillStyle='#3b2a17'; g.fillRect(0,0,S,3); g.fillStyle='#d8b45a'; g.fillRect(7,7,2,3); g.fillRect(0,6,S,1); }),
+  tnt: tex(g=>{ g.fillStyle='#c2362f'; g.fillRect(0,0,S,S); g.fillStyle='#e8e3da'; g.fillRect(0,5,S,6); g.fillStyle='#2b2b2b'; g.font='bold 7px monospace'; g.fillText('TNT',1.5,10.5); g.fillStyle='#7d2420'; g.fillRect(0,14,S,2); }),
+  torch: tex(g=>{ g.fillStyle='#4a3520'; g.fillRect(6,4,4,12); g.fillStyle='#ffd76a'; g.fillRect(5,0,6,5); g.fillStyle='#fff3c0'; g.fillRect(6,1,4,2); }),
+  flower_w: tex(g=>{ g.fillStyle='#00000000'; g.clearRect(0,0,S,S); g.fillStyle='#f2f2ee'; g.fillRect(6,4,4,4); g.fillStyle='#ffe98a'; g.fillRect(7,5,2,2); }),
+  flower_y: tex(g=>{ g.clearRect(0,0,S,S); g.fillStyle='#ffd93b'; g.fillRect(6,4,4,4); g.fillStyle='#fff5b0'; g.fillRect(7,5,2,2); }),
+};
+
+/* ============================================================
+   2. 方块定义（只做效果图需要的 12 种）
+   ============================================================ */
+const BLOCKS = {
+  grass:   { top:'grass_top', side:'grass_side', bottom:'dirt',  opaque:true },
+  dirt:    { all:'dirt',   opaque:true },
+  stone:   { all:'stone',  opaque:true },
+  planks:  { all:'planks', opaque:true },
+  log:     { top:'planks', side:'log', bottom:'planks', opaque:true },
+  leaves:  { all:'leaves', opaque:true },
+  chest:   { all:'chest',  opaque:true },
+  tnt:     { all:'tnt',    opaque:true },
+  torch:   { all:'torch',  opaque:false, emissive:true },
+  flower_w:{ all:'flower_w', opaque:false, cross:true },
+  flower_y:{ all:'flower_y', opaque:false, cross:true },
+};
+
+/* ============================================================
+   3. 体素世界（22×22 不规则岛，3 层泥土 + 石头）
+   ============================================================ */
+const N = 14, CX = N/2, CZ = N/2;   // MCE 实测：桌上占位 38-48cm，岛上 10-14 格才像玩具
+const world = new Map();                       // key(x,y,z) -> blockName
+const K = (x,y,z)=>`${x},${y},${z}`;
+const set = (x,y,z,b)=>{ if(b) world.set(K(x,y,z),b); else world.delete(K(x,y,z)); };
+const get = (x,y,z)=>world.get(K(x,y,z)) || null;
+
+// 简易值噪声，用于岛的不规则边缘
+function hash2(x,z){ const s = Math.sin(x*127.1 + z*311.7)*43758.5453; return s - Math.floor(s); }
+function vnoise(x,z){
+  const xi=Math.floor(x), zi=Math.floor(z), xf=x-xi, zf=z-zi;
+  const u=xf*xf*(3-2*xf), v=zf*zf*(3-2*zf);
+  const a=hash2(xi,zi), b=hash2(xi+1,zi), c=hash2(xi,zi+1), d=hash2(xi+1,zi+1);
+  return (a*(1-u)+b*u)*(1-v) + (c*(1-u)+d*u)*v;
+}
+function insideIsland(x,z){
+  const dx=(x+0.5)-CX, dz=(z+0.5)-CZ;
+  const ang=Math.atan2(dz,dx);
+  const r=Math.sqrt(dx*dx+dz*dz);
+  const wobble = vnoise(Math.cos(ang)*2.5+10, Math.sin(ang)*2.5+10)*0.30 + vnoise(x*0.35,z*0.35)*0.16;
+  return r < CX*0.78*(0.86+wobble);
+}
+
+for (let x=0;x<N;x++) for (let z=0;z<N;z++){
+  if (!insideIsland(x,z)) continue;
+  set(x, 0, z, 'grass');
+  set(x,-1, z, 'dirt');
+  set(x,-2, z, 'dirt');
+  const deep = vnoise(x*0.5+5, z*0.5+5);
+  if (deep > 0.45) set(x,-3,z,'stone');
+  if (deep > 0.72) set(x,-4,z,'stone');
+}
+
+// —— 木板房骨架（5×5 墙、正面敞开、有门洞、里面有火把）
+(function house(ox, oz){
+  const W=5, D=5, H=3;
+  for(let y=0;y<H;y++) for(let x=0;x<W;x++) for(let z=0;z<D;z++){
+    const edge = x===0||x===W-1||z===0||z===D-1;
+    if(!edge) continue;
+    if (z===D-1) continue;                            // 正面完全敞开：像"骨架/未完工"
+    if (z===0 && x>=1 && x<=W-2 && y<2) continue;      // 后墙开窗
+    if ((x===0||x===W-1) && z===2 && y===1) continue;  // 侧墙小窗
+    set(ox+x, 1+y, oz+z, 'planks');
+  }
+  set(ox+1,2,oz+1,'torch');
+})(4, 4);
+
+// —— 树（树干 + 树冠）
+(function tree(ox, oz){
+  for(let y=1;y<=3;y++) set(ox, y, oz, 'log');
+  const top = 4;
+  for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) for(let dy=-1;dy<=1;dy++){
+    const d = Math.abs(dx)+Math.abs(dz)+Math.abs(dy);
+    if (d>2) continue;
+    if (dx===0&&dz===0&&dy<=0) continue;
+    set(ox+dx, top+dy, oz+dz, 'leaves');
+  }
+  set(ox, top+2, oz, 'leaves');
+})(10, 4);
+
+// —— TNT 一排 + 箱子 + 花 + 火把
+set(9,1,9,'tnt'); set(10,1,9,'tnt'); set(9,1,10,'tnt');
+set(8,1,6,'chest');
+set(3,1,6,'torch');
+[[2,1,3],[6,1,2],[8,1,7],[11,1,5],[10,1,11],[4,1,10],[12,1,8],[2,1,8]].forEach(([x,y,z],i)=>{
+  set(x,y,z, i%2 ? 'flower_y' : 'flower_w');
+});
+
+/* ============================================================
+   4. three.js 场景
+   ============================================================ */
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xcbbda9, 46, 120);
+
+// 背景：柔和的室内光（避免出现"黑色天幕"）
+(function bg(){
+  const c=document.createElement('canvas'); c.width=64;c.height=512;
+  const g=c.getContext('2d');
+  const lg=g.createLinearGradient(0,0,0,512);
+  lg.addColorStop(0,'#4a3a2c'); lg.addColorStop(.42,'#9c8467'); lg.addColorStop(.72,'#c9b191'); lg.addColorStop(1,'#d9c4a5');
+  g.fillStyle=lg; g.fillRect(0,0,64,512);
+  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace;
+  scene.background = t;
+})();
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(CX - 5.6, 7.6, CZ + 16.4);
+camera.lookAt(CX + 0.6, 1.9, CZ - 0.4);
+
+// —— 光照：暖色低角度主光（左上）+ 天空/地面补光
+const sun = new THREE.DirectionalLight(0xffeacb, 3.2);
+sun.position.set(CX - 15, 15, CZ - 7);
+sun.target.position.set(CX, 0, CZ);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+const d = 14;
+Object.assign(sun.shadow.camera, { left:-d, right:d, top:d, bottom:-d, near:1, far:80 });
+sun.shadow.bias = -0.0007;
+sun.shadow.normalBias = 0.04;
+sun.shadow.radius = 4;
+scene.add(sun, sun.target);
+
+scene.add(new THREE.HemisphereLight(0xc6dcff, 0xcaa77a, 0.85));
+scene.add(new THREE.AmbientLight(0xfff3e0, 0.30));
+const rim = new THREE.DirectionalLight(0xffd9a8, 0.55);
+rim.position.set(CX + 16, 8, CZ + 14);
+scene.add(rim);
+
+/* —— 桌面：程序化"虚焦木纹"背景（画好后整体高斯模糊，模拟真实镜头景深） */
+function deskTexture(){
+  const w=1800,h=1800, c=document.createElement('canvas'); c.width=w;c.height=h;
+  const g=c.getContext('2d');
+  const grd=g.createLinearGradient(0,0,w*0.8,h);
+  grd.addColorStop(0,'#c8ab89'); grd.addColorStop(.42,'#dcc3a2'); grd.addColorStop(1,'#a98f72');
+  g.fillStyle=grd; g.fillRect(0,0,w,h);
+  // 木纹（细）
+  for(let i=0;i<520;i++){
+    g.strokeStyle=`rgba(${118+Math.random()*40|0},${90+Math.random()*30|0},${62+Math.random()*24|0},.08)`;
+    g.lineWidth=Math.random()*4+.8;
+    g.beginPath();
+    let y=Math.random()*h; g.moveTo(0,y);
+    for(let x=0;x<=w;x+=40){ y+=Math.sin(x*0.0035+i)*2.6; g.lineTo(x,y); }
+    g.stroke();
+  }
+  // 背景虚化物体（模拟桌上的杯子/杂物，只留色块与高光）
+  const blobs=[
+    [w*0.16,h*0.10,240,'rgba(238,232,220,.55)'],
+    [w*0.13,h*0.07,150,'rgba(252,250,244,.75)'],
+    [w*0.88,h*0.20,300,'rgba(150,120,90,.22)'],
+    [w*0.72,h*0.92,340,'rgba(120,96,70,.18)'],
+  ];
+  for(const [x,y,r,col] of blobs){
+    const rg=g.createRadialGradient(x,y,r*0.15,x,y,r);
+    rg.addColorStop(0,col); rg.addColorStop(1,'rgba(0,0,0,0)');
+    g.fillStyle=rg; g.beginPath(); g.arc(x,y,r,0,7); g.fill();
+  }
+  // 中心提亮（台灯光感）
+  const rg=g.createRadialGradient(w*0.48,h*0.40,80,w*0.48,h*0.40,w*0.60);
+  rg.addColorStop(0,'rgba(255,244,222,.55)'); rg.addColorStop(1,'rgba(255,244,222,0)');
+  g.fillStyle=rg; g.fillRect(0,0,w,h);
+  // 四角压暗
+  const vg=g.createRadialGradient(w*0.5,h*0.5,w*0.22,w*0.5,h*0.5,w*0.78);
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(28,18,10,.55)');
+  g.fillStyle=vg; g.fillRect(0,0,w,h);
+  // 整体模糊 = 景深
+  const out=document.createElement('canvas'); out.width=w; out.height=h;
+  const og=out.getContext('2d'); og.filter='blur(9px)'; og.drawImage(c,0,0);
+  const t=new THREE.CanvasTexture(out); t.colorSpace=THREE.SRGBColorSpace; return t;
+}
+const desk = new THREE.Mesh(
+  new THREE.PlaneGeometry(240, 240),
+  new THREE.MeshStandardMaterial({ map: deskTexture(), roughness:1, metalness:0 })
+);
+desk.rotation.x = -Math.PI/2;
+desk.position.set(CX, -4.02, CZ);
+desk.receiveShadow = true;
+scene.add(desk);
+
+/* —— 接触阴影承接面（浮在桌面上的透明阴影层，AR 里也用它） */
+const shadowCatcher = new THREE.Mesh(
+  new THREE.PlaneGeometry(46, 46),
+  new THREE.ShadowMaterial({ color:0x2a1d10, opacity:0.42 })
+);
+shadowCatcher.rotation.x = -Math.PI/2;
+shadowCatcher.position.set(CX, -4.0, CZ);
+shadowCatcher.receiveShadow = true;
+scene.add(shadowCatcher);
+
+/* ============================================================
+   5. 体素 → 网格（面剔除 + 按材质合并）
+   ============================================================ */
+const FACES = [
+  { n:[0, 1, 0], v:[[0,1,0],[0,1,1],[1,1,1],[1,1,0]], key:'top'    },
+  { n:[0,-1, 0], v:[[0,0,1],[0,0,0],[1,0,0],[1,0,1]], key:'bottom' },
+  { n:[0, 0, 1], v:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]], key:'side'   },
+  { n:[0, 0,-1], v:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]], key:'side'   },
+  { n:[1, 0, 0], v:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]], key:'side'   },
+  { n:[-1,0, 0], v:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]], key:'side'   },
+];
+const UVQ = [[0,1],[1,1],[1,0],[0,0]];
+
+const buckets = new Map();   // textureName -> {pos:[],nor:[],uv:[],idx:[]}
+function bucket(name){
+  if(!buckets.has(name)) buckets.set(name,{pos:[],nor:[],uv:[],idx:[]});
+  return buckets.get(name);
+}
+const isAir = (x,y,z)=>{
+  const b = get(x,y,z);
+  return !b || !BLOCKS[b]?.opaque;          // 非实心方块（花/火把）不遮挡邻面
+};
+
+for (const [key, name] of world) {
+  const [x,y,z] = key.split(',').map(Number);
+  const def = BLOCKS[name]; if(!def) continue;
+
+  if (name === 'torch') {           // 火把：细柱，不是整格
+    const b = bucket('torch');
+    const w = 0.085, hgt = 0.60, s = w*2;
+    const bx = x + 0.5 - w, bz = z + 0.5 - w;
+    for (const f of FACES) {
+      const base = b.pos.length/3;
+      for (let i=0;i<4;i++){ const v=f.v[i];
+        b.pos.push(bx + v[0]*s, y + v[1]*hgt, bz + v[2]*s);
+        b.nor.push(...f.n);
+        b.uv.push(UVQ[i][0], UVQ[i][1]);
+      }
+      b.idx.push(base, base+1, base+2, base, base+2, base+3);
+    }
+    continue;
+  }
+
+  if (def.cross) { // 花：两片交叉面片
+    const b = bucket(def.all);
+    const s = 0.14, h = 0.32, cx=x+0.5, cz=z+0.5;
+    for (const r of [0, Math.PI/2]) {
+      const base = b.pos.length/3;
+      const dx = Math.cos(r)*s, dz = Math.sin(r)*s;
+      b.pos.push(cx-dx, y, cz-dz,  cx+dx, y, cz+dz,  cx+dx, y+h, cz+dz,  cx-dx, y+h, cz-dz);
+      b.nor.push(0,1,0, 0,1,0, 0,1,0, 0,1,0);
+      b.uv.push(...UVQ.flat());
+      b.idx.push(base,base+1,base+2, base,base+2,base+3);
+    }
+    continue;
+  }
+
+  for (const f of FACES) {
+    const [nx,ny,nz] = f.n;
+    if (!isAir(x+nx, y+ny, z+nz)) continue;      // 面剔除
+    const texName = def.all || def[f.key] || def.side;
+    const b = bucket(texName);
+    const base = b.pos.length/3;
+    for (let i=0;i<4;i++){
+      const v = f.v[i];
+      b.pos.push(x+v[0], y+v[1], z+v[2]);
+      b.nor.push(nx,ny,nz);
+      b.uv.push(UVQ[i][0], UVQ[i][1]);
+    }
+    b.idx.push(base, base+1, base+2, base, base+2, base+3);
+  }
+}
+
+let triangles = 0;
+for (const [texName, b] of buckets) {
+  // 火把/花：缩成细柱，不用整格
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
+  geo.setAttribute('normal',   new THREE.Float32BufferAttribute(b.nor, 3));
+  geo.setAttribute('uv',       new THREE.Float32BufferAttribute(b.uv, 2));
+  geo.setIndex(b.idx);
+  const mat = new THREE.MeshStandardMaterial({
+    map: TEX[texName],
+    roughness: 0.92, metalness: 0.0,
+    transparent: texName.startsWith('flower'),
+    alphaTest: texName.startsWith('flower') ? 0.5 : 0,
+    emissive: texName === 'torch' ? new THREE.Color(0xffb44a) : new THREE.Color(0x000000),
+    emissiveIntensity: texName === 'torch' ? 1.6 : 0,
+    emissiveMap: texName === 'torch' ? TEX.torch : null,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = !texName.startsWith('flower');   // 花的交叉面片会投出黑方块影，禁用
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  triangles += b.idx.length/3;
+}
+// 火把点光
+const torchLight = new THREE.PointLight(0xffa94d, 3.2, 9, 2);
+torchLight.position.set(7.5, 2.4, 13.5);
+scene.add(torchLight);
+
+/* ============================================================
+   6. 角色（占位：八向纸片人位置先放"胶囊 + 名字"）
+      —— 真模型按 docs/DEV.md §8 的 character.json 接口接入
+   ============================================================ */
+function chibiSprite(opts){
+  const W=256,H=256, c=document.createElement('canvas'); c.width=W;c.height=H;
+  const g=c.getContext('2d');
+  g.clearRect(0,0,W,H);
+  const cx=W/2;
+  // 尾巴
+  if(opts.tail){ g.fillStyle=opts.tailColor; g.beginPath();
+    g.moveTo(cx+18, 186); g.quadraticCurveTo(cx+86, 196, cx+70, 128);
+    g.quadraticCurveTo(cx+56, 186, cx+12, 176); g.fill(); }
+  // 身体（裙）
+  g.fillStyle=opts.dress;
+  g.beginPath(); g.moveTo(cx-34,196); g.lineTo(cx-16,120); g.lineTo(cx+16,120); g.lineTo(cx+34,196); g.closePath(); g.fill();
+  // 手
+  g.fillStyle='#f7dcc6';
+  g.beginPath(); g.arc(cx-30,140,9,0,7); g.arc(cx+30,140,9,0,7); g.fill();
+  // 腿
+  g.fillStyle='#f2e6dc'; g.fillRect(cx-14,196,10,22); g.fillRect(cx+4,196,10,22);
+  // 头
+  g.fillStyle='#fbe4cf'; g.beginPath(); g.arc(cx,84,50,0,7); g.fill();
+  // 头发
+  g.fillStyle=opts.hair;
+  g.beginPath(); g.arc(cx,78,52,Math.PI*0.95,Math.PI*2.05); g.fill();
+  g.fillRect(cx-52,78,10,72); g.fillRect(cx+42,78,10,72);
+  // 眼睛
+  g.fillStyle='#2a2f3a';
+  g.beginPath(); g.ellipse(cx-19,92,7,9,0,0,7); g.ellipse(cx+19,92,7,9,0,0,7); g.fill();
+  g.fillStyle='#fff'; g.beginPath(); g.arc(cx-21,88,2.6,0,7); g.arc(cx+17,88,2.6,0,7); g.fill();
+  // 腮红
+  g.fillStyle='rgba(255,150,150,.45)';
+  g.beginPath(); g.arc(cx-32,102,7,0,7); g.arc(cx+32,102,7,0,7); g.fill();
+  // 帽子
+  if(opts.helmet){ g.fillStyle=opts.helmet; g.beginPath();
+    g.moveTo(cx-54,66); g.quadraticCurveTo(cx,10,cx+54,66); g.quadraticCurveTo(cx,44,cx-54,66); g.fill(); }
+  if(opts.ears){ g.fillStyle=opts.ears;
+    g.beginPath(); g.moveTo(cx-46,48); g.lineTo(cx-58,6); g.lineTo(cx-26,36); g.fill();
+    g.beginPath(); g.moveTo(cx+46,48); g.lineTo(cx+58,6); g.lineTo(cx+26,36); g.fill(); }
+  // 手中发光球
+  if(opts.orb){ const rg=g.createRadialGradient(cx+52,132,2,cx+52,132,26);
+    rg.addColorStop(0,'#ffffff'); rg.addColorStop(.35,'#7fe4ff'); rg.addColorStop(1,'rgba(90,220,255,0)');
+    g.fillStyle=rg; g.beginPath(); g.arc(cx+52,132,26,0,7); g.fill(); }
+  const t=new THREE.CanvasTexture(c); t.colorSpace=THREE.SRGBColorSpace; t.magFilter=THREE.LinearFilter;
+  return t;
+}
+const GROUND = 1.0;                       // 草地顶面 y（体素 (x,0,z) 占据 [0,1]）
+
+/* ============================================================
+   6. 角色（3D 验证版）
+      目的：证明"3D 角色"这条管线能直接接进现有渲染架构
+      模型：three.js 官方示例 RobotExpressive.glb（占位，非最终美术）
+      最终接入方式见 docs/DEV.md §8（VRM/glTF + character.json）
+   ============================================================ */
+// 产品铁律：默认只放 1 个角色；玩家没有化身（不做玩家模型）
+const CHAR_SLOTS = [
+  { name:'大肥鱼', x:CX+0.4, z:CZ+3.4, anim:'Idle', face: 0.22 },
+];
+const mixers = [];
+const CHAR_H = 1.2;   // 产品口径（用户定）：chibi 比 MC 玩家矮，约「1 格多一点」                       // 目标身高（方块单位）
+
+new GLTFLoader().load('./assets/RobotExpressive.glb', (gltf) => {
+  const src = gltf.scene;
+  // 归一化到目标身高，脚底落在 y=0
+  const box0 = new THREE.Box3().setFromObject(src);
+  const h0 = box0.max.y - box0.min.y;
+  const k = CHAR_H / h0;
+
+  CHAR_SLOTS.forEach((slot) => {
+    const model = SkeletonUtils.clone(src);
+    model.scale.setScalar(k);
+    const box = new THREE.Box3().setFromObject(model);
+    model.position.set(slot.x, GROUND - box.min.y, slot.z);
+    model.rotation.y = slot.face;
+    model.traverse(o => {
+      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; }
+    });
+    scene.add(model);
+
+    const mixer = new THREE.AnimationMixer(model);
+    const clip = gltf.animations.find(a => a.name === slot.anim) || gltf.animations[0];
+    if (clip) {
+      const act = mixer.clipAction(clip);
+      act.time = Math.random() * clip.duration;   // 错开相位
+      act.play();
+    }
+    mixers.push(mixer);
+
+    // 胶囊接触影
+    const sm = new THREE.Mesh(
+      new THREE.CircleGeometry(0.28, 24),
+      new THREE.MeshBasicMaterial({ color:0x1c1208, transparent:true, opacity:0.30, depthWrite:false })
+    );
+    sm.rotation.x = -Math.PI/2;
+    sm.position.set(slot.x, GROUND + 0.015, slot.z);
+    scene.add(sm);
+  });
+  window.__CHAR3D__ = { ok:true, clips: gltf.animations.map(a => a.name), slots: CHAR_SLOTS.length };
+  console.log('3D characters ready', window.__CHAR3D__);
+}, undefined, (err) => {
+  window.__CHAR3D__ = { ok:false, error:String(err) };
+  console.warn('3D 模型加载失败，退回胶囊占位', err);
+  CHAR_SLOTS.forEach(slot => {
+    const cap = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.35, CHAR_H - 0.7, 6, 12),
+      new THREE.MeshStandardMaterial({ color:0x3f86d8, roughness:0.7 })
+    );
+    cap.position.set(slot.x, GROUND + CHAR_H/2, slot.z);
+    cap.castShadow = true;
+    scene.add(cap);
+  });
+});
+
+/* ============================================================
+   7. 渲染
+   ============================================================ */
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  syncTilt();
+});
+/* 移轴 tilt-shift：AR 微缩感的一半来自这里。参考图上下虚化就是移轴摄影。
+   VerticalTiltShiftShader: v = 1/高度（可放大得到更强虚化），r = 清晰带位置 */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const tiltV = new ShaderPass(VerticalTiltShiftShader);
+const tiltH = new ShaderPass(HorizontalTiltShiftShader);
+tiltV.uniforms.r.value = 0.50;
+tiltH.uniforms.r.value = 0.50;
+composer.addPass(tiltV);
+composer.addPass(tiltH);
+function syncTilt(){
+  const k = 2.0;
+  tiltV.uniforms.v.value = k / innerHeight;
+  tiltH.uniforms.h.value = k / innerWidth;
+}
+syncTilt();
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(()=>{
+  const dt = clock.getDelta();
+  mixers.forEach(m => m.update(dt));
+  composer.render();
+});
+
+// 供无头截图判断"是否渲染成功"
+window.__M0_READY__ = { triangles, meshes: buckets.size, blocks: world.size };
+console.log('M0 ready', window.__M0_READY__);
+</script>
+</body>
+</html>
