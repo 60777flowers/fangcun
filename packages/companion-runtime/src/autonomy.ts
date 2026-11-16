@@ -110,7 +110,7 @@ export function reduceAutonomy(state: AutonomyState, event: AutonomyEvent, confi
   if (event.type === "plan_ready" && state.phase === "planning_home" && state.inFlight === "plan") {
     if (!event.planId) return { state: reset(state, "idle"), effects: Object.freeze([]) };
     const next = Object.freeze({ ...state, phase: "awaiting_commit" as const, inFlight: undefined, planId: event.planId });
-    return { state: next, effects: Object.freeze([effect(event.autoCommitEligible ? "request_auto_commit" : "request_user_approval", next.generation, { planId: event.planId, goalId: state.goalId })]) };
+    return { state: next, effects: Object.freeze([effect("request_user_approval", next.generation, { planId: event.planId, goalId: state.goalId })]) };
   }
 
   if (event.type === "commit_result" && state.phase === "awaiting_commit" && state.inFlight === "commit") {

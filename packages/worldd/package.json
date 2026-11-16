@@ -10,6 +10,8 @@
     }
   },
   "dependencies": {
+    "@fangcun/companion-runtime": "0.1.0",
+    "@fangcun/companion-schema": "0.1.0",
     "@fangcun/protocol": "0.1.0",
     "@fangcun/voxel-core": "0.1.0",
     "@fangcun/world-schema": "0.1.0"

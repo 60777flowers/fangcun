@@ -87,11 +87,15 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]):
 }
 
 function text(value: unknown, max = 128): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= max;
+  return typeof value === "string" && value.length > 0 && value.length <= max && !/[\x00-\x1F\x7F]/.test(value);
+}
+
+function opaqueId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 }
 
 function isoDate(value: unknown): value is string {
-  return typeof value === "string" && Number.isFinite(Date.parse(value)) && value.length <= 40;
+  return isCanonicalUtc(value);
 }
 
 export function validatePersonaCard(input: unknown): ValidationResult<PersonaCard> {
@@ -118,8 +122,10 @@ export function isInsidePlot(grant: HomePlotGrant, coord: Coord): boolean {
 }
 
 export function isCanonicalUtc(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)
-    && Number.isFinite(Date.parse(value));
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) || !Number.isFinite(Date.parse(value))) return false;
+  const canonicalMs = new Date(value).toISOString();
+  const normalized = value.includes(".") ? value.replace(/\.(\d{1,3})Z$/, (_match, fraction: string) => `.${fraction.padEnd(3, "0")}Z`) : value.replace(/Z$/, ".000Z");
+  return canonicalMs === normalized;
 }
 
 export function isGrantActive(grant: HomePlotGrant, nowMs: number): boolean {
@@ -129,10 +135,10 @@ export function isGrantActive(grant: HomePlotGrant, nowMs: number): boolean {
 export function validateHomePlotGrant(input: unknown): ValidationResult<HomePlotGrant> {
   if (!record(input) || !exactKeys(input, ["schemaVersion", "grantId", "grantRev", "plotId", "worldId", "ownerUserId", "approvedByUserId", "companionId", "bounds", "allowedBlockIds", "maxBlocksPerPlan", "maxBlocksPerDay", "createdAt", "expiresAt", ...(Object.hasOwn(input, "revokedAt") ? ["revokedAt"] : [])])) return { ok: false, error: "invalid_plot_shape" };
   if (input.schemaVersion !== 1 || !text(input.plotId) || !text(input.worldId) || !text(input.ownerUserId) || !text(input.companionId)
-    || !text(input.grantId) || !Number.isSafeInteger(input.grantRev) || (input.grantRev as number) < 1
-    || !text(input.approvedByUserId) || !record(input.bounds) || !exactKeys(input.bounds, ["min", "maxExclusive"]) || !isCoord(input.bounds.min) || !isCoord(input.bounds.maxExclusive)
+    || !opaqueId(input.grantId) || !Number.isSafeInteger(input.grantRev) || (input.grantRev as number) < 1
+    || !text(input.approvedByUserId) || input.approvedByUserId !== input.ownerUserId || !record(input.bounds) || !exactKeys(input.bounds, ["min", "maxExclusive"]) || !isCoord(input.bounds.min) || !isCoord(input.bounds.maxExclusive)
     || !isCanonicalUtc(input.createdAt) || !isCanonicalUtc(input.expiresAt) || Date.parse(input.expiresAt as string) <= Date.parse(input.createdAt as string)
-    || (input.revokedAt !== undefined && (!isCanonicalUtc(input.revokedAt) || Date.parse(input.revokedAt as string) < Date.parse(input.createdAt as string)))
+    || (input.revokedAt !== undefined && (!isCanonicalUtc(input.revokedAt) || Date.parse(input.revokedAt as string) < Date.parse(input.createdAt as string) || Date.parse(input.revokedAt as string) > Date.parse(input.expiresAt as string)))
     || !input.bounds.min || !input.bounds.maxExclusive) return { ok: false, error: "invalid_plot" };
   const min = input.bounds.min as Coord;
   const max = input.bounds.maxExclusive as Coord;

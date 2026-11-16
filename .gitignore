@@ -25,6 +25,11 @@ MC_mod/
 # 视觉参考图当前已跟踪，但公开再分发权利链尚未确认；此注释不构成许可
 # 注意：模型文件仍然不入库（见下方 *.vrm）
 
+# Android/Gradle local caches and test captures
+.gradle/
+**/.gradle/
+apps/android-ar-poc/tab-s8-*.png
+
 # 本地环境
 .env
 .env.*

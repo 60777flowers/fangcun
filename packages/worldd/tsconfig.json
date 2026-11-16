@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../world-schema" }, { "path": "../protocol" }, { "path": "../voxel-core" }]
+  "references": [{ "path": "../world-schema" }, { "path": "../protocol" }, { "path": "../voxel-core" }, { "path": "../companion-schema" }, { "path": "../companion-runtime" }]
 }

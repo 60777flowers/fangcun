@@ -22,7 +22,7 @@ test("autonomy reducer observes, proposes home, plans and requests auto commit w
   transition = reduceAutonomy(state, { type: "plan_ready", generation: state.generation, planId: "plan-1", autoCommitEligible: true }, { tickIntervalMs: 1_000 });
   state = transition.state;
   assert.equal(state.phase, "awaiting_commit");
-  assert.equal(transition.effects[0]?.kind, "request_auto_commit");
+  assert.equal(transition.effects[0]?.kind, "request_user_approval");
   transition = reduceAutonomy(state, { type: "user_approved_plan", generation: state.generation, planId: "plan-1" }, { tickIntervalMs: 1_000 });
   assert.equal(transition.effects[0]?.kind, "request_auto_commit");
 });

@@ -1,0 +1,33 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'org.fangcun.ar.poc'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'org.fangcun.ar.poc'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    // Official ARCore Android SDK. API usage references:
+    // https://developers.google.com/ar/develop/java/quickstart
+    // https://developers.google.com/ar/develop/java/hit-test/developer-guide
+    implementation 'com.google.ar:core:1.51.0'
+}

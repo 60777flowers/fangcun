@@ -257,7 +257,7 @@ packages/
 
 上述阈值是项目建议，不是当前实现成绩。自动化测量脚本、设备型号/系统/浏览器版本和原始日志需随验收结果提交。
 
-**研发状态（2026-11-16）：**第一阶段 Node/TypeScript workspace 的 clean install、严格类型检查、30 个单元测试和本机 Chrome 桌面交互 smoke 已通过，GitHub 分支 `feat/phase1-voxel-sandbox` 已推送。第二阶段已新增 `companion-schema` 草案与 ADR-0002：单用户单 AI 是运行时目标，人格卡、多 AI、异步串门只预留接口；AI home plot 需要用户先批准位置，之后 AI 可在已授权地块只放置空格、自主装饰。该 schema 目前是数据契约，不代表 autonomic runtime 已实现。Android WebXR/marker provider 仍只有纯类型/状态门控，没有原生或 WebXR 集成；当前环境未安装 Android SDK/Gradle，也没有 APK；LAN/TLS/WSS、持久化、实际 DSH/MCP 与角色资产均未完成。Samsung Tab S8 未启用 ADB，本轮尚未对平板实测。
+**研发状态（2026-11-17）：**第一阶段 Node/TypeScript workspace 已通过类型检查、47 项测试和桌面模拟器 smoke，分支 `feat/phase1-voxel-sandbox` 已推送。第二阶段已有 persona/instance/home/visit schema、受限 Companion runtime/autonomy reducer、WorldAuthority 的原型 home grant/候选审批/异步提交校验及竞态测试。`npm run demo:companion` 可本机跑通一次用户批准 home plot → companion tick → 12 方块事务 → revision 1；该演示不持久化状态，也不连接 Android、Host/WSS 或实际 DSH/MCP。WorldAuthority 仍是 in-memory 原型，session auth/WAL/undo/Host WSS 和可操作产品 UI 尚未完成；persona、多 AI、visit 仅 schema 保留。Android 原生 ARCore POC 已构建并在 Samsung Tab S8（SM-X800）实测相机背景、平面命中、anchor 与绿色测试方块；用户反馈移动时稳定，遮挡时无真实深度合成且恢复后轻微漂移，详见 [ANDROID-DELIVERY](ANDROID-DELIVERY.md) 与 [AR-POC-FOLLOWUPS](AR-POC-FOLLOWUPS.md)。当前 APK 是独立 POC，不含正式 voxel 客户端、联网或 AI。
 
 ## 7. 交付与协作约定
 
