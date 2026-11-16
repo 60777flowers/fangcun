@@ -808,7 +808,7 @@ async function switchCharacter(id: string) {
 
 | 候选 | 来源 | 格式 / 体积 | 头身比 | 许可（读的是**文件 meta**，不是站点标签） | 能否内置 | 能否修改 |
 |---|---|---|---|---|---|---|
-| **BlueFatFish**「蓝色小肥鱼」 | 模之屋 aplaybox（作者 木子恶魔）；实际分发在 `drliuhuan/dsh-plugin-vrmpet3d` 的 `assets/models/BlueFatFish.vrm.br` | VRM 1.0 / 18.5 MB | **2.41**（最贴参考图） | `avatarPermission: onlyAuthor`、`allowRedistribution: false`、`modification: prohibited`、`commercialUsage: personalNonProfit`、须署名 | ❌ **不行**（禁止再分发） | ❌ 禁止 |
+| **BlueFatFish**「蓝色小肥鱼」 | 模之屋 aplaybox（作者 **木子恶魔 / MZEM**，<https://www.aplaybox.com/details/model/ayXkRzVflmnd>）；也可从 `drliuhuan/dsh-plugin-vrmpet3d` 取到 | VRM 1.0 / **17.62 MB**（实测） | **2.4**（最贴参考图，已用我们自己的渲染验证） | `avatarPermission: onlyAuthor`、`allowRedistribution: false`、`modification: prohibited`、`commercialUsage: personalNonProfit`、须署名 | ❌ **不行**（禁止再分发） | ❌ 禁止 |
 | **DeepSeek-chan** | GitHub [`tegnike/deepseek-chan-vrm`](https://github.com/tegnike/deepseek-chan-vrm) 21★ | VRM 1.0 / 33.6 MB + `.blend` | 3.4（半 Q 版） | **CC BY-NC-SA 4.0**（可改、可再分发、须署名三人、**禁商用**、同协议传染） | ✅ **可以**（非商业） | ✅ |
 | **鲸鱼娘 Live2D** | [`Andersen216/dsh-whale-girl-live2d`](https://github.com/Andersen216/dsh-whale-girl-live2d) 95★ | Live2D `.moc3` | — | 代码 MIT / **素材 CC BY-NC-SA** | ✅（非商业） | 见协议 |
 | **VRoid「ヴィータ」** | VRoid 官方示例 | VRM 1.0 | — | **可商用 / 可再分发 / 免署名** | ✅ **商用兜底** | ✅ |
@@ -817,6 +817,23 @@ async function switchCharacter(id: string) {
 
 > ⚠️ **贴图才是移动端瓶颈，不是面数**：DeepSeek-chan 有 **6 张 4096² 贴图**，按 RGBA 上传约 **402 MB 显存** → **移动端必须降到 1024²**（面数 92k 反而不是瓶颈）。
 > ⚠️ **两个 3D 模型的动画片段数都是 0** —— 所以 **程序化 idle / 走 / 尾摆是主路径，不是兜底**。`drliuhuan/dsh-plugin-vrmpet3d` 里另有 **28 个 `.vrma.br`** 动作库，可作为可选素材，但**用前必须单独核那批动画的许可**。
+
+### 8.12.0 BlueFatFish 实测规格（我们自己的渲染 + GLB 解析，2026-11-16）
+
+| 项 | 值 | 对产品的含义 |
+|---|---|---|
+| 三角面 | **45,663**（34,873 顶点 / 6 网格） | 开描边 ≈ 87k 提交 → **超手机预算（≤72k）**：要么降面，要么只在近景开描边 |
+| 材质 | **6 个，全 MToon** | 目标 ≤4，可合并 |
+| 贴图 | **8 张**（5 张 2048²）｜13.76 MB｜RGBA 显存 ≈ **90 MB** | **必须运行时降采样到 1024²**（≈22 MB）。降采样只改内存，**不改文件**（合规） |
+| 骨骼 | humanoid **53** + 尾巴 **13**（`WeiBa.*`） | 尾巴可做物理 |
+| 弹簧链 | **22 条 / 91 关节** | ≈0.1 ms/帧，可接受 |
+| 表情 | **19 个**（全预设 + 自定义 `TiePen`） | 口型/眨眼齐备 |
+| 动画 | **0** | 只能程序化（idle/走/尾摆） |
+| 原始高 | 0.971 单位 → ×1.236 → **1.2 方块** | 与「1 格多一点」口径一致 |
+
+**两个已知问题（别当 bug 乱改）**：
+1. **描边不会自动出现** —— `@pixiv/three-vrm` 只读 MToon 的描边**参数**，**不生成描边网格**。要"粗描边赛璐璐"必须自己做背面法线膨胀（或 outline pass）。
+2. **一只眼睛偏红** —— 我们的正面渲染里左眼是红/粉色，参考图是双眼蓝。**先确认是模型设计（异色瞳）还是材质路径问题**，确认前不要改。
 
 ### 8.12.1 因此的分层策略（这也是插槽存在的商业理由）
 
@@ -827,6 +844,11 @@ async function switchCharacter(id: string) {
 | **商用发布** | 自研或买断 | 走 §8.11 的 VRoid 路径，或买授权；**CC BY-NC-SA 一律不能用于商用** |
 
 > 一句话：**"能内置的不好看，好看的不能内置"** —— 这不是选型困难，这是版权现实。所以模型必须是插槽。
+
+> 🚫 **硬性红线：BlueFatFish 的 `.vrm` 与 `.zip` 一律不入库**（`.gitignore` 已排除 `*.vrm` / `*.zip`）。
+> 作者声明"**禁止二次配布**：严禁将模型文件以任何形式再次上传、转发、分享至任何平台" —— **私有仓库的转发也算**。
+> 合规做法：每个开发者**自己去发布页下载**，放到本地 `preview/assets/_user_bluefatfish.vrm`（仅渲染测试）或 `%APPDATA%\AR-MC\characters\`（运行时）。
+> **截图可以进仓库**（作者允许"包含本模型的作品公开传播，须标注来源"），但必须署名。
 
 ### 8.12.2 用户自备 BlueFatFish 的操作（写进用户文档）
 

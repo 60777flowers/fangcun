@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>VRM 验货：1.2 格比例</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#2a2622}
+  canvas{display:block}
+  #hud{position:fixed;left:14px;bottom:12px;color:#fff;font:13px/1.7 ui-sans-serif,system-ui;
+       text-shadow:0 1px 2px #000;white-space:pre;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<script type="importmap">
+{ "imports": {
+  "three": "./node_modules/three/build/three.module.js",
+  "three/addons/": "./node_modules/three/examples/jsm/",
+  "@pixiv/three-vrm": "./node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const W = 1400, H = 900;
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a2622);
+
+const camera = new THREE.PerspectiveCamera(30, W/H, 0.01, 100);
+
+// 光照：与 M0 一致（暖主光 + 天光）
+const sun = new THREE.DirectionalLight(0xffeacb, 3.0);
+sun.position.set(-2, 4, 3);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left:-3, right:3, top:3, bottom:-3, near:0.1, far:12 });
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xc6dcff, 0xcaa77a, 0.8));
+scene.add(new THREE.AmbientLight(0xfff3e0, 0.25));
+
+// 地面 + 接触阴影
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(12,12), new THREE.ShadowMaterial({ color:0x000000, opacity:0.35 }));
+ground.rotation.x = -Math.PI/2; ground.receiveShadow = true; scene.add(ground);
+
+const BLOCK = 1;           // 1 方块
+const CHAR_H = 1.2;        // 产品口径
+
+/* 参照物：一根 3 格高的"房墙"，和一个 1 格方块，用来目测比例 */
+const mat = new THREE.MeshStandardMaterial({ color:0xb3854f, roughness:0.9 });
+const boxG = new THREE.BoxGeometry(BLOCK, BLOCK, BLOCK);
+for (let y=0; y<3; y++) for (let x=0; x<3; x++) {
+  const m = new THREE.Mesh(boxG, mat);
+  m.position.set(-1.6 + x*0, y*BLOCK + BLOCK/2, -1.2 + x*0);
+  m.position.x = -1.5; m.position.z = -1.2 + x*0;
+  m.position.x = -1.5 + x*BLOCK*0; // 3 格高的柱子
+  m.position.set(-1.5, y*BLOCK + BLOCK/2, -1.2);
+  m.castShadow = true; m.receiveShadow = true; scene.add(m);
+}
+// 1 格方块参照
+const cube = new THREE.Mesh(boxG, new THREE.MeshStandardMaterial({ color:0xc2362f, roughness:0.9 }));
+cube.position.set(1.55, 0.5, -0.55); cube.castShadow = true; cube.receiveShadow = true; scene.add(cube);
+
+let vrm = null;
+const loader = new GLTFLoader();
+loader.register(p => new VRMLoaderPlugin(p));
+loader.load('./assets/_user_bluefatfish.vrm', (gltf) => {
+  vrm = gltf.userData.vrm;
+  VRMUtils.removeUnnecessaryVertices(gltf.scene);
+  VRMUtils.combineSkeletons(gltf.scene);
+  vrm.scene.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; } });
+
+  // 归一化到 1.2 方块高，脚底落 y=0
+  const box0 = new THREE.Box3().setFromObject(vrm.scene);
+  const k = CHAR_H / (box0.max.y - box0.min.y);
+  vrm.scene.scale.setScalar(k);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  vrm.scene.position.y = -box.min.y;
+  vrm.scene.position.x = 0.15;
+  vrm.scene.rotation.y = Math.PI * 0.92;    // 面向镜头略偏
+  scene.add(vrm.scene);
+
+  // 描边（screenCoordinates，r187 默认）
+  const mm = vrm.meta?.metaVersion ? vrm.meta : vrm.meta;
+  window.__VRM__ = {
+    metaVersion: vrm.meta?.metaVersion,
+    name: vrm.meta?.name,
+    heightUnits: +(box0.max.y - box0.min.y).toFixed(3),
+    scaleApplied: +k.toFixed(3),
+    expressions: Object.keys(vrm.expressionManager?.expressionMap || {}),
+    humanBones: Object.keys(vrm.humanoid?.humanBones || {}).length,
+    materials: (() => { const s = new Set(); vrm.scene.traverse(o=>{ if(o.isMesh && o.material) s.add(o.material.name); }); return s.size; })(),
+  };
+  console.log('VRM ready', JSON.stringify(window.__VRM__));
+  updateHud();
+}, undefined, (e) => { console.error('LOAD FAIL', e); document.getElementById('hud').textContent = '加载失败: ' + e; });
+
+/* ---- 四个机位出图 ---- */
+const views = [
+  { name:'front',   az: 0.92, el: 0.05, dist: 5.4 },
+  { name:'three-quarter', az: 0.55, el: 0.09, dist: 5.4 },
+  { name:'side',    az: 1.57, el: 0.05, dist: 5.4 },
+  { name:'back',    az: 2.60, el: 0.08, dist: 5.4 },
+];
+let vi = 0;
+function setView(v) {
+  const az = v.az * Math.PI, el = v.el * Math.PI;
+  camera.position.set(
+    Math.sin(az) * Math.cos(el) * v.dist,
+    0.65 + Math.sin(el) * v.dist,
+    Math.cos(az) * Math.cos(el) * v.dist
+  );
+  camera.lookAt(0.0, 0.62, 0);
+}
+function updateHud(){
+  const d = window.__VRM__ || {};
+  document.getElementById('hud').textContent =
+    `模型: ${d.name || '?'}   VRM meta: ${d.metaVersion || '?'}\n` +
+    `原始高 ${d.heightUnits} 单位 → 归一化到 ${CHAR_H} 方块（×${d.scaleApplied}）\n` +
+    `humanoid 骨 ${d.humanBones}  材质 ${d.materials}  表情 ${(d.expressions||[]).length}\n` +
+    `参照：左＝3 格高木柱，右＝1 格红方块`;
+}
+
+window.__next = () => { vi = (vi + 1) % views.length; setView(views[vi]); return views[vi].name; };
+window.__setView = (i) => { vi = i; setView(views[i]); return views[i].name; };
+
+setView(views[0]);
+renderer.setAnimationLoop(() => { vrm?.update(1/60); renderer.render(scene, camera); });
+</script>
+</body>
+</html>

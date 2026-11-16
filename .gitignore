@@ -27,3 +27,9 @@ refsrc/
 !.env.example
 .vscode/
 .idea/
+
+# 角色模型文件：版权原因，不入库（见 README 的「角色模型」章节）
+*.vrm
+*.vrm.br
+*.zip
+preview/assets/_user_*.vrm
