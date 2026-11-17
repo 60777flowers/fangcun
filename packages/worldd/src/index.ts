@@ -110,6 +110,30 @@ export class WorldAuthority {
     return true;
   }
 
+  /**
+   * Trusted restore path for a grant already persisted by the authoritative Host store.
+   * Skips candidate re-derivation (the plot was approved earlier) but still validates
+   * shape, owner/companion binding and overlap, so a corrupted store cannot widen access.
+   */
+  restoreHomeGrant(grant: HomePlotGrant): boolean {
+    const parsed = validateHomePlotGrant(grant);
+    if (!parsed.ok) return false;
+    const value = parsed.value;
+    const companion = this.#homeCompanions.get(value.companionId);
+    if (!companion || companion.ownerUserId !== value.ownerUserId || companion.worldId !== value.worldId
+      || value.worldId !== this.#world.worldId || this.#owners.get(value.worldId) !== value.ownerUserId) return false;
+    if (this.#homeGrants.has(value.plotId)) return false;
+    for (const other of this.#homeGrants.values()) {
+      if (other.revokedAt || Date.parse(other.expiresAt) <= this.#clock()) continue;
+      if (other.plotId === value.plotId) return false;
+      if (other.bounds.min.x < value.bounds.maxExclusive.x && value.bounds.min.x < other.bounds.maxExclusive.x
+        && other.bounds.min.y < value.bounds.maxExclusive.y && value.bounds.min.y < other.bounds.maxExclusive.y
+        && other.bounds.min.z < value.bounds.maxExclusive.z && value.bounds.min.z < other.bounds.maxExclusive.z) return false;
+    }
+    this.#homeGrants.set(value.plotId, value);
+    return true;
+  }
+
   revokeHomeGrant(plotId: string, actor: HomeGrantActor, revokedAt?: string): boolean {
     if (!actor || typeof actor.authenticatedOwnerUserId !== "string") return false;
     const ownerUserId = actor.authenticatedOwnerUserId;
@@ -237,6 +261,15 @@ export class WorldAuthority {
     } finally {
       this.#homeBusy = false;
     }
+  }
+
+  /**
+   * Clears per-client replay state. Sequence numbers are scoped to one live
+   * connection, so a reconnecting client starts again at seq 1.
+   */
+  resetClientSequence(clientId: string): void {
+    this.#lastSeq.delete(clientId);
+    this.#decisions.delete(clientId);
   }
 
   handleIntent(intent: ClientIntent): IntentDecision {
