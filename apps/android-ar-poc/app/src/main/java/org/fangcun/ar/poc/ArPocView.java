@@ -5,18 +5,18 @@ import com.google.ar.core.Session;
 
 import java.util.concurrent.atomic.AtomicReference;
 
-/** GLSurfaceView that renders ARCore camera background and a single anchored GLES cube. */
+/** GLSurfaceView that renders the ARCore camera background and the replicated voxel island. */
 final class ArPocView extends GLSurfaceView {
     private final ArPocRenderer renderer;
     private final AtomicReference<float[]> pendingTap = new AtomicReference<>();
     private volatile Session session;
     private final ArPocActivity activity;
 
-    ArPocView(ArPocActivity activity) {
+    ArPocView(ArPocActivity activity, VoxelWorld world) {
         super(activity);
         this.activity = activity;
         setEGLContextClientVersion(2);
-        renderer = new ArPocRenderer(activity, pendingTap);
+        renderer = new ArPocRenderer(activity, pendingTap, world);
         setRenderer(renderer);
         setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
     }
@@ -31,6 +31,12 @@ final class ArPocView extends GLSurfaceView {
     }
 
     void clearPendingTap() { pendingTap.set(null); }
+
+    /** Call on the GL thread after the replica changed. */
+    void markWorldDirty() { queueEvent(() -> renderer.markWorldDirty()); }
+
+    /** Drops the island anchor so the next tap re-anchors (used by the UI button). */
+    void resetAnchor() { queueEvent(() -> renderer.releaseAnchorNow()); }
 
     @Override public void onResume() { super.onResume(); pendingTap.set(null); }
     @Override public void onPause() { pendingTap.set(null); super.onPause(); }

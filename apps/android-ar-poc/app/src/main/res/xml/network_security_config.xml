@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is permitted only for the loopback Host reached through `adb reverse`.
+  The production path is TLS with a pinned certificate fingerprint over the LAN;
+  no other cleartext destination is allowed.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

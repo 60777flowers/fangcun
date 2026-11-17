@@ -21,21 +21,25 @@ import java.util.concurrent.atomic.AtomicReference;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-/** GLES 2 renderer: ARCore camera background + one colored cube at a horizontal plane anchor. */
+/**
+ * GLES 2 renderer: ARCore camera background plus the replicated voxel island drawn at a
+ * horizontal plane anchor. Taps after the anchor exists are ray-cast onto the island plane
+ * and converted to a world column, which the activity turns into a Host intent.
+ */
 final class ArPocRenderer implements GLSurfaceView.Renderer {
-    private static final float CUBE_HALF = 0.035f;
-    private static final float CUBE_CENTER_Y = CUBE_HALF;
     private static final int FLOAT_BYTES = 4;
 
     private final ArPocActivity activity;
+    private final VoxelWorld world;
     private final AtomicReference<float[]> pendingTap;
     private final float[] viewMatrix = new float[16];
     private final float[] projectionMatrix = new float[16];
     private final float[] modelMatrix = new float[16];
     private final float[] modelView = new float[16];
     private final float[] mvp = new float[16];
-    private final FloatBuffer vertices;
-    private final FloatBuffer colors;
+    private final float[] viewProjection = new float[16];
+    private final float[] inverseViewProjection = new float[16];
+    private final float[] anchorInverse = new float[16];
     private volatile Session session;
     private Anchor anchor;
     private BackgroundRenderer background;
@@ -50,12 +54,17 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private String tapDiagnostic = "";
     private Session textureSession;
 
-    ArPocRenderer(ArPocActivity activity, AtomicReference<float[]> pendingTap) {
+    private FloatBuffer voxelVertices;
+    private FloatBuffer voxelColors;
+    private int voxelVertexCount;
+    private volatile boolean meshDirty = true;
+    private volatile int hintVoxelX = Integer.MIN_VALUE;
+    private volatile int hintVoxelZ = Integer.MIN_VALUE;
+
+    ArPocRenderer(ArPocActivity activity, AtomicReference<float[]> pendingTap, VoxelWorld world) {
         this.activity = activity;
         this.pendingTap = pendingTap;
-        float[] cube = cubeVertices(CUBE_HALF);
-        vertices = directBuffer(cube);
-        colors = directBuffer(cubeColors());
+        this.world = world;
     }
 
     void setSession(Session session) { this.session = session; }
@@ -66,6 +75,14 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     void bindSessionIfReady(Session session) {
         this.session = session;
         if (glReady) attachSessionTexture(session);
+    }
+
+    /** Called when the replica changed (initial snapshot, commit or resync). */
+    void markWorldDirty() { meshDirty = true; }
+
+    void releaseAnchorNow() {
+        pendingTap.set(null);
+        releaseAnchor();
     }
 
     private void attachSessionTexture(Session session) {
@@ -99,7 +116,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             glReady = false;
             textureSession = null;
             startupError = "Renderer init failed: " + error.getMessage();
-            activity.setStatus(startupError);
+            activity.setArStatus(startupError);
         }
     }
 
@@ -134,7 +151,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             Camera camera = frame.getCamera();
             background.draw(frame);
             if (camera.getTrackingState() != TrackingState.TRACKING) {
-                // Fail closed: don't render stale anchored content or replay taps after relocalization.
+                // Fail closed: never replay taps or keep drawing anchored content while relocalizing.
                 pendingTap.set(null);
                 releaseAnchor();
                 publishStatus("Tracking lost/relocalizing — world writes disabled");
@@ -145,19 +162,21 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             processTap(current, frame);
             if (anchor == null || anchor.getTrackingState() != TrackingState.TRACKING) {
                 int planeCount = 0;
-                for (Plane trackedPlane : current.getAllTrackables(Plane.class)) if (trackedPlane.getTrackingState() == TrackingState.TRACKING) planeCount++;
-                String message = System.currentTimeMillis() < tapDiagnosticUntilMs ? tapDiagnostic : "Tracking camera — planes: " + planeCount + ". Move device slowly, then tap tabletop.";
+                for (Plane trackedPlane : current.getAllTrackables(Plane.class)) {
+                    if (trackedPlane.getTrackingState() == TrackingState.TRACKING) planeCount++;
+                }
+                String message = System.currentTimeMillis() < tapDiagnosticUntilMs
+                    ? tapDiagnostic
+                    : "Tracking camera — planes: " + planeCount + ". Move device slowly, then tap tabletop to anchor the island.";
                 publishStatus(message);
                 return;
             }
             anchor.getPose().toMatrix(modelMatrix, 0);
-            modelMatrix[12] += modelMatrix[4] * CUBE_CENTER_Y;
-            modelMatrix[13] += modelMatrix[5] * CUBE_CENTER_Y;
-            modelMatrix[14] += modelMatrix[6] * CUBE_CENTER_Y;
             Matrix.multiplyMM(modelView, 0, viewMatrix, 0, modelMatrix, 0);
             Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, modelView, 0);
-            drawCube();
-            publishStatus("Tracking: RUNNING\nAnchor placed — camera tracking is required to continue");
+            if (meshDirty) rebuildMesh();
+            drawVoxels();
+            publishStatus(hintStatus());
         } catch (CameraNotAvailableException e) {
             releaseAnchor();
             publishStatus("Camera unavailable — AR paused, writes disabled");
@@ -167,9 +186,47 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    private String hintStatus() {
+        int x = hintVoxelX;
+        int z = hintVoxelZ;
+        if (x == Integer.MIN_VALUE || z == Integer.MIN_VALUE) {
+            return "Island anchored\nTap the island to place a block; tap a full column to break the top.";
+        }
+        int placeY = world.firstEmptyY(x, z);
+        String target = placeY >= 0 ? "place at y=" + placeY : "break column";
+        return "Island anchored  rev " + world.revision() + "  blocks " + world.countBlocks()
+            + "\nTarget column x=" + x + " z=" + z + " (" + target + ")\nTap to apply.";
+    }
+
+    private void rebuildMesh() {
+        meshDirty = false;
+        VoxelWorld.Mesh mesh = world.buildMesh();
+        voxelVertexCount = mesh.vertexCount;
+        voxelVertices = directBuffer(mesh.positions);
+        voxelColors = directBuffer(mesh.colors);
+    }
+
     private void processTap(Session current, Frame frame) {
         float[] tap = pendingTap.getAndSet(null);
         if (tap == null || frame.getCamera().getTrackingState() != TrackingState.TRACKING) return;
+
+        if (anchor == null) {
+            placeAnchor(tap, frame);
+            return;
+        }
+        int[] column = columnForTap(tap, frame);
+        if (column == null) {
+            hintVoxelX = Integer.MIN_VALUE;
+            hintVoxelZ = Integer.MIN_VALUE;
+            publishStatus("Tap missed the island — aim inside the 42 cm island footprint.");
+            return;
+        }
+        hintVoxelX = column[0];
+        hintVoxelZ = column[1];
+        activity.onColumnTapped(column[0], column[1]);
+    }
+
+    private void placeAnchor(float[] tap, Frame frame) {
         int planeHits = 0;
         for (HitResult hit : frame.hitTest(tap[0], tap[1])) {
             if (!(hit.getTrackable() instanceof Plane)) continue;
@@ -181,7 +238,8 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             catch (RuntimeException e) { publishStatus("Anchor creation failed — tap again"); return; }
             releaseAnchor();
             anchor = newAnchor;
-            publishStatus("Anchor placed on detected horizontal plane");
+            meshDirty = true;
+            publishStatus("Island anchored on the tabletop");
             return;
         }
         tapDiagnostic = planeHits == 0 ? "Tap missed plane — move device to map surface, retry."
@@ -190,17 +248,71 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         publishStatus(tapDiagnostic);
     }
 
-    private void drawCube() {
+    /**
+     * Ray-casts the tap onto the anchor's horizontal plane and converts the hit point into
+     * a world column. Returns null when the ray misses the island footprint.
+     */
+    private int[] columnForTap(float[] tap, Frame frame) {
+        Matrix.multiplyMM(viewProjection, 0, projectionMatrix, 0, viewMatrix, 0);
+        Matrix.invertM(inverseViewProjection, 0, viewProjection, 0);
+
+        float[] near = unproject(tap[0], tap[1], -1f);
+        float[] far = unproject(tap[0], tap[1], 1f);
+        if (near == null || far == null) return null;
+        float dx = far[0] - near[0];
+        float dy = far[1] - near[1];
+        float dz = far[2] - near[2];
+
+        float[] pose = new float[16];
+        anchor.getPose().toMatrix(pose, 0);
+        float px = pose[12];
+        float py = pose[13];
+        float pz = pose[14];
+        float nx = pose[4];
+        float ny = pose[5];
+        float nz = pose[6];
+        float denominator = dx * nx + dy * ny + dz * nz;
+        if (Math.abs(denominator) < 1e-6f) return null;
+        float t = ((px - near[0]) * nx + (py - near[1]) * ny + (pz - near[2]) * nz) / denominator;
+        if (t <= 0f) return null;
+        float hitX = near[0] + dx * t;
+        float hitY = near[1] + dy * t;
+        float hitZ = near[2] + dz * t;
+
+        if (!Matrix.invertM(anchorInverse, 0, pose, 0)) return null;
+        float[] local = new float[4];
+        Matrix.multiplyMV(local, 0, anchorInverse, 0, new float[] {hitX, hitY, hitZ, 1f}, 0);
+        int voxelX = (int) Math.floor(local[0] / VoxelWorld.VOXEL_METERS);
+        int voxelZ = (int) Math.floor(local[2] / VoxelWorld.VOXEL_METERS);
+        if (voxelX < VoxelWorld.ORIGIN || voxelX >= VoxelWorld.ORIGIN + VoxelWorld.SIZE) return null;
+        if (voxelZ < VoxelWorld.ORIGIN || voxelZ >= VoxelWorld.ORIGIN + VoxelWorld.SIZE) return null;
+        return new int[] {voxelX, voxelZ};
+    }
+
+    private float[] unproject(float screenX, float screenY, float depth) {
+        float[] ndc = {
+            2f * screenX / Math.max(surfaceWidth, 1) - 1f,
+            1f - 2f * screenY / Math.max(surfaceHeight, 1),
+            depth,
+            1f,
+        };
+        float[] out = new float[4];
+        Matrix.multiplyMV(out, 0, inverseViewProjection, 0, ndc, 0);
+        if (Math.abs(out[3]) < 1e-6f) return null;
+        return new float[] {out[0] / out[3], out[1] / out[3], out[2] / out[3]};
+    }
+
+    private void drawVoxels() {
+        if (voxelVertexCount == 0 || voxelVertices == null || voxelColors == null) return;
         GLES20.glUseProgram(program);
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0);
-        vertices.position(0);
+        voxelVertices.position(0);
         GLES20.glEnableVertexAttribArray(positionHandle);
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, vertices);
-        colors.position(0);
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, voxelVertices);
+        voxelColors.position(0);
         GLES20.glEnableVertexAttribArray(colorHandle);
-        GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, colors);
-        // Six faces, two triangles per face. Colors intentionally make axis/orientation visible.
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36);
+        GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, voxelColors);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, voxelVertexCount);
         GLES20.glDisableVertexAttribArray(positionHandle);
         GLES20.glDisableVertexAttribArray(colorHandle);
     }
@@ -213,57 +325,31 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     private void publishStatus(String message) {
         long now = System.currentTimeMillis();
-        if (now - lastStatusMs < 250) return;
+        if (now - lastStatusMs < 120 && !message.startsWith("Tap")) return;
         lastStatusMs = now;
-        activity.setStatus(message);
+        activity.setArStatus(message);
     }
 
     private static FloatBuffer directBuffer(float[] values) {
-        FloatBuffer buffer = ByteBuffer.allocateDirect(values.length * FLOAT_BYTES).order(ByteOrder.nativeOrder()).asFloatBuffer();
-        buffer.put(values).position(0);
+        FloatBuffer buffer = ByteBuffer.allocateDirect(values.length * FLOAT_BYTES)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer();
+        buffer.put(values);
+        buffer.position(0);
         return buffer;
     }
 
-    private static float[] cubeVertices(float h) {
-        float[][] faces = {
-            {-h,-h,h, h,-h,h, h,h,h, -h,-h,h, h,h,h, -h,h,h},
-            {h,-h,-h, -h,-h,-h, -h,h,-h, h,-h,-h, -h,h,-h, h,h,-h},
-            {-h,-h,-h, -h,-h,h, -h,h,h, -h,-h,-h, -h,h,h, -h,h,-h},
-            {h,-h,h, h,-h,-h, h,h,-h, h,-h,h, h,h,-h, h,h,h},
-            {-h,h,h, h,h,h, h,h,-h, -h,h,h, h,h,-h, -h,h,-h},
-            {-h,-h,-h, h,-h,-h, h,-h,h, -h,-h,-h, h,-h,h, -h,-h,h}
-        };
-        float[] result = new float[36 * 3];
-        int i = 0;
-        for (float[] face : faces) for (float v : face) result[i++] = v;
-        return result;
-    }
-
-    private static float[] cubeColors() {
-        float[][] faceColors = {
-            {0.34f,0.72f,0.36f,1f}, {0.70f,0.38f,0.28f,1f},
-            {0.33f,0.62f,0.90f,1f}, {0.90f,0.66f,0.26f,1f},
-            {0.48f,0.82f,0.72f,1f}, {0.48f,0.42f,0.62f,1f}
-        };
-        float[] result = new float[36 * 4];
-        int i = 0;
-        for (float[] color : faceColors) for (int vertex = 0; vertex < 6; vertex++) for (float component : color) result[i++] = component;
-        return result;
-    }
-
-    private static int createProgram(String vertex, String fragment) {
-        int vertexShader = compileShader(GLES20.GL_VERTEX_SHADER, vertex);
-        int fragmentShader = compileShader(GLES20.GL_FRAGMENT_SHADER, fragment);
-        int program = GLES20.glCreateProgram();
-        GLES20.glAttachShader(program, vertexShader);
-        GLES20.glAttachShader(program, fragmentShader);
-        GLES20.glLinkProgram(program);
+    private static int createProgram(String vertexSource, String fragmentSource) {
+        int vertexShader = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource);
+        int fragmentShader = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource);
+        int programHandle = GLES20.glCreateProgram();
+        GLES20.glAttachShader(programHandle, vertexShader);
+        GLES20.glAttachShader(programHandle, fragmentShader);
+        GLES20.glLinkProgram(programHandle);
         int[] status = new int[1];
-        GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, status, 0);
-        if (status[0] == 0) throw new IllegalStateException("GLES program link failed: " + GLES20.glGetProgramInfoLog(program));
-        GLES20.glDeleteShader(vertexShader);
-        GLES20.glDeleteShader(fragmentShader);
-        return program;
+        GLES20.glGetProgramiv(programHandle, GLES20.GL_LINK_STATUS, status, 0);
+        if (status[0] == 0) throw new IllegalStateException("GLES program link failed: " + GLES20.glGetProgramInfoLog(programHandle));
+        return programHandle;
     }
 
     private static int compileShader(int type, String source) {

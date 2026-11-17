@@ -3,11 +3,16 @@ package org.fangcun.ar.poc;
 import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.os.Bundle;
+import android.text.InputFilter;
+import android.text.InputType;
+import android.view.Gravity;
 import android.view.MotionEvent;
-import android.view.View;
-import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -20,46 +25,86 @@ import com.google.ar.core.exceptions.UnavailableApkTooOldException;
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 /**
- * Minimal native ARCore proof of concept for Fangcun.
+ * Native AR client slice for Fangcun.
  *
- * Official references:
- * - https://developers.google.com/ar/develop/java/quickstart
- * - https://developers.google.com/ar/develop/java/hit-test/developer-guide
- * - https://developers.google.com/ar/develop/java/session-config
- *
- * This app deliberately contains no Fangcun world/network/model code. It only proves
- * ARCore availability, camera permission, horizontal hit-test, anchor placement, and
- * fail-closed tracking status for a simple GLES cube.
+ * Renders the Host's authoritative voxel world at a tabletop anchor and forwards taps as
+ * world intents. Transport is the loopback Host reached through `adb reverse`; LAN TLS,
+ * certificate pinning and QR pairing are the next hardening step, not implemented here.
  */
 public final class ArPocActivity extends Activity {
     private static final int CAMERA_PERMISSION_REQUEST = 100;
+    private static final String HOST = "127.0.0.1";
+    private static final int PORT = 8765;
 
     private volatile Session session;
     private ArPocView arView;
     private TextView status;
+    private EditText codeField;
     private boolean installRequested;
+
+    private final VoxelWorld world = new VoxelWorld();
+    private final ExecutorService hostExecutor = Executors.newSingleThreadExecutor();
+    private HostClient hostClient;
+    private String arStatus = "Starting…";
+    private String hostStatus = "Not connected";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
-        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN, android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
         FrameLayout root = new FrameLayout(this);
-        arView = new ArPocView(this);
+        arView = new ArPocView(this, world);
         root.addView(arView, new FrameLayout.LayoutParams(-1, -1));
 
         status = new TextView(this);
         status.setTextColor(0xffffffff);
-        status.setTextSize(14);
-        status.setPadding(24, 24, 24, 24);
+        status.setTextSize(13);
+        status.setPadding(24, 20, 24, 20);
         status.setBackgroundColor(0x990f1915);
-        status.setText("Fangcun AR POC\nChecking ARCore…");
         FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(-2, -2);
         statusParams.topMargin = 28;
         statusParams.leftMargin = 18;
+        statusParams.rightMargin = 18;
         root.addView(status, statusParams);
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(18, 14, 18, 18);
+        bar.setBackgroundColor(0xcc0f1915);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+
+        codeField = new EditText(this);
+        codeField.setHint("pairing code");
+        codeField.setTextColor(Color.WHITE);
+        codeField.setHintTextColor(0xff8fa39b);
+        codeField.setTextSize(16);
+        codeField.setSingleLine(true);
+        codeField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        codeField.setFilters(new InputFilter[]{new InputFilter.LengthFilter(12)});
+        bar.addView(codeField, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        Button connect = new Button(this);
+        connect.setText("Connect");
+        connect.setOnClickListener(view -> connectToHost());
+        bar.addView(connect);
+
+        Button anchor = new Button(this);
+        anchor.setText("Re-anchor");
+        anchor.setOnClickListener(view -> {
+            arView.resetAnchor();
+            setHostStatus("Anchor cleared — tap the table to re-anchor.");
+        });
+        bar.addView(anchor);
+
+        FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(-1, -2);
+        barParams.gravity = Gravity.BOTTOM;
+        root.addView(bar, barParams);
         setContentView(root);
 
         arView.setOnTouchListener((view, event) -> {
@@ -70,6 +115,45 @@ public final class ArPocActivity extends Activity {
             if (event.getAction() == MotionEvent.ACTION_UP) arView.clearPendingTap();
             return true;
         });
+
+        hostClient = new HostClient(HOST, PORT, "tablet-1", world, new HostClient.Listener() {
+            @Override public void onStatus(String text) {
+                setHostStatus(text);
+            }
+
+            @Override public void onWorldLoaded(int rev) {
+                arView.markWorldDirty();
+                setHostStatus("World loaded · rev " + rev + " · " + world.countBlocks() + " blocks");
+            }
+
+            @Override public void onCommitApplied(int rev) {
+                arView.markWorldDirty();
+                setHostStatus("Synced · rev " + rev + " · " + world.countBlocks() + " blocks");
+            }
+        });
+
+        String preset = getIntent().getStringExtra("code");
+        if (preset != null && !preset.isEmpty()) {
+            codeField.setText(preset);
+            connectToHost();
+        }
+        renderStatus();
+    }
+
+    private void connectToHost() {
+        String code = codeField.getText().toString().trim();
+        if (code.isEmpty()) {
+            setHostStatus("Enter the pairing code printed by `npm run host`.");
+            return;
+        }
+        setHostStatus("Pairing…");
+        hostExecutor.execute(() -> hostClient.connect(code));
+    }
+
+    /** Invoked from the GL thread when a tap resolved to a world column. */
+    void onColumnTapped(int x, int z) {
+        setHostStatus("Sending edit for column x=" + x + " z=" + z + "…");
+        hostExecutor.execute(() -> hostClient.editColumn(x, z));
     }
 
     @Override
@@ -80,18 +164,18 @@ public final class ArPocActivity extends Activity {
             if (session == null) {
                 ArCoreApk.Availability availability = ArCoreApk.getInstance().checkAvailability(this);
                 if (availability.isTransient()) {
-                    setStatus("ARCore availability is still being checked…");
+                    setArStatus("ARCore availability is still being checked…");
                     arView.requestRender();
                     return;
                 }
                 if (!availability.isSupported()) {
-                    setStatus("ARCore unsupported on this device.\nNo AR session started.");
+                    setArStatus("ARCore unsupported on this device.\nNo AR session started.");
                     return;
                 }
                 ArCoreApk.InstallStatus installStatus = ArCoreApk.getInstance().requestInstall(this, !installRequested);
                 if (installStatus == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
                     installRequested = true;
-                    setStatus("Installing or updating Google Play Services for AR…");
+                    setArStatus("Installing or updating Google Play Services for AR…");
                     return;
                 }
                 session = new Session(this);
@@ -100,23 +184,23 @@ public final class ArPocActivity extends Activity {
                 config.setPlaneFindingMode(Config.PlaneFindingMode.HORIZONTAL);
                 session.configure(config);
             }
-            // Start the GL surface, then pass the session; texture attachment happens only after GL initialization.
+            // Start the GL surface first; the camera texture is attached only after GL is ready.
             arView.onResume();
             arView.setSession(session);
             session.resume();
-            setStatus("ARCore ready. Move over a tabletop; tap to place a cube.\nTracking: starting");
-        } catch (UnavailableArcoreNotInstalledException | UnavailableApkTooOldException |
-                 UnavailableSdkTooOldException | UnavailableUserDeclinedInstallationException e) {
-            setStatus("ARCore unavailable: " + e.getClass().getSimpleName());
+            setArStatus("ARCore ready. Move over a tabletop and tap to anchor the island.");
+        } catch (UnavailableArcoreNotInstalledException | UnavailableApkTooOldException
+                 | UnavailableSdkTooOldException | UnavailableUserDeclinedInstallationException e) {
+            setArStatus("ARCore unavailable: " + e.getClass().getSimpleName());
         } catch (Exception e) {
-            setStatus("AR session failed closed: " + e.getClass().getSimpleName());
+            setArStatus("AR session failed closed: " + e.getClass().getSimpleName());
         }
     }
 
     private boolean ensureCameraPermission() {
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) return false;
         requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
-        setStatus("Camera permission is required for ARCore.");
+        setArStatus("Camera permission is required for ARCore.");
         return true;
     }
 
@@ -129,6 +213,8 @@ public final class ArPocActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        hostClient.disconnect();
+        hostExecutor.shutdownNow();
         if (session != null) session.close();
         super.onDestroy();
     }
@@ -137,13 +223,25 @@ public final class ArPocActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == CAMERA_PERMISSION_REQUEST && (grantResults.length == 0 || grantResults[0] != PackageManager.PERMISSION_GRANTED)) {
-            setStatus("Camera permission denied. AR writes are disabled.");
+            setArStatus("Camera permission denied. AR writes are disabled.");
         }
     }
 
     Session currentSession() { return session; }
 
-    void setStatus(String value) {
-        runOnUiThread(() -> status.setText("Fangcun AR POC\n" + value));
+    void setArStatus(String value) {
+        arStatus = value;
+        renderStatus();
+    }
+
+    void setHostStatus(String value) {
+        runOnUiThread(() -> {
+            hostStatus = value;
+            renderStatus();
+        });
+    }
+
+    private void renderStatus() {
+        runOnUiThread(() -> status.setText("Fangcun AR\n" + arStatus + "\n\nHost: " + hostStatus));
     }
 }
