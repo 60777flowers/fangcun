@@ -45,6 +45,7 @@ import {
   COMPANION_HOUSE_REJECTED_LINE,
   COMPANION_HOUSE_START_LINE,
   COMPANION_HOUSE_STOPPED_LINE,
+  COMPANION_LAZY_HOUSE_CHEEKY_LINE,
   COMPANION_LAZY_HOUSE_DONE_LINE,
   COMPANION_LAZY_HOUSE_LINE,
   COMPANION_SAY_MAX_TEXT_LENGTH,
@@ -1408,6 +1409,8 @@ export class FangcunHost {
   }
 
   #decideHouse(proposalId: string, approve: boolean): { status: number; body: unknown } {
+    // A running scripted/normal build owns the single queue: no approval path mid-build.
+    if (this.#buildQueue) return { status: 409, body: { error: "build_in_progress" } };
     const pending = this.#pendingHouseProposal;
     if (!pending || pending.proposalId !== proposalId) {
       return { status: 404, body: { error: "proposal_not_found" } };
@@ -1451,12 +1454,15 @@ export class FangcunHost {
   /**
    * One-click scripted "懒懒小屋" demo: 8 corner-post planks then 1 stairs seat at the
    * footprint centre, driven through the SAME paced single-block queue as a real plan.
-   * 409s mirror the normal flow: build_in_progress / proposal_pending / grant_missing /
-   * no_safe_plan / plot_not_clear.
+   *
+   * If an autonomy "认真盖房" proposal is pending, this demo takes over: the proposal is
+   * cleared world-neutrally (no commit, rev unchanged), 小鱼 opens with 「哼，你可管不到我~」,
+   * and auto-propose is suspended (120 s cooldown, plus the queue itself blocks it) so the
+   * approval card cannot pop up mid-demo or right after. 409s mirror the normal flow:
+   * build_in_progress / grant_missing / no_safe_plan / plot_not_clear.
    */
   #startLazyHouseDemo(): { status: number; body: unknown } {
     if (this.#buildQueue) return { status: 409, body: { error: "build_in_progress" } };
-    if (this.#currentHouseProposal()) return { status: 409, body: { error: "proposal_pending" } };
     const grant = this.#activeGrant();
     if (!grant) return { status: 409, body: { error: "grant_missing" } };
     if (!grant.allowedBlockIds.includes("planks") || !grant.allowedBlockIds.includes(HOUSE_SEAT_BLOCK_ID)) {
@@ -1464,6 +1470,16 @@ export class FangcunHost {
     }
     const footprint = findHouseBuildPlan(this.#authority.snapshot, grant);
     if (!footprint) return { status: 409, body: { error: "plot_not_clear" } };
+    // The explicit demo trigger owns the flow: cancel any pending serious-build proposal
+    // world-neutrally (no commit, revision unchanged) so its approval card cannot pop up.
+    const cancelled = this.#currentHouseProposal();
+    if (cancelled || this.#pendingHousePlan) this.#clearHouseProposal();
+    if (cancelled) {
+      console.log(`[fangcun][DEMO] lazy-house cancelled pending house proposal ${cancelled.proposalId} world-neutral (rev=${this.#authority.snapshot.rev})`);
+    }
+    // Suspend auto-propose from the moment the demo starts (the queue blocks it while it
+    // runs; the 120 s cooldown covers the moments after it finishes/stops).
+    this.#houseProposalCooldownUntilMs = this.#now() + HOUSE_PROPOSAL_POST_BUILD_COOLDOWN_MS;
     const lazyPlan = buildLazyHousePlan(footprint);
     this.#startScriptedBuild({
       kind: "lazy-house",
@@ -1474,16 +1490,20 @@ export class FangcunHost {
       midLine: { afterBlocks: LAZY_HOUSE_BLOCK_COUNT - 1, text: COMPANION_LAZY_HOUSE_LINE },
       finishLine: COMPANION_LAZY_HOUSE_DONE_LINE,
       finishAction: "sit",
+      startLine: cancelled ? COMPANION_LAZY_HOUSE_CHEEKY_LINE : COMPANION_HOUSE_START_LINE,
     });
     this.#demoRun = Object.freeze({ kind: "lazy-house", startedAtMs: this.#now() });
     return {
       status: 200,
       body: Object.freeze({
         ok: true,
+        started: true,
         demo: "lazy-house",
         planBlockCount: lazyPlan.blockCount,
         bounds: lazyPlan.bounds,
         intervalMs: this.#buildIntervalMs,
+        cancelledProposal: cancelled !== null,
+        ...(cancelled ? { cancelledProposalId: cancelled.proposalId } : {}),
       }),
     };
   }
@@ -1583,6 +1603,8 @@ export class FangcunHost {
     midLine: BuildQueueState["midLine"];
     finishLine: string | null;
     finishAction: CompanionActionId | null;
+    /** Opening line before the first block; defaults to the generic build line. */
+    startLine?: string | null;
   }>): void {
     const grant = this.#grant;
     if (!grant) return;
@@ -1605,7 +1627,7 @@ export class FangcunHost {
       placeSeatAfter: options.placeSeatAfter,
     };
     this.#setCompanionState("building");
-    this.#say(COMPANION_HOUSE_START_LINE);
+    if (options.startLine !== null) this.#say(options.startLine ?? COMPANION_HOUSE_START_LINE);
     this.#scheduleBuildStep(0);
   }
 
@@ -1670,6 +1692,7 @@ export class FangcunHost {
   #stopBuild(reason: string): void {
     const queue = this.#buildQueue;
     if (!queue) return;
+    const wasLazyDemo = queue.kind === "lazy-house";
     this.#dropBuildQueue();
     this.#lastBuild = Object.freeze({
       inProgress: false,
@@ -1682,6 +1705,8 @@ export class FangcunHost {
       demo: queue.kind === "house" ? null : queue.kind,
     });
     this.#demoRun = null;
+    // Even an aborted lazy demo keeps auto-propose suspended for the demo cooldown window.
+    if (wasLazyDemo) this.#houseProposalCooldownUntilMs = this.#now() + HOUSE_PROPOSAL_POST_BUILD_COOLDOWN_MS;
     this.#settleBuildIdle();
     this.#setCompanionState("idle");
     this.#say(COMPANION_HOUSE_STOPPED_LINE);

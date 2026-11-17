@@ -642,6 +642,9 @@ class FangcunHostService {
         jobId: typeof payload.jobId === 'string' ? payload.jobId : null,
         proposalId,
         planBlockCount: typeof payload.planBlockCount === 'number' ? payload.planBlockCount : null,
+        // The Host cancels a pending house proposal when the lazy demo starts;
+        // the panel uses this to clear the approval card immediately.
+        cancelledProposal: payload.cancelledProposal === true,
         message: typeof payload.message === 'string' ? payload.message : null,
         raw: payload,
       }
@@ -1335,7 +1338,15 @@ function createRoutes(service) {
     }),
     route(`${API_PREFIX}/demo/lazy-house`, ['POST'], async () => {
       const result = await service.runDemo('lazy-house')
-      return json({ ok: true, flow: result.flow, state: result.state, jobId: result.jobId, message: result.message, demo: result.raw })
+      return json({
+        ok: true,
+        flow: result.flow,
+        state: result.state,
+        jobId: result.jobId,
+        cancelledProposal: result.cancelledProposal,
+        message: result.message,
+        demo: result.raw,
+      })
     }),
     route(`${API_PREFIX}/demo/real-house`, ['POST'], async () => {
       const result = await service.runDemo('real-house')

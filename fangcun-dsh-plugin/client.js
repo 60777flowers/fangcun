@@ -247,6 +247,8 @@ window.__ModuleLoader__.load({
       'demo.real.note': '创建盖房提议并在面板里等待你同意；同意后按 24 方块的节奏建造（含台阶座位）。',
       'demo.lazy.button': '演示：懒懒小屋',
       'demo.lazy.note': '盖 9 个方块的小屋；完成后伙伴会说「房子盖好了，我先坐下休息会」。',
+      'demo.cancelledProposal': '已取消待批提案，{name}开始自己盖。',
+      'demo.runningTip': '演示进行中',
       'demo.reset.button': '重置世界',
       'demo.reset.note': '清空所有方块回到初始世界（会断开平板连接，平板会自动重连）。',
       'demo.reset.confirm': '确认重置？会清空所有方块',
@@ -434,6 +436,8 @@ window.__ModuleLoader__.load({
       'demo.real.note': 'Creates a house proposal and waits for your approval in the panel; approving starts the paced 24-block build (stairs seat included).',
       'demo.lazy.button': 'Demo: lazy house',
       'demo.lazy.note': 'Builds a 9-block house; afterwards the companion says “房子盖好了，我先坐下休息会”.',
+      'demo.cancelledProposal': 'Cancelled the pending proposal; {name} starts building instead.',
+      'demo.runningTip': 'Demo running',
       'demo.reset.button': 'Reset world',
       'demo.reset.note': 'Clears every block back to the seed world (the tablet connection drops and reconnects automatically).',
       'demo.reset.confirm': 'Reset for real? All blocks will be cleared',
@@ -928,7 +932,8 @@ window.__ModuleLoader__.load({
       // selectedId, draft, busy, error, notice, unread, warehouseSelected,
       // slotFeedback, tab, island, islandFailed, islandFrameLoaded, profileOpen,
       // copied, dragItemId, dropSlot, model, petDraft, petBusy, petFeedback,
-      // demo, copiedIsland, resetState, houseFeedback.
+      // demo, copiedIsland, resetState, houseFeedback, demoNotice,
+      // dismissedProposalId.
       const [social, setSocial] = useState(null)
       const [host, setHost] = useState(null)
       const [selectedId, setSelectedId] = useState(null)
@@ -964,6 +969,8 @@ window.__ModuleLoader__.load({
       const [copiedIsland, setCopiedIsland] = useState(false)
       const [resetState, setResetState] = useState(null)
       const [houseFeedback, setHouseFeedback] = useState(null)
+      const [demoNotice, setDemoNotice] = useState(null)
+      const [dismissedProposalId, setDismissedProposalId] = useState(null)
 
       const mountedRef = useRef(true)
       const selectedRef = useRef(null)
@@ -1009,6 +1016,10 @@ window.__ModuleLoader__.load({
         }
         if (selectedRef.current) delete nextUnread[selectedRef.current]
         setUnread((existing) => ({ ...existing, ...nextUnread }))
+        // A dismissed (cancelled) proposal stays hidden until the Host confirms it
+        // is gone; a different proposal id is a new ask and shows again.
+        const proposalId = payload.live?.houseProposal?.proposalId ?? null
+        setDismissedProposalId((current) => (current !== null && current !== proposalId ? null : current))
         if (full) setError(null)
       }, [])
 
@@ -1080,7 +1091,12 @@ window.__ModuleLoader__.load({
       const isPrimary = selected !== null && primaryCompanionId !== null && selected.companionId === primaryCompanionId
       const live = social?.live ?? null
       const build = live?.build ?? null
-      const houseProposal = live?.houseProposal ?? null
+      const houseProposalRaw = live?.houseProposal ?? null
+      // A proposal cancelled by the lazy-house demo is hidden until the Host
+      // confirms it disappeared (the poll would otherwise re-show it briefly).
+      const houseProposal = houseProposalRaw && houseProposalRaw.proposalId !== dismissedProposalId
+        ? houseProposalRaw
+        : null
       const activeActionId = isPrimary
         ? (pet?.activeAction ?? selected?.activeAction ?? null)
         : (selected?.activeAction ?? null)
@@ -1217,6 +1233,15 @@ window.__ModuleLoader__.load({
         try {
           const payload = await callApi(`/demo/${flow}`, { method: 'POST', body: '{}' })
           if (!mountedRef.current) return
+          // The lazy demo cancels any pending proposal on the Host: hide the
+          // approval card at once and confirm it in a short inline note.
+          if (flow === 'lazy-house' && payload.cancelledProposal === true) {
+            const cancelledId = houseProposalRaw?.proposalId ?? null
+            setDismissedProposalId(cancelledId ?? 'cancelled')
+            setHouseFeedback(null)
+            setDemoNotice(t('demo.cancelledProposal', { name: selected?.name ?? t('companion') }))
+          }
+          if (flow !== 'lazy-house') setDemoNotice(null)
           setDemo({
             flow,
             state: typeof payload.state === 'string'
@@ -1236,7 +1261,7 @@ window.__ModuleLoader__.load({
             atMs: Date.now(),
           })
         }
-      }, [build?.inProgress, busy, demoRefusalText, loadSocial, petBusy, selectedIsMine])
+      }, [build?.inProgress, busy, demoRefusalText, houseProposalRaw?.proposalId, loadSocial, petBusy, selected?.name, selectedIsMine, t])
 
       /** Per-flow view: the active flow follows the live build summary. */
       const demoViewFor = useCallback((flow) => {
@@ -1320,6 +1345,10 @@ window.__ModuleLoader__.load({
       const onDecideHouse = useCallback(async (approve) => {
         const proposalId = houseProposal?.proposalId
         if (!proposalId || petBusy !== null || busy !== null) return
+        if (build?.inProgress === true) {
+          setHouseFeedback({ kind: 'error', text: t('demo.err.buildInProgress') })
+          return
+        }
         setPetBusy('decide')
         setHouseFeedback(null)
         try {
@@ -1348,7 +1377,7 @@ window.__ModuleLoader__.load({
         } finally {
           if (mountedRef.current) setPetBusy(null)
         }
-      }, [busy, houseProposal?.proposalId, loadSocial, petBusy, t])
+      }, [build?.inProgress, busy, houseProposal?.proposalId, loadSocial, petBusy, t])
 
       // The two-step confirmation reverts on its own after ~5 s.
       useEffect(() => {
@@ -2083,7 +2112,7 @@ window.__ModuleLoader__.load({
                     className: 'fc-btn',
                     'data-variant': 'primary',
                     'data-size': 'sm',
-                    disabled: petBusy !== null || busy !== null,
+                    disabled: petBusy !== null || busy !== null || build?.inProgress === true,
                     onClick: () => onDecideHouse(true),
                   }, petBusy === 'decide' ? '…' : t('house.approve')),
                   h('button', {
@@ -2091,7 +2120,7 @@ window.__ModuleLoader__.load({
                     className: 'fc-btn',
                     'data-variant': 'danger-outline',
                     'data-size': 'sm',
-                    disabled: petBusy !== null || busy !== null,
+                    disabled: petBusy !== null || busy !== null || build?.inProgress === true,
                     onClick: () => onDecideHouse(false),
                   }, t('house.reject'))),
                 houseFeedback
@@ -2202,10 +2231,13 @@ window.__ModuleLoader__.load({
                       'data-size': 'sm',
                       disabled: !editable || demoBusy || demoBlockedByBuild,
                       onClick: () => onDemo(flow),
-                      title: demoBlockedByBuild ? t('demo.disabled') : t(titleKey),
+                      title: demoBlockedByBuild ? t('demo.runningTip') : t(titleKey),
                     }, t(titleKey))),
                   h('div', { className: 'fc-console-hint' }, t(noteKey)),
-                  h('div', { className: 'fc-inline', 'data-kind': kind }, demoStatusText(view)))
+                  h('div', { className: 'fc-inline', 'data-kind': kind }, demoStatusText(view)),
+                  flow === 'lazy-house' && demoNotice
+                    ? h('div', { className: 'fc-inline', 'data-kind': 'ok' }, demoNotice)
+                    : null)
               }
               const resetStage = resetState?.stage ?? 'idle'
               const resetBusy = resetStage === 'running'

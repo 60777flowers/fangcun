@@ -81,6 +81,8 @@ export const COMPANION_HOUSE_STOPPED_LINE = "这里好像放不下了，我先�
 /** Scripted "懒懒小屋" demo lines (the first is the exact line required by the demo spec). */
 export const COMPANION_LAZY_HOUSE_LINE = "房子盖好了，我先坐下休息会";
 export const COMPANION_LAZY_HOUSE_DONE_LINE = "呼——真舒服";
+/** Opening line when the lazy demo cancels a pending "认真盖房" proposal (exact demo string). */
+export const COMPANION_LAZY_HOUSE_CHEEKY_LINE = "哼，你可管不到我~";
 
 /** FNV-1a display hash: stable across runs and cheap enough for a chat turn. */
 function stableIndex(seed: string, length: number): number {

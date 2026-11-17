@@ -1186,6 +1186,19 @@ async function readUntilType(read: () => Promise<Record<string, unknown>>, type:
   throw new Error(`no ${type} frame observed`);
 }
 
+/** Reads frames until one matches, so queued approval frames cannot satisfy the wrong assertion. */
+async function readUntilFrame(
+  read: () => Promise<Record<string, unknown>>,
+  predicate: (frame: Record<string, unknown>) => boolean,
+  label: string,
+): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const frame = await read();
+    if (predicate(frame)) return frame;
+  }
+  throw new Error(`no ${label} frame observed`);
+}
+
 function blockInState(state: HouseStateBody, at: Readonly<{ x: number; y: number; z: number }>): string | null {
   return state.world.blocks[coordToIndex(at)] ?? null;
 }
@@ -1643,7 +1656,7 @@ test("a paced build rejects a second proposal and can still be stopped cleanly",
     const second = await coreJson<{ error: string }>(address, "/house/propose", undefined, "POST");
     assert.equal(second.status, 409);
     assert.equal(second.body.error, "build_in_progress");
-    assert.equal((await decideHouse(address, proposal.proposalId, true)).status, 404, "the approved proposal is consumed");
+    assert.equal((await decideHouse(address, proposal.proposalId, true)).status, 409, "deciding again is refused while the queue runs");
     // Await the queue's completion signal instead of sleeping for the paced duration.
     const summary = await withTimeout(host.waitForBuildIdle(), 15000, "paced build completion");
     assert.equal(summary.inProgress, false);
@@ -1651,6 +1664,7 @@ test("a paced build rejects a second proposal and can still be stopped cleanly",
     assert.equal(summary.intervalMs, 25);
     assert.equal(summary.lastError, null);
     assert.equal(summary.seatPlaced, true);
+    assert.equal((await decideHouse(address, proposal.proposalId, true)).status, 404, "the approved proposal is consumed once the build ends");
   } finally {
     await host.stop();
   }
@@ -1830,9 +1844,11 @@ test("self-driven autonomy proposes a house once and broadcasts the ask", async 
   const address = await host.start();
   let socket: WebSocket | undefined;
   try {
-    await grantHome(address);
+    // Pair BEFORE the grant: the self-driven proposal broadcast must be observed live.
+    // (Pairing after the grant can miss the frame if autonomy proposes during the handshake.)
     const paired = await pairTablet(host, address);
     socket = paired.socket;
+    await grantHome(address);
     const proposalFrame = await readUntilType(paired.read, "companion_build_proposal");
     const validated = validateCompanionBuildProposalMessage(proposalFrame);
     assert.equal(validated.ok, true);
@@ -1844,7 +1860,7 @@ test("self-driven autonomy proposes a house once and broadcasts the ask", async 
     const state = await waitForState(address, (current) => current.houseProposal !== null, "self-driven proposal in state");
     assert.equal(state.houseProposal!.proposalId, validated.value.proposalId);
     assert.equal(state.companionState, "awaiting_approval");
-    const say = await readUntilType(paired.read, "companion_say");
+    const say = await readUntilFrame(paired.read, (frame) => frame.type === "companion_say" && /小房子/.test(String(frame.text)), "house proposal say");
     assert.match(String(say.text), /小房子/);
 
     const firstAutonomy = (await coreJson<AutonomyBody>(address, "/autonomy")).body;
@@ -1967,12 +1983,14 @@ test("lazy-house demo commits the exact 9-block script and finishes sitting", as
     const startRev = host.revision;
     const paired = await pairTablet(host, address);
     socket = paired.socket;
-    const started = await coreJson<{ ok: boolean; demo: string; planBlockCount: number; bounds: HomeBounds }>(address, "/demo/lazy-house", {}, "POST");
+    const started = await coreJson<{ ok: boolean; started: boolean; demo: string; planBlockCount: number; bounds: HomeBounds; cancelledProposal: boolean }>(address, "/demo/lazy-house", {}, "POST");
     assert.equal(started.status, 200);
     assert.equal(started.body.ok, true);
+    assert.equal(started.body.started, true);
     assert.equal(started.body.demo, "lazy-house");
     assert.equal(started.body.planBlockCount, LAZY_HOUSE_BLOCK_COUNT);
     assert.equal(started.body.planBlockCount, 9);
+    assert.equal(started.body.cancelledProposal, false, "there was no pending proposal to cancel");
     assert.equal(started.body.bounds.maxExclusive.x - started.body.bounds.min.x, 3);
     assert.equal(started.body.bounds.maxExclusive.y - started.body.bounds.min.y, 3);
     assert.equal(started.body.bounds.maxExclusive.z - started.body.bounds.min.z, 3);
@@ -2047,7 +2065,7 @@ test("lazy-house demo commits the exact 9-block script and finishes sitting", as
   }
 });
 
-test("lazy-house demo refuses without a grant, with a pending proposal, or while busy", async () => {
+test("lazy-house demo refuses without a grant or while busy and cancels a pending proposal instead of refusing", async () => {
   const host = new FangcunHost({ worldId: "lazy-house-refusal-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 25 });
   const address = await host.start();
   try {
@@ -2057,13 +2075,11 @@ test("lazy-house demo refuses without a grant, with a pending proposal, or while
 
     await grantHome(address);
     const proposal = await proposeHouse(address);
-    const pending = await coreJson<{ error: string }>(address, "/demo/lazy-house", {}, "POST");
-    assert.equal(pending.status, 409);
-    assert.equal(pending.body.error, "proposal_pending");
-    await decideHouse(address, proposal.proposalId, false);
-
-    const started = await coreJson<{ demo: string }>(address, "/demo/lazy-house", {}, "POST");
-    assert.equal(started.status, 200);
+    const started = await coreJson<{ demo: string; started: boolean; cancelledProposal: boolean; cancelledProposalId?: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(started.status, 200, "a pending serious-build proposal is taken over, not refused");
+    assert.equal(started.body.started, true);
+    assert.equal(started.body.cancelledProposal, true);
+    assert.equal(started.body.cancelledProposalId, proposal.proposalId);
     await waitForState(address, (state) => state.build.inProgress && state.build.demo === "lazy-house" && state.build.completedBlocks >= 1, "a running lazy-house demo");
     const busy = await coreJson<{ error: string }>(address, "/demo/lazy-house", {}, "POST");
     assert.equal(busy.status, 409);
@@ -2359,5 +2375,148 @@ test("demo reset is refused while a build is running and for an in-memory store"
     assert.equal(refused.body.error, "reset_unavailable_in_memory");
   } finally {
     await memoryHost.stop();
+  }
+});
+
+
+// ------------------------------------------------------------------------------------
+// Lazy-house takes over a pending serious-build proposal (user request)
+// ------------------------------------------------------------------------------------
+
+test("lazy-house cancels a pending proposal world-neutrally and opens with the cheeky line", async () => {
+  const pendingSteps: Array<() => void> = [];
+  const host = new FangcunHost({
+    worldId: "lazy-cancel-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0,
+    buildStepScheduler: (run) => { pendingSteps.push(run); return () => undefined; },
+  });
+  const address = await host.start();
+  let socket: WebSocket | undefined;
+  try {
+    await grantHome(address);
+    const proposed = await proposeHouse(address);
+    assert.ok((await hostState(address)).houseProposal, "there is a pending serious-build proposal before the demo");
+    const revBefore = host.revision;
+    const paired = await pairTablet(host, address);
+    socket = paired.socket;
+
+    const lazy = await coreJson<{ ok: boolean; started: boolean; demo: string; cancelledProposal: boolean; cancelledProposalId?: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(lazy.status, 200);
+    assert.equal(lazy.body.started, true);
+    assert.equal(lazy.body.cancelledProposal, true);
+    assert.equal(lazy.body.cancelledProposalId, proposed.proposalId);
+    assert.equal(host.revision, revBefore, "cancelling the proposal is world-neutral (no commits)");
+    const afterStart = await hostState(address);
+    assert.equal(afterStart.houseProposal, null, "the pending approval card is cleared immediately");
+    assert.equal(afterStart.world.rev, revBefore);
+
+    // Cheeky opening line is broadcast before the first block is committed.
+    const opening = await paired.read();
+    assert.equal(opening.type, "companion_state");
+    assert.equal(opening.state, "building");
+    const cheeky = await paired.read();
+    assert.equal(cheeky.type, "companion_say");
+    assert.equal(cheeky.text, "哼，你可管不到我~");
+
+    // Pump the scripted queue: 9 block steps + 1 completion step.
+    let pumped = 0;
+    while (pendingSteps.length > 0 && pumped < 50) { pendingSteps.shift()!(); pumped += 1; }
+    assert.equal(pumped, LAZY_HOUSE_BLOCK_COUNT + 1);
+    const summary = await withTimeout(host.waitForBuildIdle(), 2000, "lazy demo completion after cancellation");
+    assert.equal(summary.completedBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(summary.demo, "lazy-house");
+
+    const rest: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < 13; index += 1) rest.push(await paired.read());
+    for (const [index, frame] of rest.slice(0, 8).entries()) {
+      assert.equal(frame.type, "commit", `frame ${index} is a corner-post commit`);
+      assert.equal((frame.operations as PlaceOpBody[])[0]!.blockId, "planks");
+    }
+    assert.equal(rest[8]!.type, "companion_say");
+    assert.equal(rest[8]!.text, "房子盖好了，我先坐下休息会");
+    assert.equal(rest[9]!.type, "commit");
+    assert.equal((rest[9]!.operations as PlaceOpBody[])[0]!.blockId, "stairs");
+    assert.equal(rest[10]!.type, "companion_say");
+    assert.match(String(rest[10]!.text), /真舒服/);
+    assert.equal(rest[11]!.type, "companion_action");
+    assert.equal(rest[11]!.actionId, "sit");
+    assert.equal(rest[12]!.type, "companion_state");
+    assert.equal(rest[12]!.state, "idle");
+
+    const finalState = await hostState(address);
+    assert.equal(finalState.world.rev, revBefore + LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(finalState.houseProposal, null);
+    assert.equal(finalState.demo.run, null);
+  } finally {
+    socket?.close();
+    await host.stop();
+  }
+});
+
+test("lazy-house suspends auto-propose during the demo and its 120 s cooldown, refusing approval paths", async () => {
+  let now = Date.parse("2026-11-18T12:00:00.000Z");
+  const pendingSteps: Array<() => void> = [];
+  const host = new FangcunHost({
+    worldId: "lazy-suppress-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40, buildIntervalMs: 0,
+    nowMs: () => now,
+    buildStepScheduler: (run) => { pendingSteps.push(run); return () => undefined; },
+  });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    // The autonomy loop proposes on its own first; the lazy demo must take over.
+    const first = await waitForState(address, (state) => state.houseProposal !== null, "autonomy proposal before the demo");
+    const firstProposalId = first.houseProposal!.proposalId;
+    const lazy = await coreJson<{ started: boolean; cancelledProposal: boolean; cancelledProposalId?: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(lazy.status, 200);
+    assert.equal(lazy.body.started, true);
+    assert.equal(lazy.body.cancelledProposal, true);
+    assert.equal(lazy.body.cancelledProposalId, firstProposalId);
+
+    // No approval/propose path may be triggered while the demo runs.
+    const proposeRefused = await coreJson<{ error: string }>(address, "/house/propose", {}, "POST");
+    assert.equal(proposeRefused.status, 409);
+    assert.equal(proposeRefused.body.error, "build_in_progress");
+    const realRefused = await coreJson<{ error: string }>(address, "/demo/real-house", {}, "POST");
+    assert.equal(realRefused.status, 409);
+    assert.equal(realRefused.body.error, "build_in_progress");
+    const decideRefused = await coreJson<{ error: string }>(address, "/house/decide", { proposalId: firstProposalId, approve: true }, "POST");
+    assert.equal(decideRefused.status, 409);
+    assert.equal(decideRefused.body.error, "build_in_progress");
+
+    const autonomyDuring = (await coreJson<{ lastHouseProposalAtMs: number | null }>(address, "/autonomy")).body;
+    const attemptsDuring = autonomyDuring.lastHouseProposalAtMs;
+    await delay(220); // several autonomy intervals while the demo is paused mid-build
+    assert.equal((await hostState(address)).houseProposal, null, "auto-propose cannot fire during the demo");
+    assert.equal((await coreJson<{ lastHouseProposalAtMs: number | null }>(address, "/autonomy")).body.lastHouseProposalAtMs, attemptsDuring);
+
+    // Finish the demo; the cooldown must keep auto-propose suspended for ~120 s.
+    let pumped = 0;
+    while (pendingSteps.length > 0 && pumped < 50) { pendingSteps.shift()!(); pumped += 1; }
+    const done = await withTimeout(host.waitForBuildIdle(), 2000, "lazy demo completion before cooldown check");
+    assert.equal(done.completedBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    const cooldown = (await coreJson<{ houseProposalCooldownUntilMs: number }>(address, "/autonomy")).body.houseProposalCooldownUntilMs;
+    assert.ok(cooldown >= now + 120_000, "the lazy demo arms the full 120 s post-demo cooldown");
+    now += 60_000;
+    await delay(220);
+    assert.equal((await hostState(address)).houseProposal, null, "no re-proposal inside the cooldown");
+    assert.equal((await coreJson<{ lastHouseProposalAtMs: number | null }>(address, "/autonomy")).body.lastHouseProposalAtMs, attemptsDuring);
+    now += 61_000;
+    const resumeDeadline = Date.now() + 5000;
+    let resumedAt: number | null = null;
+    while (Date.now() < resumeDeadline) {
+      const autonomy = (await coreJson<AutonomyBody>(address, "/autonomy")).body;
+      if (autonomy.lastHouseProposalAtMs !== null && autonomy.lastHouseProposalAtMs > (attemptsDuring ?? 0)) {
+        resumedAt = autonomy.lastHouseProposalAtMs;
+        break;
+      }
+      await delay(50);
+    }
+    assert.ok(resumedAt !== null, "auto-propose resumes after the lazy cooldown expires");
+    // The lazy house itself fills the 4x4 grant's only 3x3 footprint, so the resumed attempt
+    // honestly fails with plot_not_clear; what matters is that the suspension ended.
+    assert.equal((await hostState(address)).houseProposal, null);
+    assert.equal(host.revision, LAZY_HOUSE_BLOCK_COUNT, "only the lazy demo blocks were committed");
+  } finally {
+    await host.stop();
   }
 });
