@@ -1,175 +1,206 @@
 # 方寸 · Fangcun
 
-> **在真实桌面上，出现一个 Minecraft 风格的微缩世界；你用手机摄像头看着它，用手指和 AI 角色一起建造。**
+**在真实桌面上，长出一个 Minecraft 风格的微缩世界。你举着平板看着它，用手指和一只会自己盖房子的 AI 桌宠一起建造。**
 
-**仓库**：<https://github.com/60777flowers/fangcun>　｜　**许可**：根目录代码/文档按 [LICENSE](LICENSE)；子包须核对元数据（素材除外）　｜　**协作**：[CONTRIBUTING.md](CONTRIBUTING.md)
+> PC 端的方寸世界检视器（`?mode=host`，与平板共享同一份权威世界）：
+>
+> ![方寸世界检视器](docs/screenshots/inspector.png)
 
-```bash
-git clone https://github.com/60777flowers/fangcun.git
-```
-
-
-一句话定位：**AR 桌面微缩沙盒**（tabletop AR sandbox）——不是 PC 游戏、不是投屏、不是 VR。
-
-```
-        ☁  真实桌面背景（虚焦）
-   ┌──────────────────────────────┐
-   │   🌳                         │
-   │  🏠  敞口木板房              │
-   │ 🧰 ▓TNT        ⛏ 钻石镐      │
-   │ ████████████████  ~1.2 格的角色站在这
-   │ ══════════════   接触阴影     │
-   └──────────────────────────────┘
-        手机 = AR 取景器 + 输入设备
-```
+不是投屏，不是 VR，不是把 MC 画面贴到摄像头里 —— 是一个**真正存在于桌面上、有 3 cm 体素尺度、由手机/平板做取景与输入**的 AR 沙盒。
 
 ---
 
-## 当前项目状态
-
-> **产品方向已确认：**在真实物理桌面上用 Android 设备摄像头呈现 MC 风格微缩方块世界；玩家参与建设，大肥鱼 AI 在同一世界协作建设，AI 是有主动性的桌宠，可在用户授权的专属家园地块内主动建造装饰。v0 仍是单用户单 AI；人格卡/多 AI/跨用户异步串门只预留扩展接口，不做成可用功能。**Android 客户端采用原生 APK（Kotlin + SceneView/Filament + ARCore + glTF），v0 只支持 ARCore；打印标记为 v1 兼容模式。** 不含真实 PC Minecraft、iOS 真 AR、多人实时联机、语音。
-> **实现状态（2026-11-17）：**已搭建 TypeScript 工作区、协议/体素核心、companion runtime 与 PC 桌面模拟器；47 项测试、typecheck、companion demo 均通过。尚无原生客户端、Host WSS/配对/SQLite、真实 DSH/MCP 接入、正式角色资产与标记模式。技术路线见 [ADR-0003](docs/ADR-0003-android-client-and-ar-stack.md)，执行计划见 [TECH-ROADMAP](docs/TECH-ROADMAP.md)，设备验证见 [DEVICE-TEST-PLAN](docs/DEVICE-TEST-PLAN.md)。不得把计划写成已交付能力。
-
-## 现在该读哪份文件
-
-| 你想… | 读 |
-|---|---|
-| **先看技术路线决策** | **[docs/ADR-0003-android-client-and-ar-stack.md](docs/ADR-0003-android-client-and-ar-stack.md)** —— 原生客户端/AR/渲染/角色/网络的拍板与证据 |
-| **看后续执行计划与排期** | **[docs/TECH-ROADMAP.md](docs/TECH-ROADMAP.md)** —— 架构、M0–M8 WBS、验收、风险、合规 |
-| **看接口/协议/结构 DSL** | [docs/HOST-API.md](docs/HOST-API.md)、[docs/DSL-SPEC.md](docs/DSL-SPEC.md) |
-| **看设备验证怎么做** | [docs/DEVICE-TEST-PLAN.md](docs/DEVICE-TEST-PLAN.md) |
-| **接手实现** | [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) —— 已确认范围与验收；客户端部分以 ADR-0003 为准 |
-| 查看两轮审核结论 | [docs/REVIEW.md](docs/REVIEW.md)、[docs/REVIEW-2.md](docs/REVIEW-2.md) |
-| 看现有静态预览 | [docs/m0-final.png](docs/m0-final.png)（仅桌面静态截图；可复跑：`cd preview && npm i && node shot.mjs`） |
-| 看旧开发草案 | [docs/DEV.md](docs/DEV.md) —— 历史参考，接口和计划不作为实现真源 |
-| 看调查材料 | [REPORT.md](REPORT.md)、[PLAN.md](PLAN.md)、[reports/](reports/) |
-
-## 工程核心快速验证
-
-```bash
-npm ci
-npm run typecheck
-npm test
-```
-
-运行 PC 桌面沙盒（仅本机服务，不包含 AR）：
-
-```bash
-npm run simulator
-# 浏览器打开 http://127.0.0.1:4173/
-```
-
-当前已交付的纯核心包：
-
-- `packages/world-schema`：16×16×16 坐标、索引、稳定方块白名单与 3 cm 映射。
-- `packages/protocol`：intent/commit、hello/welcome/ack/resync/ping/pong、plan approval 消息校验与有上限 UTF-8 frame codec；完整网络服务握手/广播仍未实现。
-- `packages/voxel-core`：确定性 14×14 岛、原子事务、玩家/AI 建造区规则、快照和 replica commit 应用。
-- `packages/worldd`：内存权威协调器原型，包含 `clientId + seq` 幂等、revision 检查；不包含 WAL、网络监听或身份认证。
-- `packages/companion-schema`（第二阶段草案）：versioned PersonaCard、CompanionInstance、HomePlotGrant 和只读异步 Visit contract；不包含 AI runtime、账号或联网串门。
-- `packages/companion-runtime`（原型）：确定性 home 候选、plan/TTL/预算、autonomy reducer 与 tick；尚未接 Host/WSS 与真实 DSH。
-- `packages/ar-provider`（历史/参考）：浏览器 WebXR/标记的 capability/tracking 抽象；客户端改为原生后不再作为基础。
-
-桌面模拟器已可本地运行；真实 Android AR 页面尚未宣称完成。产品客户端将按**原生 APK** 规划（不依赖 ADB），v0 只支持 ARCore，v1 再评估打印标记；不为 Tab S8 写专用逻辑。真实设备矩阵、TLS 配对与 M0 录屏仍需实测。
-
-## 两条产品铁律
-
-1. **目标场景中只有一个大肥鱼 AI 角色**；运行时模型尚未定版，替换/降级机制属于实施要求而非现成能力。
-2. **玩家本人不出现在世界里** —— 没有玩家化身/皮肤/身体。玩家是"上帝之手"：手指点哪就在哪放/拆。
-
-## 视觉参考图（`效果图/`，当前已跟踪）
-
-`效果图/1.png`、`2.png`、`3.png` 是**AI 视频生成的帧**，带第三方平台水印。它们目前已在仓库文件中，但本仓库尚无可审计的公开再分发权利链；不属于 MIT 许可范围，也不得视为已获公开分发许可。
-
-> 它们只作团队内部视觉讨论材料，不是规格。**仓库已跟踪这些图片，但目前没有在本仓库中形成可审计的公开再分发授权链**；“非 MIT / 仅参考”不等于获得公开分发许可。发布门禁见 [docs/REVIEW.md](docs/REVIEW.md)。
-> 视觉讨论背景见 [docs/DEV.md](docs/DEV.md) §1.1；实际实现与验收以 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) 为准。
-
-## 角色模型调研样例（非当前运行时资产）
-
-### 蓝色小肥鱼 Deepseek 鲸鱼娘 VRM
-
-![正面](docs/model-check-front.png)
-
-> 这是已跟踪的第三方模型渲染截图；本仓库当前没有记录其公开分发许可链。署名不等于授权；发布/再分发前须另行清权或移除此图及相关渲染图。
+## 这是什么
 
 | | |
 |---|---|
-| **状态** | 本地寻源与渲染样例；非默认资产、非发行候选 |
-| **模型名** | 蓝色小肥鱼 Deepseek 鲸鱼娘 |
-| **作者** | **木子恶魔 / MZEM** ｜ B站 <https://space.bilibili.com/95816706> |
-| **发布页** | <https://www.aplaybox.com/details/model/ayXkRzVflmnd>（模之屋 Aplaybox） |
-| **格式** | VRM 1.0（Blender VRM Add-on 4.5.0 导出）｜17.6 MB |
-| **许可** | **个人非商业使用**；**必须署名**；**禁止二次配布**；禁止商用；禁止拆取素材 |
+| **形态** | Android 原生 AR 应用 + PC 上的权威世界服务（Host）+ PC 检视/管理界面 + DSH 插件 |
+| **世界** | 16×16×16 体素，每格 3 cm，桌面上一块 42 cm 见方、1 格厚的微缩浮岛 |
+| **玩家** | 你是"上帝之手"：点格子放方块、再点拆掉。世界里没有你自己的化身 |
+| **AI 桌宠** | 有名字、有性格、有物品栏；会提议"我想住这块地"，经你批准后自己在授权地块里盖房子 |
+| **AI 的脑子** | 通过 MCP 接入 DSH：模型用工具观察世界、决定建造、开口说话（当前人格层还是占位实现） |
 
-> ⚠️ 这是本地调查/渲染样例，不是项目默认或发行资产。当前授权材料禁止二次分发，且发布页条款仍需逐项复核；不要打包、提交模型、抽取素材或将本地用户文件同步到仓库。
-> 正式运行时角色尚未定版。模型导入/目录位置和授权门禁以 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) 为准；旧 [docs/DEV.md](docs/DEV.md) 中的下载/路径说明为历史草案。
+## 现在真的能跑起来的效果
 
-### 本地样例模型测量（调查/渲染记录，非已批准运行时角色，2026-11-16）
+- ✅ 平板对着桌面点一下，**42 cm 微缩岛出现在桌面上**（ARCore 锚定，中文分步引导）
+- ✅ **点格子盖房子**，方块带贴图（16 种方块，CC0 材质包）
+- ✅ 平板和 PC **同一个世界实时同步**（放一块，另一边立刻出现）
+- ✅ 一只 **VRM 大肥鱼**站在岛上：头顶有名牌，说话时冒**动物森友会风格的 3D 气泡**
+- ✅ 它会**坐下发呆、躺下睡觉、挥手、跳、张望**（6 个程序化动作，自动轮换）
+- ✅ 它会**自己盖房子**：提议地块 → 你批准 → 自动放 12 个方块
+- ✅ **你（DSH 里的 AI）能直接建东西**：通过 MCP 工具观察世界、批地块、跑建造 tick、放方块
+- ✅ PC 上有**社交软件式的桌宠管理器**：多宠物会话、主人/性格卡片、物品仓库拖放赠送、内嵌岛屿控制台
 
-| 项 | 样例测量值 | 限制 |
+## 架构
+
+```
+                    ┌──────────────────────────────┐
+   平板 AR 客户端    │  Android (Java + ARCore)      │
+   (真机验证)  ◀────▶│  贴图体素渲染 / VRM 蒙皮角色   │
+                    │  名牌 / 动森气泡 / 中文引导     │
+                    └──────────────┬───────────────┘
+                          WebSocket │ 世界快照 + commit 广播
+                    ┌──────────────▼───────────────┐
+   PC 权威世界 Host  │  @fangcun/host (Node + TS)    │
+   (SQLite WAL)     │  WorldAuthority：唯一写入口    │
+                    │  配对码 → token / 事务 / 预算   │
+                    │  多宠物档案 / 聊天 / 物品栏     │
+                    └──────┬────────────────┬──────┘
+                           │ loopback HTTP  │ MCP (stdio)
+                    ┌──────▼──────┐  ┌──────▼─────────────┐
+   DSH 插件面板      │ 方寸世界面板 │  │ @fangcun/mcp       │
+   (侧边栏)         │ 会话/资料/道具│  │ 7 个受限工具        │
+                    └─────────────┘  └────────┬───────────┘
+                                              │
+                                     ┌────────▼─────────┐
+                                     │ DSH 里的 AI 模型  │
+                                     └──────────────────┘
+```
+
+## 快速开始
+
+### 1) 世界核心 + PC 检视器
+
+```bash
+git clone https://github.com/60777flowers/fangcun.git
+cd fangcun
+npm ci
+npm run build
+npm test          # 93 项测试
+```
+
+启动本地 Host（权威世界，持久化到 `~/.fangcun/world.sqlite`）与 PC 检视器：
+
+```bash
+npm run host       # → http://127.0.0.1:8765   会打印一次性配对码
+npm run simulator  # → http://127.0.0.1:4173
+```
+
+打开 <http://127.0.0.1:4173/?mode=host> 就是上面那张截图的世界检视器：选材质、点格子放方块、和 AI 对话、批准它的家园。
+
+### 2) 平板 AR 客户端
+
+需要 Android SDK 与一台支持 ARCore 的设备（本项目在 Galaxy Tab S8 上真机验证）。
+
+```bash
+export ANDROID_HOME=/path/to/android-sdk          # Windows: $env:ANDROID_HOME
+gradle -p apps/android-ar-poc assembleDebug
+adb install -r apps/android-ar-poc/app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8765 tcp:8765                      # 开发态：把平板的 127.0.0.1:8765 转发到 PC
+adb shell am start -n org.fangcun.ar.poc.debug/org.fangcun.ar.poc.ArPocActivity -e code <配对码>
+```
+
+> **当前传输是开发态**：`adb reverse` + 明文 WebSocket 到 loopback。产品形态需要 LAN TLS + 证书指纹固定 + 二维码配对，这部分**还没做**。
+
+### 3) DSH 插件（可选，桌面宠物管理器）
+
+`fangcun-dsh-plugin/` 是一个 DSH 插件包：装进 DSH 后左侧边栏出现「方寸世界」图标，
+点开是三栏社交界面（多宠物会话 / 聊天 / 主人·性格·物品栏），中间还能内嵌岛屿控制台。
+
+```bash
+# 在 DSH 会话里
+plugin_manager { action: "install_bundle", target: "<repo>/fangcun-dsh-plugin" }
+```
+
+`fangcun-dsh-bundle/` 则是把方寸的 MCP 工具面接入 DSH 的桥，让模型能直接调用
+`world_observe` / `home_claim` / `build_tick` / `place_block` / `break_block` / `companion_say` 等 7 个工具。
+
+### 4) 方块材质（可选）
+
+```bash
+npm run atlas      # 由 assets/block-textures 生成 Android 图集
+```
+
+## 已完成的模块
+
+| 模块 | 内容 | 证据 |
 |---|---|---|
-| 三角面 | **45,663**（34,873 顶点 / 6 网格） | 仅该样例解析结果；手机 GPU/描边/阴影预算未验证 |
-| 材质 | **6 个，全 MToon** | 不是产品预算，最终模型未定 |
-| 贴图 | **8 张**，其中 5 张 2048²；原始 13.76 MB，RGBA 显存估算约 **90 MB** | 需在获准资产上实测纹理压缩与内存 |
-| 骨骼/弹簧 | humanoid **53** + 尾巴 **13**；22 条 / 91 关节 | 不代表目标模型结构或已测帧耗 |
-| 表情/动画 | 19 个表情；未包含动画片段 | 该样例需程序化动作；发行素材需单独验证 |
-| 本地归一化高度 | **1.2 体素** | 仅本地样例数值；产品角色尺度待运行时模型确认 |
+| `packages/world-schema` | 16³ 世界、3 cm 尺度、16 种方块白名单、半开区间 | 单测 |
+| `packages/voxel-core` | 确定性浮岛、原子事务、保护地形、快照 | 单测 |
+| `packages/protocol` | intent/commit/hello/welcome/ack/resync 校验、帧编解码 | 单测 + JSON Schema |
+| `packages/worldd` | 权威世界协调器：单写入口、rev 校验、grant/plan、建造 tick | 单测（含竞态） |
+| `packages/host` | SQLite WAL 持久化、配对码/token、WebSocket 副本协议、聊天、多宠物、物品栏、自驱循环 | 单测 + 3 套浏览器/HTTP smoke |
+| `packages/mcp` | MCP stdio 服务器，7 个受限工具 | 单测 + 真实 Host 联调 |
+| `packages/companion-*` | 人格卡/实例/家园授权数据契约、家园选址、计划预算 | 单测 |
+| `apps/simulator` | PC 检视器 + 桌宠配置面板 | Puppeteer smoke |
+| `apps/android-ar-poc` | 原生 ARCore 客户端：贴图体素、VRM 角色、动作、名牌、气泡、引导 | 真机截图 |
+| `fangcun-dsh-plugin` | DSH 侧边栏面板：社交式桌宠管理 + 岛屿控制台 | 安装验证 + 结构验证 |
 
-### 本地样例观察（不是产品缺陷或发行承诺）
+**测试现状**：`npm test` 93 项；另有 `test:core-api` / `test:core-ui` / `test:simulator` 三套浏览器与 HTTP smoke。
 
-1. **描边没有自动出现** —— `@pixiv/three-vrm` 只读 MToon 的描边参数，**不会生成描边网格**。要接近效果图那种"粗描边赛璐璐"，必须自己做背面法线膨胀（或 outline pass）。旧技术记录见 [docs/DEV.md](docs/DEV.md) §8.10；是否实现由最终授权角色与真机测量决定。
-2. **一只眼睛偏红** —— 正面渲染时左眼为红/粉色，参考图里是双眼蓝。需确认是模型设计（异色瞳）还是贴图/材质路径问题，**确认前不要当作 bug 改**。
+## 已知限制（诚实清单）
 
+这些**尚未实现**，不要在演示中含糊带过：
+
+- **传输不是产品形态**：`adb reverse` + 明文 WS 回环；没有 LAN TLS、证书指纹固定、二维码配对
+- **角色没有骨骼动画片段**：模型本身不含 animation，现在是程序化骨骼姿势（无过渡混合），CPU 蒙皮约 22 Hz
+- **没有真实遮挡**：不做 ARCore Depth 合成，手挡住方块时不会消失
+- **AI 人格是占位实现**：`packages/host/src/persona.ts` 是关键词规则，不是 LLM；自驱循环用的是固定台词
+- **"好友的桌宠"是本地 fixture**：`阿石` 是本地演示数据，没有账号、联网或跨用户访问
+- **只有一台设备验证过**（Tab S8 / Android 16 / ARCore），未做机型矩阵与长稳/热测试
+- **聊天记录在内存里**（保留最近 30 条），世界和宠物档案才进 SQLite
+
+## 后续计划 / 想一起做的事
+
+按价值排序，欢迎认领：
+
+1. **上真网络**：Host 端 TLS + 自签证书指纹固定 + 二维码配对，平板脱离 `adb reverse` 直连局域网
+2. **角色动画**：蒙皮动画播放 + 姿势过渡混合（走/跑/坐下/睡觉的平滑切换）
+3. **原子建造 DSL**：`build_plan` / `build_commit` + DSL 编译器（`box`/`wall`/`floor`/`roof_gable`），让"盖个火柴盒"是**一次事务**而不是 25 次
+4. **接真模型**：用 DSH 的 LLM 替换占位人格，让它自己决定建什么、说什么
+5. **多宠物与串门**：数据契约（`PersonaCard` / `VisitInvitation`）已预留，需要账号体系与受限访问票据
+6. **美术**：原创方块材质包、角色 GLB 资产管线、动作库
+7. **性能与机型矩阵**：中端机帧时、热、内存预算
 
 ## 目录
 
 ```
 fangcun/
-├─ docs/IMPLEMENTATION-PLAN.md  当前实现交接真源
-├─ docs/REVIEW.md               独立审核与修订记录
-├─ docs/DEV.md                  历史开发草案
-├─ docs/m0-final.png      M0 渲染结果
-├─ preview/               M0 静态原型（程序化方块贴图 + three.js 官方示例占位模型）
-├─ REPORT.md              调研总报告
-├─ PLAN.md                调查计划
-└─ reports/               子报告 a–i + 对抗性审阅
+├─ apps/
+│  ├─ android-ar-poc/       原生 ARCore 平板客户端
+│  └─ simulator/            PC 检视器 + 桌宠配置
+├─ packages/
+│  ├─ world-schema/  voxel-core/  protocol/  worldd/
+│  ├─ host/                权威世界服务（SQLite / WS / 社交模型）
+│  ├─ mcp/                 MCP 工具面
+│  └─ companion-schema/ companion-runtime/ ar-provider/
+├─ fangcun-dsh-plugin/      DSH 桌宠管理面板
+├─ fangcun-dsh-bundle/      DSH MCP 桥
+├─ assets/block-textures/   方块材质源 + 映射（CC0）
+├─ scripts/                构建/演示/冒烟脚本
+└─ docs/                   协议、路线、设备验证、素材说明
 ```
 
-## 快速开始
+## 文档
 
-根工程（桌面 sandbox 与纯核心）：
+| 想了解 | 读 |
+|---|---|
+| 接口与协议 | [docs/HOST-API.md](docs/HOST-API.md) |
+| 结构 DSL | [docs/DSL-SPEC.md](docs/DSL-SPEC.md) |
+| 技术路线与里程碑 | [docs/TECH-ROADMAP.md](docs/TECH-ROADMAP.md)、[ADR-0003](docs/ADR-0003-android-client-and-ar-stack.md) |
+| MCP 工具面 | [docs/MCP-TOOLS.md](docs/MCP-TOOLS.md) |
+| 方块材质与扩展 | [docs/BLOCK-TEXTURES.md](docs/BLOCK-TEXTURES.md) |
+| 角色模型与授权 | [docs/COMPANION-ASSET.md](docs/COMPANION-ASSET.md) |
+| 本地 demo 怎么跑 | [docs/COMPANION-DEMO.md](docs/COMPANION-DEMO.md) |
+| 设备验证 | [docs/DEVICE-TEST-PLAN.md](docs/DEVICE-TEST-PLAN.md) |
 
-```bash
-npm ci
-npm run typecheck
-npm test
-npm run test:simulator   # 需要 Chrome；可设置 CHROME_PATH
-npm run simulator       # 开启本机页面，http://127.0.0.1:4173/
-```
+## 素材与许可
 
-原静态 Three.js 截图预览（独立依赖）：
+- **代码**：根目录代码与文档按 [MIT](LICENSE)。
+- **方块材质**：仓库内 `assets/block-textures/programmerart/` 是
+  [ProgrammerArt](https://github.com/deathcap/ProgrammerArt) 的子集，**CC0 1.0 公共领域**，可自由使用/修改/再分发。
+- **角色模型不在仓库里**。当前演示用的 VRM「蓝色小肥鱼 Deepseek鲸鱼娘」版权归 **木子恶魔 / MZEM**
+  （[发布页](https://www.aplaybox.com/details/model/ayXkRzVflmnd)），授权为**个人非商业、必须署名、禁止二次配布、禁止商用**。
+  因此仓库**不包含任何 `.vrm`**：需要的话请自行下载后放进
+  `apps/android-ar-poc/app/src/main/assets/models/companion/default.vrm`（该路径已被 `.gitignore` 忽略）。
+  详见 [docs/COMPANION-ASSET.md](docs/COMPANION-ASSET.md)。
+- **不使用 Mojang 原版材质**。需要原版观感时，请自备资源包放到本地目录（同样不入库），通过
+  [docs/BLOCK-TEXTURES.md](docs/BLOCK-TEXTURES.md) 的映射接口接入。
+- `效果图/`、`docs/model-check-*.png` 等第三方素材**不在 MIT 范围内**，公开发布前需清权或移除。
 
-```bash
-cd preview
-npm ci
-node shot.mjs           # 用 headless Chrome 渲染一帧 → preview/m0.png
-```
+## 参与
 
-> 根工作区的 core/shared messages 仍不是完整联网 worldd，也没有 AR 页面。原 M0 静态截图脚本仍依赖 `shot.mjs` 内本机 Chrome 路径，不是可移植 CI。Android APK、真实 ARCore/marker provider、TLS/WSS 与 DSH 仍待实施/实测，见 [docs/ANDROID-DELIVERY.md](docs/ANDROID-DELIVERY.md)、[docs/M0-DEVICE-TEST.md](docs/M0-DEVICE-TEST.md) 和 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md)。
-
-## 尚未决定的事
-
-- 正式角色资产及授权方式（本地样例不能用于发行；目标模型身高/性能尚未定版）
-- iOS AR 技术与 SDK/SLAM 许可门禁（不属于 v0）
-- Windows 独立桌宠窗口和真实 Minecraft 联动（不属于 v0）
-- **占位模型 `preview/assets/RobotExpressive.glb` 来自 three.js 官方示例，仅用于开发，不得随产品发布**
-
----
-
-## 许可
-
-- **仓库根目录代码与文档：[MIT](LICENSE)** © 2026 Fangcun (方寸) contributors；各子包元数据应与此范围一致
-- **素材不在 MIT 范围内**：
-  - `效果图/`、`docs/model-check-*.png`、`preview/vrm-*.png`、含第三方占位模型的 M0 截图 —— 含水印/第三方角色的素材；当前已跟踪但公开再分发权利链未确认，不属于 MIT，发布前须逐项清权或排除并处理现存副本
-  - 角色模型 —— 版权归原作者（当前「蓝色小肥鱼」© 木子恶魔/MZEM），且**禁止二次配布** → 本仓库不含任何 `.vrm`
-  - `preview/assets/RobotExpressive.glb` —— three.js 官方示例，仅开发占位，不得随产品发布
-- 详见 [LICENSE](LICENSE) 末尾的「关于素材」一节。
+- 先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 提 issue 时说明设备型号、Android/ARCore 版本、复现步骤。
+- 提交前请跑：`npm run build && npm test && npm run test:core-api && npm run test:simulator`。
+- 素材类 PR 请附来源与授权说明；**未授权、来源不明的素材一律不进仓库**。
