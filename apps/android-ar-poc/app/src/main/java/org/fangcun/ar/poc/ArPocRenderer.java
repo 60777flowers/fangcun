@@ -68,12 +68,27 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private static final float COMPANION_X = 0.14f;
     private static final float COMPANION_Y = 0.22f;
     private static final float COMPANION_Z = -0.10f;
+    private static final float PREVIEW_DISTANCE = 0.55f;
     private final float[] characterModel = new float[16];
     private final float[] characterMvp = new float[16];
     private final float[] characterViewA = new float[16];
     private final float[] characterViewB = new float[16];
     private CompanionMesh.Mesh companionMesh;
     private volatile String companionState = "idle";
+
+    /** Replaceable companion asset: drop another .vrm/.glb here to change the character. */
+    private static final String COMPANION_ASSET = "models/companion/default.vrm";
+    private static final float COMPANION_HEIGHT_METERS = 0.18f;
+    private VrmModel vrm;
+    private int vrmProgram;
+    private int vrmPositionHandle;
+    private int vrmNormalHandle;
+    private int vrmUvHandle;
+    private int vrmMvpHandle;
+    private int vrmNormalMatrixHandle;
+    private int vrmTextureHandle;
+    private int vrmUseTextureHandle;
+    private final float[] characterNormal = new float[9];
 
     ArPocRenderer(ArPocActivity activity, AtomicReference<float[]> pendingTap, VoxelWorld world) {
         this.activity = activity;
@@ -96,6 +111,14 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     /** Drives the idle/building behaviour of the placeholder companion. */
     void setCompanionState(String state) { companionState = state; }
+
+    /**
+     * Debug aid: draws the companion a fixed distance in front of the camera so the model
+     * can be inspected without a detected plane or an anchor.
+     */
+    void setPreviewMode(boolean enabled) { previewMode = enabled; }
+
+    private volatile boolean previewMode;
 
     void releaseAnchorNow() {
         pendingTap.set(null);
@@ -126,6 +149,16 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             background = new BackgroundRenderer();
             background.createOnGlThread(activity);
             companionMesh = CompanionMesh.build();
+            vrmProgram = createProgram(VRM_VERTEX_SHADER, VRM_FRAGMENT_SHADER);
+            vrmPositionHandle = GLES20.glGetAttribLocation(vrmProgram, "a_Position");
+            vrmNormalHandle = GLES20.glGetAttribLocation(vrmProgram, "a_Normal");
+            vrmUvHandle = GLES20.glGetAttribLocation(vrmProgram, "a_Uv");
+            vrmMvpHandle = GLES20.glGetUniformLocation(vrmProgram, "u_Mvp");
+            vrmNormalMatrixHandle = GLES20.glGetUniformLocation(vrmProgram, "u_NormalMatrix");
+            vrmTextureHandle = GLES20.glGetUniformLocation(vrmProgram, "u_Tex");
+            vrmUseTextureHandle = GLES20.glGetUniformLocation(vrmProgram, "u_UseTex");
+            vrm = VrmModel.load(activity, COMPANION_ASSET);
+            if (vrm != null) vrm.normalise(COMPANION_HEIGHT_METERS);
             glReady = true;
             Session current = session != null ? session : activity.currentSession();
             if (current != null) attachSessionTexture(current);
@@ -187,6 +220,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
                     ? tapDiagnostic
                     : "Tracking camera — planes: " + planeCount + ". Move device slowly, then tap tabletop to anchor the island.";
                 publishStatus(message);
+                if (previewMode) drawPreviewCompanion(camera);
                 return;
             }
             anchor.getPose().toMatrix(modelMatrix, 0);
@@ -393,7 +427,56 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
      * Draws the placeholder companion hovering over the island. Idle it bobs slowly while
      * turning; while building the motion gets faster so the state is visible without UI.
      */
+    private void drawPreviewCompanion(Camera camera) {
+        camera.getPose().toMatrix(modelMatrix, 0);
+        modelMatrix[12] -= modelMatrix[8] * PREVIEW_DISTANCE;
+        modelMatrix[13] -= modelMatrix[9] * PREVIEW_DISTANCE;
+        modelMatrix[14] -= modelMatrix[10] * PREVIEW_DISTANCE;
+        Matrix.multiplyMM(modelView, 0, viewMatrix, 0, modelMatrix, 0);
+        Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, modelView, 0);
+        drawCompanion();
+    }
+
+    private void drawCompanionModel(VrmModel model) {
+        double seconds = System.currentTimeMillis() / 1000.0;
+        boolean busy = "building".equals(companionState) || "planning".equals(companionState);
+        double bobRate = busy ? 6.0 : 1.5;
+        float bob = (float) (Math.sin(seconds * bobRate) * (busy ? 0.016 : 0.008));
+        float yaw = (float) (Math.sin(seconds * (busy ? 2.2 : 0.45)) * 18.0);
+
+        Matrix.setIdentityM(characterModel, 0);
+        Matrix.translateM(characterModel, 0, COMPANION_X, COMPANION_Y + bob, COMPANION_Z);
+        Matrix.rotateM(characterModel, 0, 180f + yaw, 0f, 1f, 0f);
+        Matrix.scaleM(characterModel, 0, model.scale(), model.scale(), model.scale());
+        Matrix.translateM(characterModel, 0, model.offsetX(), model.offsetY(), model.offsetZ());
+
+        float inverseScale = 1f / Math.max(model.scale(), 1e-6f);
+        characterNormal[0] = characterModel[0] * inverseScale;
+        characterNormal[1] = characterModel[1] * inverseScale;
+        characterNormal[2] = characterModel[2] * inverseScale;
+        characterNormal[3] = characterModel[4] * inverseScale;
+        characterNormal[4] = characterModel[5] * inverseScale;
+        characterNormal[5] = characterModel[6] * inverseScale;
+        characterNormal[6] = characterModel[8] * inverseScale;
+        characterNormal[7] = characterModel[9] * inverseScale;
+        characterNormal[8] = characterModel[10] * inverseScale;
+
+        Matrix.multiplyMM(characterViewA, 0, viewMatrix, 0, modelMatrix, 0);
+        Matrix.multiplyMM(characterViewB, 0, characterViewA, 0, characterModel, 0);
+        Matrix.multiplyMM(characterMvp, 0, projectionMatrix, 0, characterViewB, 0);
+
+        GLES20.glUseProgram(vrmProgram);
+        GLES20.glUniformMatrix4fv(vrmMvpHandle, 1, false, characterMvp, 0);
+        GLES20.glUniformMatrix3fv(vrmNormalMatrixHandle, 1, false, characterNormal, 0);
+        model.draw(vrmProgram, vrmPositionHandle, vrmNormalHandle, vrmUvHandle, vrmTextureHandle, vrmUseTextureHandle);
+    }
+
     private void drawCompanion() {
+        VrmModel model = vrm;
+        if (model != null) {
+            drawCompanionModel(model);
+            return;
+        }
         CompanionMesh.Mesh mesh = companionMesh;
         if (mesh == null || mesh.vertexCount == 0) return;
         double seconds = System.currentTimeMillis() / 1000.0;
@@ -472,4 +555,28 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         + "void main(){ gl_Position=u_Mvp*vec4(a_Position,1.0); v_Color=a_Color; }";
     private static final String FRAGMENT_SHADER =
         "precision mediump float; varying vec4 v_Color; void main(){ gl_FragColor=v_Color; }";
+
+    /**
+     * Textured shader for the companion avatar. MToon is approximated with a base-colour
+     * texture plus a fixed half-lambert term; alpha is discarded so hair cards do not need
+     * depth-sorted transparency.
+     */
+    private static final String VRM_VERTEX_SHADER =
+        "uniform mat4 u_Mvp; uniform mat3 u_NormalMatrix;"
+        + "attribute vec3 a_Position; attribute vec3 a_Normal; attribute vec2 a_Uv;"
+        + "varying vec2 v_Uv; varying float v_Light;"
+        + "void main(){"
+        + " gl_Position=u_Mvp*vec4(a_Position,1.0);"
+        + " v_Uv=vec2(a_Uv.x, 1.0-a_Uv.y);"
+        + " vec3 n=normalize(u_NormalMatrix*a_Normal);"
+        + " v_Light=0.62+0.38*max(dot(n, normalize(vec3(0.35,0.9,0.25))),0.0);"
+        + "}";
+    private static final String VRM_FRAGMENT_SHADER =
+        "precision mediump float; uniform sampler2D u_Tex; uniform float u_UseTex;"
+        + "varying vec2 v_Uv; varying float v_Light;"
+        + "void main(){"
+        + " vec4 color = u_UseTex > 0.5 ? texture2D(u_Tex, v_Uv) : vec4(0.95,0.75,0.55,1.0);"
+        + " if(color.a < 0.35) discard;"
+        + " gl_FragColor=vec4(color.rgb*v_Light, 1.0);"
+        + "}";
 }

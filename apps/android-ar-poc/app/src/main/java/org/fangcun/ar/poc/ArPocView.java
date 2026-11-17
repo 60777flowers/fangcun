@@ -38,6 +38,9 @@ final class ArPocView extends GLSurfaceView {
     /** Updates the placeholder companion's visible behaviour. */
     void setCompanionState(String state) { queueEvent(() -> renderer.setCompanionState(state)); }
 
+    /** Debug: draws the companion in front of the camera without needing a plane. */
+    void setPreviewMode(boolean enabled) { queueEvent(() -> renderer.setPreviewMode(enabled)); }
+
     /** Drops the island anchor so the next tap re-anchors (used by the UI button). */
     void resetAnchor() { queueEvent(() -> renderer.releaseAnchorNow()); }
 
