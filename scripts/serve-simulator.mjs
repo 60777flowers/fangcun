@@ -194,12 +194,49 @@ async function handleCoreApi(request, response, url) {
   }
 }
 
+const HOST_ORIGIN = process.env.FANGCUN_HOST_ORIGIN ?? "http://127.0.0.1:8765";
+
+/**
+ * Forwards the PC inspector's core API calls to the durable Host so the browser preview
+ * and the AR device edit the same authoritative world. Same-origin checks still run here;
+ * the Host core API is loopback-only by socket binding.
+ */
+async function proxyToHost(request, response, url) {
+  if (!validateCoreHost(request, response, request.method === "POST")) return;
+  const rest = url.pathname.slice("/api/host/".length);
+  const target = `${HOST_ORIGIN}/api/core/${rest}${url.search}`;
+  const init = { method: request.method, headers: {} };
+  if (request.method === "POST") {
+    const body = await readJsonBody(request);
+    if (!body.ok) return sendJson(response, body.status, { error: body.error });
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body.value);
+  }
+  const upstream = await fetch(target, init);
+  const text = await upstream.text();
+  response.writeHead(upstream.status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(text),
+    "Cache-Control": "no-store",
+  });
+  response.end(text);
+}
+
 const server = createServer(async (request, response) => {
   let apiUrl;
   try {
     apiUrl = new URL(request.url ?? "/", `http://${host}:${port}`);
   } catch {
     response.writeHead(400).end("Bad request");
+    return;
+  }
+  if (apiUrl.pathname.startsWith("/api/host/")) {
+    try {
+      await proxyToHost(request, response, apiUrl);
+    } catch {
+      if (!response.headersSent) sendJson(response, 502, { error: "host_unreachable" });
+      else response.destroy();
+    }
     return;
   }
   if (apiUrl.pathname.startsWith("/api/core/")) {

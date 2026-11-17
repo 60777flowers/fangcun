@@ -1,8 +1,12 @@
 import { BLOCK_DEFS, WORLD_SPEC } from "@fangcun/world-schema";
 import { applyTransaction, assertWorldState, countBlocks, createSeedWorld, getBlock, worldStateFromObject } from "@fangcun/voxel-core";
 
-const API_BASE = "/api/core";
-const CORE_MODE = new URLSearchParams(window.location.search).get("mode") === "core";
+const QUERY_MODE = new URLSearchParams(window.location.search).get("mode");
+// `core` drives the simulator's own in-memory demo API; `host` drives the durable Host
+// through a loopback proxy, so the PC inspector and the tablet share one world.
+const HOST_MODE = QUERY_MODE === "host";
+const CORE_MODE = QUERY_MODE === "core" || HOST_MODE;
+const API_BASE = HOST_MODE ? "/api/host" : "/api/core";
 
 const MATERIALS = ["planks", "stone", "glass", "leaves"];
 const COLORS = {

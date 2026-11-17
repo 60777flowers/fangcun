@@ -4,19 +4,26 @@ Three local demo surfaces exist. They are development tools, not the production 
 each runs only on loopback and none of them implements LAN TLS, account auth or the
 DSH/MCP adapter yet.
 
-## 1. Desktop simulator (in-memory core)
+## 1. Desktop simulator
 
-The simulator UI talks to an in-process demo API and shows the whole companion loop:
-server-authoritative world, player place/break intents, home candidate approval, and a
-bounded 12-block starter home committed by the Companion.
+The simulator page has two server-backed modes:
+
+- `?mode=core` — its own in-memory demo API on port 4173 (isolated world).
+- `?mode=host` — the **PC inspector**: the page proxies `/api/host/*` to the durable Host on
+  `127.0.0.1:8765`, so the browser and the AR tablet edit the same authoritative world.
 
 ```powershell
-npm run simulator
-# Open http://127.0.0.1:4173/?mode=core
+node scripts/serve-simulator.mjs     # UI on http://127.0.0.1:4173
+node scripts/run-host.mjs            # Host on http://127.0.0.1:8765
+# PC inspector:  http://127.0.0.1:4173/?mode=host
+# Shared demo:   http://127.0.0.1:4173/?mode=core
 ```
 
-State is in memory: restarting the server resets the world. The `local mode` tab keeps
-the original browser-only sandbox.
+Both modes show the world, player place/break intents, home candidate approval and the
+companion build tick. `?mode=host` reflects the Host's real revision, so a block placed in
+the browser appears on the tablet after the Host broadcasts the commit.
+
+`?mode=core` keeps the original browser-only sandbox (`local mode` tab).
 
 ## 2. Durable Host (`packages/host`)
 

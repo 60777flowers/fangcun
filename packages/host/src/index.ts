@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from "node:stream";
 import { BLOCK_IDS, WORLD_SPEC } from "@fangcun/world-schema";
 import { worldStateToObject } from "@fangcun/voxel-core";
-import { validateClientMessage, type ClientIntent, type ServerMessage } from "@fangcun/protocol";
+import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type ServerMessage } from "@fangcun/protocol";
 import { WorldAuthority, type CompanionTickDecision } from "@fangcun/worldd";
 import { findHomeCandidates } from "@fangcun/companion-runtime";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
@@ -201,71 +201,151 @@ export class FangcunHost {
       return send(200, { token, worldId: this.#worldId, expiresAtMs, protocolVersion: 1 });
     }
 
+    // PC inspector core API. Loopback-only by socket binding and intentionally
+    // unauthenticated: it is the documented local approval/inspection surface, and any
+    // local process could read the store anyway. The device path always needs a token.
+    if (url.pathname.startsWith("/api/core/")) {
+      return this.#handleCoreApi(request, response, url, send);
+    }
+
     const token = bearerToken(request);
     const session = token ? this.#tokens.get(sha256(token)) : undefined;
     if (!token || !session || session.expiresAtMs <= this.#now()) return send(401, { error: "unauthorized" });
 
     if (request.method === "GET" && url.pathname === "/api/state") {
-      return send(200, {
-        world: worldStateToObject(this.#authority.snapshot),
-        ownerUserId: this.#ownerUserId,
-        companion: this.#companion,
-        candidate: this.#lastTick?.status === "home_approval_required" ? this.#lastTick.candidate : undefined,
-        homeGrantActive: this.#grant !== null,
-      });
+      return send(200, this.#coreState());
     }
 
     if (request.method === "POST" && url.pathname === "/api/companion/tick") {
-      const result = await this.#authority.runCompanionTick({ authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: true });
-      this.#lastTick = result;
-      if (result.status === "committed" && result.commit) {
-        try {
-          this.#store!.commit(this.#authority.snapshot, result.commit);
-        } catch {
-          return send(500, { error: "commit_persist_failed" });
-        }
-        for (const peer of this.#sessions) {
-          if (!peer.authenticated) continue;
-          this.#send(peer, result.commit);
-          peer.lastAppliedRev = result.commit.rev;
-        }
-      }
-      return send(200, { result, world: worldStateToObject(this.#authority.snapshot) });
+      const result = await this.#runTick();
+      return send(200, result);
     }
 
     if (request.method === "POST" && url.pathname === "/api/home/approve") {
       const body = await this.#readJson(request);
       if (!body.ok) return send(body.status, { error: body.error });
-      const input = body.value as { candidateId?: unknown };
-      if (typeof input.candidateId !== "string") return send(400, { error: "invalid_home_approval" });
-      const candidate = findHomeCandidates(this.#authority.snapshot)[0];
-      if (!candidate || candidate.candidateId !== input.candidateId) return send(409, { error: "candidate_stale" });
-      const now = new Date(this.#now());
-      const grant: HomePlotGrant = Object.freeze({
-        schemaVersion: 1,
-        grantId: "grant-local-home-1",
-        grantRev: 1,
-        plotId: "home-local-1",
-        worldId: this.#worldId,
-        ownerUserId: this.#ownerUserId,
-        approvedByUserId: this.#ownerUserId,
-        companionId: this.#companion.companionId,
-        bounds: candidate.bounds,
-        allowedBlockIds: Object.freeze(["planks", "glass"] as const),
-        maxBlocksPerPlan: 32,
-        maxBlocksPerDay: 128,
-        createdAt: now.toISOString(),
-        expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-      });
-      const approved = this.#authority.approveHomePlot(grant, candidate, { authenticatedOwnerUserId: this.#ownerUserId });
-      if (approved && this.#store) {
-        this.#store.saveGrant(grant);
-        this.#grant = grant;
-      }
-      return send(approved ? 200 : 409, { approved, world: worldStateToObject(this.#authority.snapshot) });
+      const outcome = this.#approveHome((body.value as { candidateId?: unknown }).candidateId);
+      return send(outcome.approved ? 200 : 409, outcome.body);
     }
 
     send(404, { error: "not_found" });
+  }
+
+  async #handleCoreApi(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    send: (status: number, body: unknown) => void,
+  ): Promise<void> {
+    const path = url.pathname;
+    if (request.method === "GET" && path === "/api/core/state") {
+      return send(200, this.#coreState());
+    }
+
+    if (request.method === "POST" && path === "/api/core/intent") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const input = body.value as {
+        clientId?: unknown; seq?: unknown; baseRev?: unknown; operation?: unknown;
+      };
+      if (typeof input.clientId !== "string" || typeof input.seq !== "number" || typeof input.baseRev !== "number") {
+        return send(400, { error: "invalid_intent" });
+      }
+      const intent = {
+        protocolVersion: 1 as const,
+        type: "intent" as const,
+        worldId: this.#worldId,
+        clientId: input.clientId,
+        seq: input.seq,
+        baseRev: input.baseRev,
+        operation: input.operation,
+      };
+      const parsed = validateClientIntent(intent);
+      if (!parsed.ok) return send(400, { error: parsed.error });
+      // The browser keeps its own sequence counter across reloads while the Host's
+      // per-client replay window resets on restart. Conflict safety comes from baseRev,
+      // so the inspector path clears replay state instead of failing on a gap.
+      this.#authority.resetClientSequence(input.clientId);
+      const decision = this.#authority.handleIntent(parsed.value);
+      if (decision.ack.accepted && decision.commit) {
+        if (!this.#commitAndBroadcast(decision.commit)) return send(500, { error: "commit_persist_failed" });
+      }
+      return send(200, { decision: { ack: decision.ack, commit: decision.commit }, world: worldStateToObject(this.#authority.snapshot) });
+    }
+
+    if (request.method === "POST" && path === "/api/core/companion/tick") {
+      return send(200, await this.#runTick());
+    }
+
+    if (request.method === "POST" && path === "/api/core/home/approve") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const outcome = this.#approveHome((body.value as { candidateId?: unknown }).candidateId);
+      return send(outcome.approved ? 200 : 409, outcome.body);
+    }
+
+    send(404, { error: "not_found" });
+  }
+
+  #coreState(): unknown {
+    return {
+      world: worldStateToObject(this.#authority.snapshot),
+      ownerUserId: this.#ownerUserId,
+      companion: this.#companion,
+      candidate: this.#lastTick?.status === "home_approval_required" ? this.#lastTick.candidate : undefined,
+      homeGrantActive: this.#grant !== null,
+    };
+  }
+
+  #commitAndBroadcast(commit: CommitMessage): boolean {
+    try {
+      this.#store!.commit(this.#authority.snapshot, commit);
+    } catch {
+      return false;
+    }
+    for (const peer of this.#sessions) {
+      if (!peer.authenticated) continue;
+      this.#send(peer, commit);
+      peer.lastAppliedRev = commit.rev;
+    }
+    return true;
+  }
+
+  async #runTick(): Promise<{ result: CompanionTickDecision; world: unknown }> {
+    const result = await this.#authority.runCompanionTick({ authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: true });
+    this.#lastTick = result;
+    if (result.status === "committed" && result.commit) this.#commitAndBroadcast(result.commit);
+    return { result, world: worldStateToObject(this.#authority.snapshot) };
+  }
+
+  #approveHome(candidateId: unknown): { approved: boolean; body: unknown } {
+    const candidate = findHomeCandidates(this.#authority.snapshot)[0];
+    if (typeof candidateId !== "string" || !candidate || candidate.candidateId !== candidateId) {
+      return { approved: false, body: { approved: false, error: "candidate_stale", world: worldStateToObject(this.#authority.snapshot) } };
+    }
+    const now = new Date(this.#now());
+    const grant: HomePlotGrant = Object.freeze({
+      schemaVersion: 1,
+      grantId: "grant-local-home-1",
+      grantRev: 1,
+      plotId: "home-local-1",
+      worldId: this.#worldId,
+      ownerUserId: this.#ownerUserId,
+      approvedByUserId: this.#ownerUserId,
+      companionId: this.#companion.companionId,
+      bounds: candidate.bounds,
+      allowedBlockIds: Object.freeze(["planks", "glass"] as const),
+      maxBlocksPerPlan: 32,
+      maxBlocksPerDay: 128,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const approved = this.#authority.approveHomePlot(grant, candidate, { authenticatedOwnerUserId: this.#ownerUserId });
+    if (approved && this.#store) {
+      this.#store.saveGrant(grant);
+      this.#grant = grant;
+    }
+    return { approved, body: { approved, world: worldStateToObject(this.#authority.snapshot) } };
   }
 
   #handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -346,19 +426,7 @@ export class FangcunHost {
     const decision = this.#authority.handleIntent(intent);
     this.#send(session, decision.ack);
     if (!decision.ack.accepted || !decision.commit) return;
-    const commit = decision.commit;
-    try {
-      this.#store!.commit(decision.world, commit);
-    } catch {
-      session.connection.close(1011);
-      return;
-    }
-    session.lastAppliedRev = commit.rev;
-    for (const peer of this.#sessions) {
-      if (!peer.authenticated) continue;
-      this.#send(peer, commit);
-      peer.lastAppliedRev = commit.rev;
-    }
+    if (!this.#commitAndBroadcast(decision.commit)) session.connection.close(1011);
   }
 
   #welcome(): ServerMessage {
