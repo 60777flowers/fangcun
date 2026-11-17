@@ -225,7 +225,7 @@ fangcun/
 | 渠道 | 链接 |
 |---|---|
 | **演示视频**（B站） | <https://www.bilibili.com/video/BV11Jsk6dEGd> |
-| **QQ 交流群** | 群号 `1136546467`（点击加群：<https://qm.qq.com/q/1136546467>） |
+| **QQ 交流群** | 群号 `1136546467`（在 QQ 里搜索群号加入） |
 | **Issues / 讨论** | <https://github.com/60777flowers/fangcun/issues> |
 
 > 想先看效果再动手：视频里从放岛、AI 提议盖房到逐块建造、坐下休息是完整一段；
