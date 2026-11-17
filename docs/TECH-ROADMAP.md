@@ -37,7 +37,7 @@
 
 ### 2.1 已验证
 
-- `npm test`：**47/47 通过**；`npm run typecheck` 通过；`npm run demo:companion` 输入 `y` 后输出 `12 blocks at revision 1`、`796 blocks`（本次复跑）。
+- `npm test`：**76/76 通过**；`npm run typecheck` 通过；`npm run demo:companion` 输入 `y` 后输出 `12 blocks at revision 1`、`208 blocks`（本次复跑）。
 - `packages/` 7 个包：world-schema、protocol、voxel-core、worldd、companion-schema、companion-runtime、ar-provider（约 2.4k 行）。
 - Android 原生 POC（`apps/android-ar-poc`）：ARCore 1.51.0 + GLES 2，Tab S8 上相机背景、水平面 hit-test、anchor、测试方块已跑通；tracking 丢失时 fail closed。
 - 构建链：JDK 17.0.5、Gradle 8.13、AGP 8.13.0、SDK platform 35、build-tools 35.0.0；**无 Gradle wrapper**。
@@ -541,7 +541,7 @@ M7 MarkerProvider implementation continues alongside M2/M3/M5; gate defines v0 c
 ```powershell
 npm ci
 npm run typecheck
-npm test                 # 47/47
+npm test                 # 76/76
 npm run demo:companion   # 输入 y：12 blocks at revision 1
 npm run simulator        # http://127.0.0.1:4173/
 npm run test:simulator   # 需要 Chrome

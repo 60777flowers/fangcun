@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { WORLD_SPEC } from "@fangcun/world-schema";
 import { applyTransaction, createEmptyWorld, createSeedWorld, getBlock } from "@fangcun/voxel-core";
 import { findHomeCandidates, findHomeCandidate, buildStarterHomePlan, checkHomeAutoCommitEligibility, isEligibleForHomeAutoCommit, nextCompanionTick, type HashCanonicalDiff } from "../src/index.ts";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
@@ -22,6 +23,8 @@ test("home-site planner chooses deterministic clear candidates and skips occupie
   assert.ok(candidate);
   assert.equal(candidate.origin.x, -2);
   assert.equal(candidate.origin.z, -2);
+  assert.equal(candidate.origin.y, WORLD_SPEC.terrainTopY, "candidate plots start at the first buildable layer");
+  assert.notEqual(getBlock(world, { x: candidate.origin.x, y: candidate.origin.y - 1, z: candidate.origin.z }), null, "the plot floor must rest on terrain");
   const placed = applyTransaction(world, [{ type: "place", at: candidate!.origin, blockId: "planks" }]);
   assert.equal(placed.ok, true);
   if (placed.ok) world = placed.world;

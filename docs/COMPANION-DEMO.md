@@ -69,9 +69,17 @@ Implemented:
   `/api/core/companion/say`, `/api/core/autonomy`), with chat and companion speech
   broadcast as `companion_say` to the tablet. The persona is a local placeholder, not an LLM.
 - Sequence numbers are scoped to one live connection, so a reconnect starts at `seq = 1`.
+- The MCP bridge is implemented: `fangcun-dsh-bundle/` installs the Fangcun MCP server into a
+  Harness profile, exposing `world_observe` / `home_candidates` / `home_claim` / `build_tick` /
+  `place_block` / `break_block` / `companion_say` (see [MCP-TOOLS](MCP-TOOLS.md)).
 
 Not implemented yet (do not claim these): LAN TLS with pinned fingerprints, QR pairing UI,
-plan/approval leases, undo, multi-session quotas, the DSH/MCP tool adapter.
+plan/approval leases, undo, multi-session quotas, skeletal character animation.
+
+> **Store compatibility:** thinning the island to one terrain block changed the seed content
+> while `WorldSpec.version` stayed 1, and there is no migration. A store written by the older
+> four-layer seed loads unchanged and would mix 1-block build rules with old y=0..3 terrain.
+> Delete the data directory (`~/.fangcun/world.sqlite*`) once when upgrading an old dev store.
 
 ### Connecting the tablet over USB (development only)
 

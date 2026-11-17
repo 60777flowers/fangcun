@@ -49,6 +49,7 @@ const approveCandidateButton = document.querySelector("#approve-candidate");
 const buildTickButton = document.querySelector("#build-tick");
 const statsNote = document.querySelector(".stats-note");
 const sceneWorldMode = document.querySelector("#scene-world-mode");
+const buildZoneLabel = document.querySelector("#build-zone-label");
 const worldModeEyebrow = document.querySelector("#world-mode-eyebrow");
 const chatSection = document.querySelector("#chat-section");
 const chatLog = document.querySelector("#chat-log");
@@ -796,50 +797,55 @@ function setMode(mode) {
 }
 
 function cabinPattern(material) {
+  // Patterns are laid out from the first buildable layer up, so they stay on the
+  // surface as WorldSpec.terrainTopY changes instead of floating above it.
+  const baseY = BUILD_MIN_Y;
   const cells = [];
   for (let x = -1; x <= 1; x += 1) {
-    for (let z = -1; z <= 1; z += 1) cells.push({ x, y: 4, z, blockId: material });
+    for (let z = -1; z <= 1; z += 1) cells.push({ x, y: baseY, z, blockId: material });
   }
-  for (let y = 5; y <= 6; y += 1) {
+  for (let y = baseY + 1; y <= baseY + 2; y += 1) {
     for (let offset = -1; offset <= 1; offset += 1) {
-      if (!(y === 5 && offset === 0)) cells.push({ x: offset, y, z: 1, blockId: material });
-      if (!(y === 5 && offset === 0)) cells.push({ x: offset, y, z: -1, blockId: material });
+      if (!(y === baseY + 1 && offset === 0)) cells.push({ x: offset, y, z: 1, blockId: material });
+      if (!(y === baseY + 1 && offset === 0)) cells.push({ x: offset, y, z: -1, blockId: material });
       if (offset !== 0) {
         cells.push({ x: -1, y, z: offset, blockId: material });
         cells.push({ x: 1, y, z: offset, blockId: material });
-      } else if (y === 5) {
+      } else if (y === baseY + 1) {
         cells.push({ x: -1, y, z: 0, blockId: "glass" });
         cells.push({ x: 1, y, z: 0, blockId: "glass" });
       }
     }
   }
-  for (let x = -1; x <= 1; x += 1) for (let z = -1; z <= 1; z += 1) cells.push({ x, y: 7, z, blockId: material === "leaves" ? "planks" : material });
+  for (let x = -1; x <= 1; x += 1) for (let z = -1; z <= 1; z += 1) cells.push({ x, y: baseY + 3, z, blockId: material === "leaves" ? "planks" : material });
   return cells;
 }
 
 function bridgePattern(material) {
+  const baseY = BUILD_MIN_Y;
   const cells = [];
   for (let x = -3; x <= 3; x += 1) {
-    cells.push({ x, y: 4, z: 0, blockId: material });
+    cells.push({ x, y: baseY, z: 0, blockId: material });
     if (Math.abs(x) < 3) {
-      cells.push({ x, y: 5, z: -1, blockId: "leaves" });
-      cells.push({ x, y: 5, z: 1, blockId: "leaves" });
+      cells.push({ x, y: baseY + 1, z: -1, blockId: "leaves" });
+      cells.push({ x, y: baseY + 1, z: 1, blockId: "leaves" });
     }
   }
   return cells;
 }
 
 function towerPattern(material) {
+  const baseY = BUILD_MIN_Y;
   const cells = [];
-  for (let y = 4; y <= 8; y += 1) {
+  for (let y = baseY; y <= baseY + 4; y += 1) {
     for (let offset = -1; offset <= 1; offset += 1) {
       cells.push({ x: -1, y, z: offset, blockId: material });
       cells.push({ x: 1, y, z: offset, blockId: material });
       if (offset === -1 || offset === 1) cells.push({ x: 0, y, z: offset, blockId: material });
     }
   }
-  for (let x = -1; x <= 1; x += 1) for (let z = -1; z <= 1; z += 1) cells.push({ x, y: 9, z, blockId: material });
-  cells.push({ x: 0, y: 10, z: 0, blockId: material });
+  for (let x = -1; x <= 1; x += 1) for (let z = -1; z <= 1; z += 1) cells.push({ x, y: baseY + 5, z, blockId: material });
+  cells.push({ x: 0, y: baseY + 6, z: 0, blockId: material });
   return cells;
 }
 
@@ -936,6 +942,7 @@ function cancelProposal() {
   status.textContent = "Build preview cancelled. World unchanged.";
 }
 
+buildZoneLabel.textContent = `X / Z · Y ≥ ${BUILD_MIN_Y} BUILD ZONE`;
 createTileGrid();
 for (const button of materialButtons) button.tabIndex = button.dataset.material === selectedMaterial ? 0 : -1;
 updateStats();

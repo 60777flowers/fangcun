@@ -162,7 +162,7 @@ diffHash  = 8987f4c01307b543f156cb29a703bb7068e0fa856178db6b41140b2742d26500
 | 单 plan 方块 | ≤24（默认） | grant 可配到 64 |
 | 当日 AI 方块 | ≤120（默认） | grant 可配 |
 | 单原语尺寸 | ≤8（box/floor/roof 宽轴 ≤8） | 世界 16³ |
-| y 范围 | 4..15 | 地形层不可建 |
+| y 范围 | 1..15 | 地形层不可建 |
 | 材料 | 8 种全局 ID | grant 可再收窄 |
 | plan TTL | 300 s | 超时 `plan_expired` |
 | approval TTL | 120 s | 一次性 |

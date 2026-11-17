@@ -68,9 +68,9 @@ DSH adapter / MCP tools / persistence / WSS：尚未接通
 最近一次验证：
 
 - `npm run typecheck`：通过。
-- `npm test`：47/47 通过，包含 grant revoke 和并发编辑竞态测试、Companion home tick 闭环测试。
+- `npm test`：76/76 通过，包含 grant revoke 和并发编辑竞态测试、Companion home tick 闭环测试。
 - `npm run test:simulator`：通过，place/break/preview/explicit commit smoke 无 browser error。
-- `npm run demo:companion`：输入确认后输出 12-block AI commit at revision 1，seeded world 变为 796 blocks。
+- `npm run demo:companion`：输入确认后输出 12-block AI commit at revision 1，seeded world 变为 208 blocks。
 - Android Gradle `assembleDebug`：通过；测试 POC 已安装在 Tab S8。
 
 ## 4. 到最终产品还差什么

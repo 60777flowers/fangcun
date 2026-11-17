@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { WORLD_SPEC } from "@fangcun/world-schema";
 import { isInsidePlot, validateCompanionInstance, validateHomePlotGrant, validatePersonaCard, validateVisitEvent, validateVisitInvitation } from "../src/index.ts";
 
 const persona = { schemaVersion: 1, personaId: "playful-fish", version: 1, displayName: "大肥鱼", personaText: "调皮、温暖。", toneTags: ["playful"], allowedEmotes: ["wave", "happy"], memoryPolicy: "session-only" };
@@ -24,7 +25,10 @@ test("home plot grants are bounded, budgeted, owner-bound and half-open", () => 
     assert.equal(isInsidePlot(valid.value, { x: 0, y: 4, z: 0 }), true);
     assert.equal(isInsidePlot(valid.value, { x: 4, y: 4, z: 0 }), false);
   }
-  assert.equal(validateHomePlotGrant({ ...plot, bounds: { min: { x: 0, y: 3, z: 0 }, maxExclusive: { x: 4, y: 12, z: 4 } } }).ok, false);
+  // A plot floor may not start inside the protected terrain layer. Keep the AABB within
+  // the 8-voxel height cap so only the terrain rule (not a size rule) can reject it.
+  const terrainTop = WORLD_SPEC.terrainTopY;
+  assert.equal(validateHomePlotGrant({ ...plot, bounds: { min: { x: 0, y: terrainTop - 1, z: 0 }, maxExclusive: { x: 4, y: terrainTop + 7, z: 4 } } }).ok, false);
   assert.equal(validateHomePlotGrant({ ...plot, allowedBlockIds: ["command_block"] }).ok, false);
   assert.equal(validateHomePlotGrant({ ...plot, maxBlocksPerDay: 31 }).ok, false);
 });

@@ -11,8 +11,9 @@ import java.nio.FloatBuffer;
  */
 final class CompanionMesh {
     private static final int MAX_BOXES = 24;
-    private static final float SHADE_TOP = 1.0f;
-    private static final float SHADE_BOTTOM = 0.45f;
+    /** Distance from the body centre down to the lowest box, i.e. the feet. */
+    private static final float FEET_OFFSET = 0.026f;
+    private static final float SHADE_TOP = 1.0f;    private static final float SHADE_BOTTOM = 0.45f;
     private static final float SHADE_X = 0.80f;
     private static final float SHADE_Z = 0.62f;
 
@@ -52,6 +53,10 @@ final class CompanionMesh {
         box(positions, colors, cursor, 0.030f, 0.010f, -0.013f, 0.005f, 0.005f, 0.004f, EYE);
         box(positions, colors, cursor, 0.020f, -0.002f, 0.017f, 0.004f, 0.003f, 0.003f, CHEEK);
         box(positions, colors, cursor, 0.020f, -0.002f, -0.017f, 0.004f, 0.003f, 0.003f, CHEEK);
+
+        // The boxes are laid out around the body centre; shift them down to a feet origin so
+        // the fallback avatar stands on the terrain instead of sinking into the grass.
+        for (int index = 1; index < cursor[0]; index += 3) positions[index] += FEET_OFFSET;
 
         return new Mesh(direct(positions, cursor[0]), direct(colors, cursor[1]), cursor[0] / 3);
     }
