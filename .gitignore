@@ -29,6 +29,10 @@ MC_mod/
 .gradle/
 **/.gradle/
 apps/android-ar-poc/tab-s8-*.png
+# 设备调试截图（调姿势/气泡/贴图时产生，不入库）
+apps/android-ar-poc/crop_*.png
+apps/android-ar-poc/shot*.png
+apps/android-ar-poc/a_*.png
 
 # 本地环境
 .env

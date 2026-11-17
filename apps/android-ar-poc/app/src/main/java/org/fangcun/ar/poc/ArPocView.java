@@ -38,6 +38,18 @@ final class ArPocView extends GLSurfaceView {
     /** Updates the placeholder companion's visible behaviour. */
     void setCompanionState(String state) { queueEvent(() -> renderer.setCompanionState(state)); }
 
+    /** Triggers a data-driven action by id ({@code auto} resumes the idle cycle). */
+    void setAction(String id) { queueEvent(() -> renderer.setAction(id)); }
+
+    /** Host-driven trigger: repeat a one-shot action until the Host's expiry time. */
+    void playTimedAction(String id, long expiresAtMs) { queueEvent(() -> renderer.playTimedAction(id, expiresAtMs)); }
+
+    /** Sets the name shown on the 3D nameplate above the companion's head. */
+    void setCompanionName(String name) { queueEvent(() -> renderer.setCompanionName(name)); }
+
+    /** Shows one line in the Animal-Crossing-style 3D speech bubble above the head. */
+    void setCompanionSay(String text) { queueEvent(() -> renderer.say(text)); }
+
     /** Debug: draws the companion in front of the camera without needing a plane. */
     void setPreviewMode(boolean enabled) { queueEvent(() -> renderer.setPreviewMode(enabled)); }
 
@@ -46,6 +58,9 @@ final class ArPocView extends GLSurfaceView {
 
     /** Debug: forces a companion pose for tuning. */
     void setForcedPose(String pose) { queueEvent(() -> renderer.setForcedPose(pose)); }
+
+    /** Debug: freezes a forced pose at one phase (0..1) for deterministic screenshots. */
+    void setForcedPhase(float phase) { queueEvent(() -> renderer.setForcedPhase(phase)); }
 
     /** Drops the island anchor so the next tap re-anchors (used by the UI button). */
     void resetAnchor() { queueEvent(() -> renderer.releaseAnchorNow()); }

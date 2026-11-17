@@ -70,6 +70,10 @@ final class VrmModel {
     private float offsetX;
     private float offsetY;
     private float offsetZ;
+    /** Rest-pose vertex used as the top-of-head anchor (model space, metres). */
+    private float[] headTopRest;
+    /** Posed top-of-head anchor in model space, refreshed by {@link #applyPose}. */
+    private final float[] headTopModel = new float[3];
 
     private VrmModel() { }
 
@@ -236,6 +240,7 @@ final class VrmModel {
         model.bounds[3] = maxX;
         model.bounds[4] = maxY;
         model.bounds[5] = maxZ;
+        model.findHeadTopAnchor();
         return model;
     }
 
@@ -545,6 +550,49 @@ final class VrmModel {
     boolean hasSkin() { return skin != null; }
 
     /**
+     * Rest-pose vertex that sits on top of the head and is mostly driven by the head bone. The
+     * nameplate/speech-bubble anchor is that vertex skinned by the current pose, so it follows the
+     * head through sit/lie/jump instead of assuming the standing height.
+     */
+    private void findHeadTopAnchor() {
+        SkinData s = skin;
+        if (s == null) return;
+        Integer headNode = s.boneNode.get("head");
+        if (headNode == null || headNode < 0 || headNode >= s.slotOfNode.length) return;
+        int headSlot = s.slotOfNode[headNode];
+        if (headSlot < 0) return;
+        float bestY = -Float.MAX_VALUE;
+        for (Primitive primitive : primitives) {
+            for (int vertex = 0; vertex < primitive.vertexCount; vertex += 1) {
+                float headWeight = 0f;
+                for (int influence = 0; influence < 4; influence += 1) {
+                    if (primitive.joints[vertex * 4 + influence] == headSlot) {
+                        headWeight += primitive.weights[vertex * 4 + influence];
+                    }
+                }
+                if (headWeight < 0.5f) continue;
+                float y = primitive.restPositions[vertex * 3 + 1];
+                if (y > bestY) {
+                    bestY = y;
+                    headTopRest = new float[] {
+                        primitive.restPositions[vertex * 3], y, primitive.restPositions[vertex * 3 + 2]};
+                }
+            }
+        }
+        if (headTopRest == null) {
+            headTopRest = new float[] {(bounds[0] + bounds[3]) * 0.5f, bounds[4], (bounds[2] + bounds[5]) * 0.5f};
+        }
+        headTopModel[0] = headTopRest[0];
+        headTopModel[1] = headTopRest[1];
+        headTopModel[2] = headTopRest[2];
+    }
+
+    /** Posed top-of-head anchor in model space (metres); follows the current pose. */
+    void headTop(float[] out) {
+        System.arraycopy(headTopModel, 0, out, 0, 3);
+    }
+
+    /**
      * Re-skins the mesh for a procedural pose. {@code boneRotations} maps VRM humanoid bone
      * names to an axis-angle rotation in the bone's local space; {@code hipsOffset} is a
      * translation in bind units applied to the hips bone.
@@ -595,6 +643,23 @@ final class VrmModel {
                 continue;
             }
             android.opengl.Matrix.multiplyMM(joints[slot], 0, world[node], 0, s.inverseBind, slot * 16);
+        }
+
+        // Track the top-of-head anchor through the same skinning matrix as the head vertices.
+        if (headTopRest != null) {
+            Integer headNode = s.boneNode.get("head");
+            if (headNode != null && headNode >= 0 && headNode < s.slotOfNode.length) {
+                int headSlot = s.slotOfNode[headNode];
+                if (headSlot >= 0 && headSlot < jointCount) {
+                    float[] m = joints[headSlot];
+                    float x = headTopRest[0];
+                    float y = headTopRest[1];
+                    float z = headTopRest[2];
+                    headTopModel[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
+                    headTopModel[1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+                    headTopModel[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+                }
+            }
         }
 
         for (Primitive primitive : primitives) {

@@ -17,8 +17,16 @@ import java.nio.charset.StandardCharsets;
  * replica session. Only the messages needed by this client slice are handled.
  */
 final class HostClient {
+    /** Coarse transport state so the UI can show a connection dot without parsing status text. */
+    static final int LINK_IDLE = 0;
+    static final int LINK_CONNECTING = 1;
+    static final int LINK_ONLINE = 2;
+    static final int LINK_OFFLINE = 3;
+
     interface Listener {
         void onStatus(String text);
+
+        void onLinkState(int state);
 
         void onWorldLoaded(int rev);
 
@@ -30,6 +38,12 @@ final class HostClient {
         void onCompanionState(String state);
 
         void onCompanionSay(String text);
+
+        /** Host-triggered action (companion_action), valid at least until {@code expiresAtMs}. */
+        void onCompanionAction(String actionId, long expiresAtMs);
+
+        /** Companion display name from {@code GET /api/core/pet}; may arrive after connecting. */
+        void onCompanionProfile(String displayName);
     }
 
     private final String host;
@@ -51,6 +65,7 @@ final class HostClient {
 
     /** Pairs with the one-time code and opens the replica socket. Blocking; call off the UI thread. */
     void connect(String pairingCode) {
+        listener.onLinkState(LINK_CONNECTING);
         String token;
         String pairedWorldId;
         try {
@@ -60,6 +75,7 @@ final class HostClient {
             token = response.getString("token");
             pairedWorldId = response.getString("worldId");
         } catch (IOException | JSONException error) {
+            listener.onLinkState(LINK_OFFLINE);
             listener.onStatus("Pairing failed: " + describe(error));
             return;
         }
@@ -69,6 +85,7 @@ final class HostClient {
 
     /** Reuses a saved credential; the Host closes the socket if the token is no longer valid. */
     void connectWithToken(String token, String targetWorldId) {
+        listener.onLinkState(LINK_CONNECTING);
         openSocket(token, targetWorldId);
     }
 
@@ -89,14 +106,18 @@ final class HostClient {
                 }
 
                 @Override public void onClosed(String reason) {
+                    listener.onLinkState(LINK_OFFLINE);
                     listener.onStatus("Host connection closed (" + reason + ")");
                 }
             });
         } catch (IOException error) {
+            listener.onLinkState(LINK_OFFLINE);
             listener.onStatus("WebSocket failed: " + describe(error));
             return;
         }
         socket = client;
+        listener.onLinkState(LINK_ONLINE);
+        fetchCompanionProfile();
         try {
             send(new JSONObject()
                 .put("protocolVersion", 1)
@@ -196,6 +217,11 @@ final class HostClient {
             }
             if ("companion_say".equals(type)) {
                 listener.onCompanionSay(message.optString("text", ""));
+                return;
+            }
+            if ("companion_action".equals(type)) {
+                // Host/PC pet command: `actionId` is one of the action registry's public ids.
+                listener.onCompanionAction(message.optString("actionId", ""), message.optLong("expiresAtMs", 0L));
             }
         } catch (JSONException error) {
             listener.onStatus("Malformed host message.");
@@ -221,6 +247,40 @@ final class HostClient {
             return;
         }
         current.sendText(message.toString());
+    }
+
+    /**
+     * Reads {@code GET /api/core/pet} for the companion's display name. This loopback-only core
+     * API is unauthenticated by design; a Host that predates it fails silently and the activity
+     * keeps its default name.
+     */
+    private void fetchCompanionProfile() {
+        try {
+            JSONObject pet = getJson("/api/core/pet");
+            String name = pet.optString("name", "");
+            if (!name.isEmpty()) listener.onCompanionProfile(name);
+        } catch (IOException | JSONException ignored) {
+            // Older Host without the pet endpoint: default display name is used.
+        }
+    }
+
+    private JSONObject getJson(String path) throws IOException, JSONException {
+        HttpURLConnection connection = (HttpURLConnection) new URL("http://" + host + ":" + port + path).openConnection();
+        try {
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(4000);
+            connection.setReadTimeout(4000);
+            int status = connection.getResponseCode();
+            if (status != 200) throw new IOException("HTTP " + status);
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                StringBuilder text = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) text.append(line);
+                return new JSONObject(text.toString());
+            }
+        } finally {
+            connection.disconnect();
+        }
     }
 
     private JSONObject postJson(String path, JSONObject body) throws IOException, JSONException {

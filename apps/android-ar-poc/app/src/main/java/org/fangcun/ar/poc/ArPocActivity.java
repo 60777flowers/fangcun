@@ -4,16 +4,21 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputFilter;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
-import android.widget.Button;
+import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -26,6 +31,9 @@ import com.google.ar.core.exceptions.UnavailableApkTooOldException;
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException;
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException;
 
+import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -35,25 +43,83 @@ import java.util.concurrent.Executors;
  * Renders the Host's authoritative voxel world at a tabletop anchor and forwards taps as
  * world intents. Transport is the loopback Host reached through `adb reverse`; LAN TLS,
  * certificate pinning and QR pairing are the next hardening step, not implemented here.
+ *
+ * <p>The tablet overlay is deliberately lightweight: a compact translucent status card, small
+ * floating buttons, and two panels (settings and chat history) that are hidden by default so the
+ * AR camera view and its tap handling stay unobstructed. Companion dialogue is shown as a 3D
+ * speech bubble above the avatar's head by the renderer; this activity only keeps the history.</p>
  */
 public final class ArPocActivity extends Activity {
     private static final int CAMERA_PERMISSION_REQUEST = 100;
     private static final String HOST = "127.0.0.1";
     private static final int PORT = 8765;
+    private static final int CHAT_HISTORY_LIMIT = 8;
+
+    private static final int COLOR_TEXT = 0xFFF3F7F4;
+    private static final int COLOR_MUTED = 0xFFB6C6BD;
+    private static final int COLOR_ACCENT = 0xFFFFD28A;
+    private static final int COLOR_CARD = 0xB3141F1A;
+    private static final int COLOR_DOT_ONLINE = 0xFF7BD88F;
+    private static final int COLOR_DOT_CONNECTING = 0xFFFFD28A;
+    private static final int COLOR_DOT_OFFLINE = 0xFFFF7B72;
+    private static final int COLOR_DOT_IDLE = 0xFF9AA79E;
 
     private volatile Session session;
     private ArPocView arView;
-    private TextView status;
-    private EditText codeField;
     private boolean installRequested;
 
     private final VoxelWorld world = new VoxelWorld();
     private final ExecutorService hostExecutor = Executors.newSingleThreadExecutor();
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private android.content.SharedPreferences prefs;
-    private TextView bubble;
     private HostClient hostClient;
+
     private String arStatus = "Starting…";
     private String hostStatus = "Not connected";
+    private String companionName = "大肥鱼";
+    private String intentCompanionName;
+    private int linkState = HostClient.LINK_IDLE;
+    private int worldRev = -1;
+    private int worldBlocks;
+    private String currentActionId = "auto";
+    private String requestedActionId = "auto";
+    private boolean paired;
+    private final ArrayDeque<String> chatHistory = new ArrayDeque<>();
+
+    private View connectionDot;
+    private TextView statusMeta;
+    private TextView statusAction;
+    private TextView hintText;
+    private TextView guidanceText;
+    private TextView chipTracking;
+    private TextView chipPlanes;
+    private TextView chipPlaced;
+    private View coachOverlay;
+    private boolean arReady;
+    private boolean arTracking;
+    private int arPlaneCount = -1;
+    private boolean islandAnchored;
+    private boolean cameraPermissionDenied;
+    private String arError;
+    private boolean previewMode;
+    private TextView banner;
+    private LinearLayout settingsPanel;
+    private TextView settingsName;
+    private LinearLayout pairSection;
+    private EditText codeField;
+    private final Map<String, TextView> actionChips = new LinkedHashMap<>();
+    private LinearLayout chatPanel;
+    private LinearLayout chatList;
+    private ScrollView chatScroll;
+    private View chatUnreadDot;
+    private boolean settingsOpen;
+    private boolean chatOpen;
+    /** Debug (`--ez notouch true`): ignore taps so a preview inspection session cannot anchor. */
+    private boolean ignoreTaps;
+
+    private final Runnable hideBanner = () -> {
+        if (banner != null) banner.setVisibility(View.GONE);
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -66,71 +132,21 @@ public final class ArPocActivity extends Activity {
         arView = new ArPocView(this, world);
         root.addView(arView, new FrameLayout.LayoutParams(-1, -1));
 
-        status = new TextView(this);
-        status.setTextColor(0xffffffff);
-        status.setTextSize(13);
-        status.setPadding(24, 20, 24, 20);
-        status.setBackgroundColor(0x990f1915);
-        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(-2, -2);
-        statusParams.topMargin = 28;
-        statusParams.leftMargin = 18;
-        statusParams.rightMargin = 18;
-        root.addView(status, statusParams);
-
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setPadding(18, 14, 18, 18);
-        bar.setBackgroundColor(0xcc0f1915);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-
-        codeField = new EditText(this);
-        codeField.setHint("pairing code");
-        codeField.setTextColor(Color.WHITE);
-        codeField.setHintTextColor(0xff8fa39b);
-        codeField.setTextSize(16);
-        codeField.setSingleLine(true);
-        codeField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
-        codeField.setFilters(new InputFilter[]{new InputFilter.LengthFilter(12)});
-        bar.addView(codeField, new LinearLayout.LayoutParams(0, -2, 1f));
-
-        Button connect = new Button(this);
-        connect.setText("Connect");
-        connect.setOnClickListener(view -> connectToHost());
-        bar.addView(connect);
-
-        Button anchor = new Button(this);
-        anchor.setText("Re-anchor");
-        anchor.setOnClickListener(view -> {
-            arView.resetAnchor();
-            setHostStatus("Anchor cleared — tap the table to re-anchor.");
-        });
-        bar.addView(anchor);
-
-        FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(-1, -2);
-        barParams.gravity = Gravity.BOTTOM;
-        root.addView(bar, barParams);
-
-        // Companion speech bubble, shown above the control bar for a few seconds.
-        bubble = new TextView(this);
-        bubble.setTextColor(0xff10221c);
-        bubble.setTextSize(17);
-        bubble.setGravity(Gravity.CENTER);
-        bubble.setPadding(36, 24, 36, 24);
-        bubble.setBackgroundColor(0xfaf2ffd9);
-        bubble.setVisibility(View.GONE);
-        FrameLayout.LayoutParams bubbleParams = new FrameLayout.LayoutParams(-2, -2);
-        bubbleParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        bubbleParams.bottomMargin = 150;
-        root.addView(bubble, bubbleParams);
-
+        previewMode = getIntent().getBooleanExtra("preview", false);
+        buildStatusArea(root);
+        buildBanner(root);
+        buildSettingsPanel(root);
+        buildChatPanel(root);
+        buildFloatingButtons(root);
+        buildCoachOverlay(root);
         setContentView(root);
 
         arView.setOnTouchListener((view, event) -> {
-            if (event.getAction() == MotionEvent.ACTION_UP && session != null) {
+            if (!ignoreTaps && event.getAction() == MotionEvent.ACTION_UP && session != null) {
                 arView.queueTap(event.getX(), event.getY());
                 return true;
             }
-            if (event.getAction() == MotionEvent.ACTION_UP) arView.clearPendingTap();
+            if (!ignoreTaps && event.getAction() == MotionEvent.ACTION_UP) arView.clearPendingTap();
             return true;
         });
 
@@ -139,18 +155,36 @@ public final class ArPocActivity extends Activity {
                 setHostStatus(text);
             }
 
+            @Override public void onLinkState(int state) {
+                runOnUiThread(() -> {
+                    linkState = state;
+                    updateConnectionDot();
+                    updatePairSection();
+                });
+            }
+
             @Override public void onWorldLoaded(int rev) {
+                worldRev = rev;
+                worldBlocks = world.countBlocks();
+                paired = true;
+                updatePairSection();
                 arView.markWorldDirty();
-                setHostStatus("World loaded · rev " + rev + " · " + world.countBlocks() + " blocks");
+                setHostStatus("World loaded · rev " + rev + " · " + worldBlocks + " blocks");
             }
 
             @Override public void onCommitApplied(int rev) {
+                worldRev = rev;
+                worldBlocks = world.countBlocks();
                 arView.markWorldDirty();
-                setHostStatus("Synced · rev " + rev + " · " + world.countBlocks() + " blocks");
+                setHostStatus("Synced · rev " + rev + " · " + worldBlocks + " blocks");
             }
 
             @Override public void onPaired(String token, String worldId) {
                 prefs.edit().putString("token", token).putString("worldId", worldId).apply();
+                runOnUiThread(() -> {
+                    paired = true;
+                    updatePairSection();
+                });
             }
 
             @Override public void onCompanionState(String state) {
@@ -158,55 +192,731 @@ public final class ArPocActivity extends Activity {
             }
 
             @Override public void onCompanionSay(String text) {
-                showCompanionBubble(text);
+                showCompanionSpeech(text);
+            }
+
+            @Override public void onCompanionAction(String actionId, long expiresAtMs) {
+                runOnUiThread(() -> {
+                    if (actionId == null || actionId.isEmpty()) return;
+                    if (CompanionActionRegistry.get().find(actionId) == null) return;
+                    requestedActionId = actionId;
+                    arView.playTimedAction(actionId, expiresAtMs);
+                    updateActionChips();
+                });
+            }
+
+            @Override public void onCompanionProfile(String displayName) {
+                runOnUiThread(() -> {
+                    // An explicit --es name wins over the Host's persona display name.
+                    if (intentCompanionName == null && displayName != null && !displayName.isEmpty()) {
+                        setCompanionNameInternal(displayName);
+                    }
+                });
             }
         });
 
         String preset = getIntent().getStringExtra("code");
-        if (getIntent().getBooleanExtra("preview", false)) arView.setPreviewMode(true);
+        if (previewMode) arView.setPreviewMode(true);
         if (getIntent().hasExtra("flipv")) arView.setFlipV(getIntent().getBooleanExtra("flipv", true));
+        ignoreTaps = getIntent().getBooleanExtra("notouch", false);
         String pose = getIntent().getStringExtra("pose");
         if (pose != null && !pose.isEmpty()) arView.setForcedPose(pose);
+        if (getIntent().hasExtra("posePhase")) arView.setForcedPhase(getIntent().getFloatExtra("posePhase", -1f));
+        String nameExtra = getIntent().getStringExtra("name");
+        if (nameExtra != null && !nameExtra.trim().isEmpty()) {
+            intentCompanionName = nameExtra.trim();
+            setCompanionNameInternal(intentCompanionName);
+        } else {
+            arView.setCompanionName(companionName);
+        }
+
         String savedToken = prefs.getString("token", null);
         String savedWorld = prefs.getString("worldId", null);
         if (preset != null && !preset.isEmpty()) {
             codeField.setText(preset);
+            paired = true;
+            updatePairSection();
             connectToHost();
         } else if (savedToken != null && savedWorld != null) {
+            paired = true;
+            updatePairSection();
             setHostStatus("Reconnecting with the saved session…");
             hostExecutor.execute(() -> hostClient.connectWithToken(savedToken, savedWorld));
+        } else {
+            // No credential yet: open settings so the pairing input is right there.
+            setSettingsOpen(true);
         }
         renderStatus();
+        updateGuidance();
     }
 
-    private void showCompanionBubble(String text) {
+    // ------------------------------------------------------------------------------------
+    // Overlay views
+    // ------------------------------------------------------------------------------------
+
+    /** Top-left translucent status card (connection dot, revision, block count, action). */
+    private void buildStatusArea(FrameLayout root) {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(13), dp(10), dp(15), dp(11));
+        card.setBackground(rounded(COLOR_CARD, 15, 0x2EFFFFFF, 1));
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        connectionDot = new View(this);
+        connectionDot.setBackground(circle(COLOR_DOT_IDLE));
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(9), dp(9));
+        dotParams.rightMargin = dp(8);
+        titleRow.addView(connectionDot, dotParams);
+        TextView title = new TextView(this);
+        title.setText("Fangcun AR");
+        title.setTextColor(COLOR_TEXT);
+        title.setTextSize(12.5f);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        titleRow.addView(title);
+        card.addView(titleRow);
+
+        statusMeta = new TextView(this);
+        statusMeta.setTextColor(COLOR_MUTED);
+        statusMeta.setTextSize(10.5f);
+        LinearLayout.LayoutParams metaParams = new LinearLayout.LayoutParams(-2, -2);
+        metaParams.topMargin = dp(4);
+        card.addView(statusMeta, metaParams);
+
+        statusAction = new TextView(this);
+        statusAction.setTextColor(COLOR_ACCENT);
+        statusAction.setTextSize(10.5f);
+        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-2, -2);
+        actionParams.topMargin = dp(2);
+        card.addView(statusAction, actionParams);
+
+        container.addView(card);
+
+        // Guidance card: state-driven Chinese next-step hint plus at-a-glance readiness chips.
+        LinearLayout guidanceCard = new LinearLayout(this);
+        guidanceCard.setOrientation(LinearLayout.VERTICAL);
+        guidanceCard.setPadding(dp(13), dp(10), dp(14), dp(10));
+        guidanceCard.setBackground(rounded(COLOR_CARD, 14, 0x2EFFFFFF, 1));
+
+        LinearLayout readinessRow = new LinearLayout(this);
+        readinessRow.setOrientation(LinearLayout.HORIZONTAL);
+        readinessRow.setGravity(Gravity.CENTER_VERTICAL);
+        chipTracking = readinessChip("追踪");
+        chipPlanes = readinessChip("平面");
+        chipPlaced = readinessChip("已放置");
+        LinearLayout.LayoutParams chipOne = new LinearLayout.LayoutParams(-2, -2);
+        chipOne.rightMargin = dp(6);
+        readinessRow.addView(chipTracking, chipOne);
+        LinearLayout.LayoutParams chipTwo = new LinearLayout.LayoutParams(-2, -2);
+        chipTwo.rightMargin = dp(6);
+        readinessRow.addView(chipPlanes, chipTwo);
+        readinessRow.addView(chipPlaced);
+        guidanceCard.addView(readinessRow);
+
+        guidanceText = new TextView(this);
+        guidanceText.setTextColor(COLOR_TEXT);
+        guidanceText.setTextSize(12.5f);
+        guidanceText.setMaxLines(3);
+        guidanceText.setLineSpacing(dp(1), 1f);
+        LinearLayout.LayoutParams guidanceParams = new LinearLayout.LayoutParams(-2, -2);
+        guidanceParams.topMargin = dp(7);
+        guidanceCard.addView(guidanceText, guidanceParams);
+
+        hintText = new TextView(this);
+        hintText.setTextColor(COLOR_MUTED);
+        hintText.setTextSize(10f);
+        hintText.setMaxLines(2);
+        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-2, -2);
+        hintParams.topMargin = dp(4);
+        guidanceCard.addView(hintText, hintParams);
+
+        LinearLayout.LayoutParams guidanceCardParams = new LinearLayout.LayoutParams(-2, -2);
+        guidanceCardParams.topMargin = dp(8);
+        guidanceCardParams.rightMargin = dp(6);
+        container.addView(guidanceCard, guidanceCardParams);
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-2, -2);
+        params.gravity = Gravity.TOP | Gravity.START;
+        params.topMargin = dp(12);
+        params.leftMargin = dp(12);
+        params.rightMargin = dp(72);
+        root.addView(container, params);
+    }
+
+    private TextView readinessChip(String label) {
+        TextView chip = new TextView(this);
+        chip.setText(label);
+        chip.setTextColor(COLOR_MUTED);
+        chip.setTextSize(9.5f);
+        chip.setPadding(dp(7), dp(3), dp(7), dp(3));
+        chip.setBackground(rounded(0x22FFFFFF, 8));
+        return chip;
+    }
+
+    private void updateReadinessChip(TextView chip, String label, boolean ok, String detail) {
+        if (chip == null) return;
+        String suffix = detail != null ? detail : (ok ? "✓" : "—");
+        chip.setText(label + " " + suffix);
+        chip.setTextColor(ok ? COLOR_DOT_ONLINE : COLOR_MUTED);
+        chip.setBackground(rounded(ok ? 0x2A4CAF6E : 0x22FFFFFF, 8));
+    }
+
+    /**
+     * One-time first-run coach overlay. It is only shown until dismissed and the flag is stored
+     * in SharedPreferences, so the default screen stays uncluttered afterwards. The
+     * {@code --ez coach true} debug extra forces it for demos/screenshots.
+     */
+    private void buildCoachOverlay(FrameLayout root) {
+        boolean forceCoach = getIntent().getBooleanExtra("coach", false);
+        if (!forceCoach && prefs.getBoolean("coachSeen", false)) return;
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(0xD9000000);
+        overlay.setClickable(true);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(22), dp(20), dp(22), dp(18));
+        card.setBackground(rounded(0xF2FFF8E7, 20));
+        TextView title = new TextView(this);
+        title.setText("先学三招");
+        title.setTextColor(0xFF4A3625);
+        title.setTextSize(17f);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        card.addView(title);
+        String[] lines = {
+            "① 把平板对准桌面，等提示「已检测到平面」",
+            "② 点一下桌面，把小岛放在那里",
+            "③ 点岛上的格子盖房子，点列顶拆方块",
+        };
+        for (int index = 0; index < lines.length; index += 1) {
+            TextView line = new TextView(this);
+            line.setText(lines[index]);
+            line.setTextColor(0xFF5B4632);
+            line.setTextSize(13.5f);
+            line.setLineSpacing(dp(2), 1f);
+            LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(-2, -2);
+            lineParams.topMargin = index == 0 ? dp(12) : dp(8);
+            card.addView(line, lineParams);
+        }
+        TextView dismiss = pill("知道了", 0xFF3E6B52, 0xFFEAF7EE);
+        dismiss.setOnClickListener(view -> {
+            overlay.setVisibility(View.GONE);
+            prefs.edit().putBoolean("coachSeen", true).apply();
+            updateGuidance();
+        });
+        LinearLayout.LayoutParams dismissParams = new LinearLayout.LayoutParams(-1, -2);
+        dismissParams.topMargin = dp(16);
+        card.addView(dismiss, dismissParams);
+
+        FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(dp(310), -2);
+        cardParams.gravity = Gravity.CENTER;
+        overlay.addView(card, cardParams);
+
+        coachOverlay = overlay;
+        root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+    }
+
+    /** Transient banner for host errors/info that must not live in the compact card. */
+    private void buildBanner(FrameLayout root) {
+        banner = new TextView(this);
+        banner.setTextColor(0xFFFFF3EE);
+        banner.setTextSize(11.5f);
+        banner.setPadding(dp(14), dp(9), dp(14), dp(9));
+        banner.setMaxLines(3);
+        banner.setVisibility(View.GONE);
+        banner.setBackground(rounded(0xE6A33E36, 12));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-2, -2);
+        params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        params.topMargin = dp(12);
+        root.addView(banner, params);
+    }
+
+    /** Small circular buttons; kept at the edges so they never swallow the AR tap. */
+    private void buildFloatingButtons(FrameLayout root) {
+        TextView gear = circularButton("⚙");
+        gear.setOnClickListener(view -> setSettingsOpen(!settingsOpen));
+        FrameLayout.LayoutParams gearParams = new FrameLayout.LayoutParams(dp(44), dp(44));
+        gearParams.gravity = Gravity.TOP | Gravity.END;
+        gearParams.topMargin = dp(12);
+        gearParams.rightMargin = dp(12);
+        root.addView(gear, gearParams);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.VERTICAL);
+        buttons.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        FrameLayout chatWrapper = new FrameLayout(this);
+        TextView chatButton = circularButton("💬");
+        chatButton.setOnClickListener(view -> setChatOpen(!chatOpen));
+        chatWrapper.addView(chatButton, new FrameLayout.LayoutParams(dp(46), dp(46)));
+        chatUnreadDot = new View(this);
+        chatUnreadDot.setBackground(circle(0xFFFF7B72));
+        chatUnreadDot.setVisibility(View.GONE);
+        FrameLayout.LayoutParams dotParams = new FrameLayout.LayoutParams(dp(11), dp(11));
+        dotParams.gravity = Gravity.TOP | Gravity.END;
+        chatWrapper.addView(chatUnreadDot, dotParams);
+        LinearLayout.LayoutParams chatParams = new LinearLayout.LayoutParams(dp(46), dp(46));
+        chatParams.bottomMargin = dp(10);
+        buttons.addView(chatWrapper, chatParams);
+
+        TextView anchorButton = circularButton("⌖");
+        anchorButton.setOnClickListener(view -> {
+            arView.resetAnchor();
+            islandAnchored = false;
+            updateGuidance();
+            setHostStatus("已清除小岛位置，点一下桌面重新放置。");
+        });
+        buttons.addView(anchorButton, new LinearLayout.LayoutParams(dp(46), dp(46)));
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-2, -2);
+        params.gravity = Gravity.BOTTOM | Gravity.END;
+        params.bottomMargin = dp(20);
+        params.rightMargin = dp(14);
+        root.addView(buttons, params);
+    }
+
+    /** Settings: pairing (only when unpaired) plus the action triggers and re-anchor. */
+    private void buildSettingsPanel(FrameLayout root) {
+        settingsPanel = new LinearLayout(this);
+        settingsPanel.setOrientation(LinearLayout.VERTICAL);
+        settingsPanel.setPadding(dp(16), dp(13), dp(16), dp(16));
+        settingsPanel.setBackground(rounded(0xE616231D, 18, 0x33FFFFFF, 1));
+        settingsPanel.setVisibility(View.GONE);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = new TextView(this);
+        title.setText("设置");
+        title.setTextColor(COLOR_TEXT);
+        title.setTextSize(14f);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView close = pill("✕", 0x22FFFFFF, COLOR_MUTED);
+        close.setOnClickListener(view -> setSettingsOpen(false));
+        header.addView(close);
+        settingsPanel.addView(header);
+
+        settingsName = new TextView(this);
+        settingsName.setText("名字 · " + companionName);
+        settingsName.setTextColor(COLOR_MUTED);
+        settingsName.setTextSize(11f);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-2, -2);
+        nameParams.topMargin = dp(6);
+        settingsPanel.addView(settingsName, nameParams);
+
+        pairSection = new LinearLayout(this);
+        pairSection.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams pairParams = new LinearLayout.LayoutParams(-1, -2);
+        pairParams.topMargin = dp(12);
+        settingsPanel.addView(pairSection, pairParams);
+
+        TextView pairLabel = new TextView(this);
+        pairLabel.setText("与 Host 配对");
+        pairLabel.setTextColor(COLOR_MUTED);
+        pairLabel.setTextSize(11f);
+        pairSection.addView(pairLabel);
+
+        LinearLayout pairRow = new LinearLayout(this);
+        pairRow.setOrientation(LinearLayout.HORIZONTAL);
+        pairRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams pairRowParams = new LinearLayout.LayoutParams(-1, -2);
+        pairRowParams.topMargin = dp(6);
+        pairSection.addView(pairRow, pairRowParams);
+
+        codeField = new EditText(this);
+        codeField.setHint("配对码");
+        codeField.setTextColor(Color.WHITE);
+        codeField.setHintTextColor(0xFF8FA39B);
+        codeField.setTextSize(14f);
+        codeField.setSingleLine(true);
+        codeField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        codeField.setFilters(new InputFilter[]{new InputFilter.LengthFilter(12)});
+        codeField.setBackground(rounded(0x33FFFFFF, 10));
+        codeField.setPadding(dp(12), dp(8), dp(12), dp(8));
+        pairRow.addView(codeField, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView connect = pill("连接", 0xFF3E6B52, 0xFFEAF7EE);
+        connect.setOnClickListener(view -> connectToHost());
+        LinearLayout.LayoutParams connectParams = new LinearLayout.LayoutParams(-2, -2);
+        connectParams.leftMargin = dp(8);
+        pairRow.addView(connect, connectParams);
+
+        TextView reanchor = pill("重新锚定", 0x22FFFFFF, 0xFFDCE8E1);
+        reanchor.setOnClickListener(view -> {
+            arView.resetAnchor();
+            islandAnchored = false;
+            updateGuidance();
+            setSettingsOpen(false);
+            setHostStatus("已清除小岛位置，点一下桌面重新放置。");
+        });
+        LinearLayout.LayoutParams reanchorParams = new LinearLayout.LayoutParams(-1, -2);
+        reanchorParams.topMargin = dp(12);
+        settingsPanel.addView(reanchor, reanchorParams);
+
+        TextView actionsLabel = new TextView(this);
+        actionsLabel.setText("动作");
+        actionsLabel.setTextColor(COLOR_MUTED);
+        actionsLabel.setTextSize(11f);
+        LinearLayout.LayoutParams actionsLabelParams = new LinearLayout.LayoutParams(-2, -2);
+        actionsLabelParams.topMargin = dp(14);
+        settingsPanel.addView(actionsLabel, actionsLabelParams);
+
+        CompanionActionRegistry registry = CompanionActionRegistry.get();
+        String[] ids = registry.publicActionIds();
+        String[] labels = registry.publicActionLabels();
+        LinearLayout row = null;
+        for (int index = 0; index < ids.length; index += 1) {
+            if (index % 4 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+                rowParams.topMargin = dp(6);
+                settingsPanel.addView(row, rowParams);
+            }
+            TextView chip = actionChip(labels[index], ids[index]);
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(0, -2, 1f);
+            chipParams.rightMargin = index % 4 == 3 ? 0 : dp(6);
+            row.addView(chip, chipParams);
+            actionChips.put(ids[index], chip);
+        }
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(318), -2);
+        params.gravity = Gravity.TOP | Gravity.END;
+        params.topMargin = dp(64);
+        params.rightMargin = dp(12);
+        root.addView(settingsPanel, params);
+        updateActionChips();
+        updatePairSection();
+    }
+
+    /** Chat history: last few lines in a small scrollable card above the buttons. */
+    private void buildChatPanel(FrameLayout root) {
+        chatPanel = new LinearLayout(this);
+        chatPanel.setOrientation(LinearLayout.VERTICAL);
+        chatPanel.setPadding(dp(14), dp(11), dp(14), dp(12));
+        chatPanel.setBackground(rounded(0xE616231D, 16, 0x33FFFFFF, 1));
+        chatPanel.setVisibility(View.GONE);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = new TextView(this);
+        title.setText("对话记录");
+        title.setTextColor(COLOR_TEXT);
+        title.setTextSize(12.5f);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView close = pill("✕", 0x22FFFFFF, COLOR_MUTED);
+        close.setOnClickListener(view -> setChatOpen(false));
+        header.addView(close);
+        chatPanel.addView(header);
+
+        chatScroll = new ScrollView(this);
+        chatScroll.setVerticalScrollBarEnabled(true);
+        chatList = new LinearLayout(this);
+        chatList.setOrientation(LinearLayout.VERTICAL);
+        chatScroll.addView(chatList, new ViewGroup.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(-1, dp(176));
+        scrollParams.topMargin = dp(8);
+        chatPanel.addView(chatScroll, scrollParams);
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(300), -2);
+        params.gravity = Gravity.BOTTOM | Gravity.END;
+        params.bottomMargin = dp(136);
+        params.rightMargin = dp(14);
+        root.addView(chatPanel, params);
+    }
+
+    // ------------------------------------------------------------------------------------
+    // UI state
+    // ------------------------------------------------------------------------------------
+
+    private void setSettingsOpen(boolean open) {
+        settingsOpen = open;
+        if (settingsPanel != null) settingsPanel.setVisibility(open ? View.VISIBLE : View.GONE);
+    }
+
+    private void setChatOpen(boolean open) {
+        chatOpen = open;
+        if (chatPanel != null) chatPanel.setVisibility(open ? View.VISIBLE : View.GONE);
+        if (open) {
+            setChatUnread(false);
+            rebuildChatHistory();
+        }
+    }
+
+    private void setChatUnread(boolean unread) {
+        if (chatUnreadDot != null) chatUnreadDot.setVisibility(unread ? View.VISIBLE : View.GONE);
+    }
+
+    private void updateConnectionDot() {
+        if (connectionDot == null) return;
+        int color;
+        switch (linkState) {
+            case HostClient.LINK_ONLINE: color = COLOR_DOT_ONLINE; break;
+            case HostClient.LINK_CONNECTING: color = COLOR_DOT_CONNECTING; break;
+            case HostClient.LINK_OFFLINE: color = COLOR_DOT_OFFLINE; break;
+            default: color = COLOR_DOT_IDLE; break;
+        }
+        connectionDot.setBackground(circle(color));
+    }
+
+    private void updatePairSection() {
+        if (pairSection == null) return;
+        // Hide the pairing input only when a saved credential is actually online; a stale token
+        // left over from before a Host restart must reopen it instead of hiding the only way in.
+        boolean connected = paired && linkState == HostClient.LINK_ONLINE;
+        pairSection.setVisibility(connected ? View.GONE : View.VISIBLE);
+    }
+
+    private void updateActionChips() {
+        for (Map.Entry<String, TextView> entry : actionChips.entrySet()) {
+            boolean selected = entry.getKey().equals(requestedActionId);
+            entry.getValue().setBackground(rounded(selected ? 0xFF3E6B52 : 0x22FFFFFF, 10));
+            entry.getValue().setTextColor(selected ? 0xFFEAF7EE : 0xFFD9E5DF);
+        }
+    }
+
+    private void rebuildChatHistory() {
+        if (chatList == null) return;
+        chatList.removeAllViews();
+        if (chatHistory.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("还没有对白。等 Host 让小伙伴开口吧。");
+            empty.setTextColor(COLOR_MUTED);
+            empty.setTextSize(11f);
+            empty.setPadding(dp(2), dp(6), dp(2), dp(6));
+            chatList.addView(empty);
+        } else {
+            for (String line : chatHistory) {
+                TextView row = new TextView(this);
+                row.setText(companionName + "：" + line);
+                row.setTextColor(0xFFE9F2EC);
+                row.setTextSize(11.5f);
+                row.setLineSpacing(dp(1), 1f);
+                row.setPadding(dp(2), dp(5), dp(2), dp(5));
+                chatList.addView(row);
+            }
+        }
+        if (chatScroll != null) chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
+    }
+
+    private void appendChatLine(String text) {
+        chatHistory.addLast(text);
+        while (chatHistory.size() > CHAT_HISTORY_LIMIT) chatHistory.removeFirst();
+        if (chatOpen) {
+            rebuildChatHistory();
+        } else {
+            setChatUnread(true);
+        }
+    }
+
+    /** Companion dialogue is the 3D bubble; this only records it for the history panel. */
+    private void showCompanionSpeech(String text) {
         if (text == null || text.isEmpty()) return;
         runOnUiThread(() -> {
-            bubble.setText(text);
-            bubble.setVisibility(View.VISIBLE);
-            bubble.removeCallbacks(hideBubble);
-            bubble.postDelayed(hideBubble, 8000);
+            appendChatLine(text);
+            arView.setCompanionSay(text);
         });
     }
 
-    private final Runnable hideBubble = () -> {
-        if (bubble != null) bubble.setVisibility(View.GONE);
-    };
+    private void showTransient(String text, boolean error) {
+        if (text == null || text.isEmpty()) return;
+        runOnUiThread(() -> {
+            banner.setText(text);
+            banner.setBackground(rounded(error ? 0xE6A33E36 : 0xE622352C, 12));
+            banner.setVisibility(View.VISIBLE);
+            uiHandler.removeCallbacks(hideBanner);
+            uiHandler.postDelayed(hideBanner, 4200);
+        });
+    }
 
-    private void connectToHost() {        String code = codeField.getText().toString().trim();
+    private void renderStatus() {
+        runOnUiThread(() -> {
+            if (statusMeta == null) return;
+            statusMeta.setText("rev " + (worldRev >= 0 ? String.valueOf(worldRev) : "—")
+                + " · " + worldBlocks + " blocks");
+            statusAction.setText("动作 · " + currentActionId);
+            hintText.setText(arStatus);
+            updateConnectionDot();
+        });
+    }
+
+    private void setCompanionNameInternal(String name) {
+        if (name == null || name.trim().isEmpty()) return;
+        companionName = name.trim();
+        if (settingsName != null) settingsName.setText("名字 · " + companionName);
+        if (arView != null) arView.setCompanionName(companionName);
+        if (chatOpen) rebuildChatHistory();
+    }
+
+    // ------------------------------------------------------------------------------------
+    // AR guidance state
+    // ------------------------------------------------------------------------------------
+
+    /**
+     * Composes the single Chinese guidance line from the current AR state, so the user always
+     * knows the next action and its precondition (permission, AR ready, tracking, plane, anchored).
+     */
+    private void updateGuidance() {
+        if (guidanceText == null) return;
+        String text;
+        if (previewMode) {
+            text = "预览模式：点屏幕不会放置小岛（调试用，仅检查姿势与模型）";
+        } else if (cameraPermissionDenied) {
+            text = "需要相机权限才能放置小岛，请允许后重试";
+        } else if (!arReady) {
+            text = arError != null ? arError : "正在准备 AR，请稍候…";
+        } else if (!arTracking) {
+            text = "追踪已丢失：把平板对准桌面并缓慢移动，恢复后再操作";
+        } else if (!islandAnchored && arPlaneCount <= 0) {
+            text = "把平板对准桌面或地板，缓慢左右移动，直到提示「已检测到平面」（当前平面数 "
+                + Math.max(arPlaneCount, 0) + "）";
+        } else if (!islandAnchored) {
+            text = "已检测到平面：点一下桌面就能把小岛放在那里";
+        } else {
+            text = "建造模式：点岛上的格子放方块；点同一列顶部会拆掉方块；想移动小岛请点右下角「⌖」";
+        }
+        guidanceText.setText(text);
+        updateReadinessChip(chipTracking, "追踪", arTracking, null);
+        updateReadinessChip(chipPlanes, "平面", islandAnchored || arPlaneCount > 0,
+            islandAnchored ? "✓" : (arPlaneCount >= 0 ? String.valueOf(arPlaneCount) : null));
+        updateReadinessChip(chipPlaced, "已放置", islandAnchored, null);
+    }
+
+    /** Called from the GL thread ~5x/s with the ARCore readiness the guidance text needs. */
+    void onArTrackingState(boolean tracking, int planeCount, boolean anchored) {
+        runOnUiThread(() -> {
+            arReady = true;
+            arTracking = tracking;
+            arPlaneCount = planeCount;
+            islandAnchored = anchored;
+            updateGuidance();
+        });
+    }
+
+    /** Red transient feedback for a failed tap/anchor (does not steal AR taps). */
+    void showArFeedback(String text) {
+        showTransient(text, true);
+    }
+
+    /** Green-ish transient feedback for a successful action. */
+    void showArNotice(String text) {
+        showTransient(text, false);
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Small view factories
+    // ------------------------------------------------------------------------------------
+
+    private int dp(float value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private GradientDrawable rounded(int color, float radiusDp) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radiusDp));
+        return drawable;
+    }
+
+    private GradientDrawable rounded(int color, float radiusDp, int strokeColor, float strokeDp) {
+        GradientDrawable drawable = rounded(color, radiusDp);
+        drawable.setStroke(Math.max(1, dp(strokeDp)), strokeColor);
+        return drawable;
+    }
+
+    private GradientDrawable circle(int color) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.OVAL);
+        drawable.setColor(color);
+        return drawable;
+    }
+
+    private TextView circularButton(String glyph) {
+        TextView button = new TextView(this);
+        button.setText(glyph);
+        button.setTextColor(COLOR_TEXT);
+        button.setTextSize(19f);
+        button.setGravity(Gravity.CENTER);
+        button.setBackground(rounded(0xCC141F1A, 23, 0x33FFFFFF, 1));
+        return button;
+    }
+
+    private TextView pill(String label, int backgroundColor, int textColor) {
+        TextView view = new TextView(this);
+        view.setText(label);
+        view.setTextColor(textColor);
+        view.setTextSize(12f);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(dp(14), dp(8), dp(14), dp(8));
+        view.setBackground(rounded(backgroundColor, 11));
+        view.setClickable(true);
+        return view;
+    }
+
+    private TextView actionChip(String label, String actionId) {
+        TextView chip = pill(label, 0x22FFFFFF, 0xFFD9E5DF);
+        chip.setTextSize(11.5f);
+        chip.setPadding(dp(4), dp(7), dp(4), dp(7));
+        chip.setOnClickListener(view -> applyAction(actionId));
+        return chip;
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Public seam for the Host/PC side
+    // ------------------------------------------------------------------------------------
+
+    /** Triggers one of {@link #getAvailableActions()}; {@code auto} resumes the idle cycle. */
+    public void setAction(String id) {
+        runOnUiThread(() -> applyAction(id));
+    }
+
+    /** Action ids the Host/PC inspector can offer and trigger. */
+    public String[] getAvailableActions() {
+        return CompanionActionRegistry.get().publicActionIds();
+    }
+
+    private void applyAction(String id) {
+        if (id == null || id.isEmpty()) return;
+        if (!CompanionActionRegistry.AUTO.equals(id) && CompanionActionRegistry.get().find(id) == null) return;
+        requestedActionId = id;
+        arView.setAction(id);
+        updateActionChips();
+    }
+
+    private void connectToHost() {
+        String code = codeField.getText().toString().trim();
         if (code.isEmpty()) {
-            setHostStatus("Enter the pairing code printed by `npm run host`.");
+            setHostStatus("请先输入 Host 打印的配对码。");
+            setSettingsOpen(true);
             return;
         }
-        setHostStatus("Pairing…");
+        setHostStatus("正在配对…");
         hostExecutor.execute(() -> hostClient.connect(code));
     }
 
     /** Invoked from the GL thread when a tap resolved to a world column. */
     void onColumnTapped(int x, int z) {
-        setHostStatus("Sending edit for column x=" + x + " z=" + z + "…");
+        setHostStatus("正在发送建造指令 x=" + x + " z=" + z + "…");
         hostExecutor.execute(() -> hostClient.editColumn(x, z));
     }
+
+    /** Invoked from the GL thread when the data-driven action changes. */
+    void onCompanionActionChanged(String actionId) {
+        runOnUiThread(() -> {
+            currentActionId = actionId;
+            if (statusAction != null) statusAction.setText("动作 · " + currentActionId);
+        });
+    }
+
+    // ------------------------------------------------------------------------------------
+    // AR session lifecycle (unchanged)
+    // ------------------------------------------------------------------------------------
 
     @Override
     protected void onResume() {
@@ -216,18 +926,24 @@ public final class ArPocActivity extends Activity {
             if (session == null) {
                 ArCoreApk.Availability availability = ArCoreApk.getInstance().checkAvailability(this);
                 if (availability.isTransient()) {
-                    setArStatus("ARCore availability is still being checked…");
+                    arError = "正在检测 AR 能力，请稍候…";
+                    setArStatus("正在检测 ARCore 是否可用…");
                     arView.requestRender();
+                    updateGuidance();
                     return;
                 }
                 if (!availability.isSupported()) {
-                    setArStatus("ARCore unsupported on this device.\nNo AR session started.");
+                    arError = "这台设备不支持 ARCore，无法放置小岛";
+                    setArStatus("这台设备不支持 ARCore，无法启动 AR 会话。");
+                    updateGuidance();
                     return;
                 }
                 ArCoreApk.InstallStatus installStatus = ArCoreApk.getInstance().requestInstall(this, !installRequested);
                 if (installStatus == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
                     installRequested = true;
-                    setArStatus("Installing or updating Google Play Services for AR…");
+                    arError = "正在安装/更新 Google Play 服务（AR），完成后会自动继续";
+                    setArStatus("正在安装 Google Play 服务（AR）…");
+                    updateGuidance();
                     return;
                 }
                 session = new Session(this);
@@ -237,22 +953,33 @@ public final class ArPocActivity extends Activity {
                 session.configure(config);
             }
             // Start the GL surface first; the camera texture is attached only after GL is ready.
+            arError = null;
             arView.onResume();
             arView.setSession(session);
             session.resume();
-            setArStatus("ARCore ready. Move over a tabletop and tap to anchor the island.");
+            setArStatus("ARCore 就绪。把平板对准桌面，缓慢移动以检测平面。");
+            updateGuidance();
         } catch (UnavailableArcoreNotInstalledException | UnavailableApkTooOldException
                  | UnavailableSdkTooOldException | UnavailableUserDeclinedInstallationException e) {
-            setArStatus("ARCore unavailable: " + e.getClass().getSimpleName());
+            arError = "ARCore 不可用：缺少或版本不匹配，请安装 Google Play 服务（AR）后重试";
+            setArStatus("ARCore 不可用：" + e.getClass().getSimpleName());
+            updateGuidance();
         } catch (Exception e) {
-            setArStatus("AR session failed closed: " + e.getClass().getSimpleName());
+            arError = "AR 启动失败，请重启应用再试";
+            setArStatus("AR 会话启动失败：" + e.getClass().getSimpleName());
+            updateGuidance();
         }
     }
 
     private boolean ensureCameraPermission() {
-        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) return false;
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            cameraPermissionDenied = false;
+            return false;
+        }
+        cameraPermissionDenied = true;
         requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_REQUEST);
-        setArStatus("Camera permission is required for ARCore.");
+        setArStatus("需要相机权限才能使用 ARCore。");
+        updateGuidance();
         return true;
     }
 
@@ -267,6 +994,7 @@ public final class ArPocActivity extends Activity {
     protected void onDestroy() {
         hostClient.disconnect();
         hostExecutor.shutdownNow();
+        uiHandler.removeCallbacksAndMessages(null);
         if (session != null) session.close();
         super.onDestroy();
     }
@@ -274,8 +1002,11 @@ public final class ArPocActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == CAMERA_PERMISSION_REQUEST && (grantResults.length == 0 || grantResults[0] != PackageManager.PERMISSION_GRANTED)) {
-            setArStatus("Camera permission denied. AR writes are disabled.");
+        if (requestCode == CAMERA_PERMISSION_REQUEST) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            cameraPermissionDenied = !granted;
+            if (!granted) setArStatus("相机权限被拒绝，AR 功能不可用。");
+            updateGuidance();
         }
     }
 
@@ -289,11 +1020,19 @@ public final class ArPocActivity extends Activity {
     void setHostStatus(String value) {
         runOnUiThread(() -> {
             hostStatus = value;
-            renderStatus();
+            boolean duplicate = value != null
+                && (value.startsWith("World loaded") || value.startsWith("Synced")
+                    || value.startsWith("Sending edit") || value.startsWith("正在发送建造指令"));
+            if (!duplicate) {
+                boolean error = value != null && (value.contains("failed") || value.contains("Failed")
+                    || value.contains("rejected") || value.contains("closed") || value.contains("error")
+                    || value.contains("Error") || value.contains("Not connected") || value.contains("unauthorized"));
+                showTransient(value, error);
+                if (value != null && (value.contains("Pairing failed") || value.contains("unauthorized"))) {
+                    paired = false;
+                    updatePairSection();
+                }
+            }
         });
-    }
-
-    private void renderStatus() {
-        runOnUiThread(() -> status.setText("Fangcun AR\n" + arStatus + "\n\nHost: " + hostStatus));
     }
 }
