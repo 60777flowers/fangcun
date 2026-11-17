@@ -237,3 +237,6 @@ fangcun/
 - 提 issue 时说明设备型号、Android/ARCore 版本、复现步骤。
 - 提交前请跑：`npm run build && npm test && npm run test:browser`。
 - 素材类 PR 请附来源与授权说明；**未授权、来源不明的素材一律不进仓库**。
+
+> **开发分支是 `beta`。** 默认分支为 `beta`，所有 PR 请提到 `beta`；`main` 是发布线，
+> 只在 `beta` 验证通过后合入并打 tag（见 [CONTRIBUTING.md](CONTRIBUTING.md) §2）。

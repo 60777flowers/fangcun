@@ -26,19 +26,26 @@ npm run test:simulator   # Chrome 浏览器交互回归
 
 ## 2. 分支与提交
 
-**分支模型：`main` 单主干 + 短生命周期特性分支。** 不设长期 `dev`/`develop` 分支，也不按版本开长分支。
+**分支模型：`beta` 集成 + `main` 发布 + 短生命周期特性分支。**
+
+```
+feature 分支 ──PR──▶ beta ──(验证通过)──▶ main ──▶ tag vX.Y.Z
+```
 
 | | |
 |---|---|
-| `main` | 唯一主干，随时可构建、测试全绿；默认分支。改动只从特性分支合入 |
-| 特性分支 | 从 `main` 切出、**按一个可验证的切片命名**，合入后立即删除（本地与远端都删） |
+| `beta` | **集成分支，也是默认分支。所有 PR 都提到这里。** 日常开发合入这条线，允许短暂不稳定 |
+| `main` | **发布分支**。只接受来自 `beta` 的合入，随时可构建、测试全绿；对外宣传和版本 tag 以这里为准 |
+| 特性分支 | 从 `beta` 切出、**按一个可验证的切片命名**，PR 合入后立即删除（本地与远端都删） |
 | 分支命名 | `feat/<短描述>`、`fix/<短描述>`、`docs/<短描述>`、`chore/<短描述>`；用短横线，全小写，≤5 个词 |
-| 合入方式 | 外部贡献走 PR（Squash merge）；维护者在单 PR 场景可用 fast-forward 保持线性历史 |
-| 过期分支 | 合入后当天删除；超过两周未动的分支先 rebase 到最新 `main`，仍无进展则关闭 |
+| 合入方式 | 外部贡献走 PR 到 **`beta`**（Squash merge）；维护者小改动可 fast-forward 保持线性 |
+| 发布节奏 | `beta` 上 `npm run build && npm test && npm run test:browser` 全绿后，`beta` → `main` 合入并打 tag |
 | 版本标记 | 只在 `main` 上打 annotated tag，形如 `v0.1.0-demo`、`v0.2.0-ar-lan`；不建 release 分支 |
+| 过期分支 | 合入后当天删除；超过两周未动的分支先 rebase 到最新 `beta`，仍无进展则关闭 |
 | 提交信息 | Conventional Commits：`feat(mesher): greedy meshing`、`fix(sync): 回滚时未清 pending` |
 | PR 大小 | 单 PR ≤ 400 行改动；大改先开 issue 对齐 |
 
+> 本地开发请先 `git checkout beta && git pull`，再从 `beta` 切特性分支。
 > 历史阶段分支（`feat/phase1-voxel-sandbox`、`feat/companion-extensibility`）已合入 `main` 并删除；
 > 需要追溯请用 `git log`，不要恢复成长期分支。
 
