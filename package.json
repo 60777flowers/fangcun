@@ -18,6 +18,7 @@
     "host": "npm run build && node scripts/run-host.mjs",
     "mcp": "npm run build && node scripts/mcp-server.mjs",
     "simulator": "npm run build && node scripts/serve-simulator.mjs",
+    "atlas": "node scripts/build-block-atlas.mjs",
     "test:simulator": "node scripts/test-simulator.mjs",
     "test:core-api": "node scripts/test-core-api.mjs",
     "test:core-ui": "node scripts/test-core-ui.mjs",

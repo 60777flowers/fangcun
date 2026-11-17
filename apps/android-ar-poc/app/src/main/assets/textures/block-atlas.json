@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "pack": "programmerart",
+  "tileSize": 16,
+  "columns": 5,
+  "rows": 5,
+  "atlasWidth": 80,
+  "atlasHeight": 80,
+  "blocks": {
+    "grass": {
+      "top": 11,
+      "side": 10,
+      "bottom": 6
+    },
+    "dirt": {
+      "top": 6,
+      "side": 6,
+      "bottom": 6
+    },
+    "stone": {
+      "top": 21,
+      "side": 21,
+      "bottom": 21
+    },
+    "planks": {
+      "top": 15,
+      "side": 15,
+      "bottom": 15
+    },
+    "log": {
+      "top": 14,
+      "side": 13,
+      "bottom": 14
+    },
+    "leaves": {
+      "top": 12,
+      "side": 12,
+      "bottom": 12
+    },
+    "sand": {
+      "top": 20,
+      "side": 20,
+      "bottom": 20
+    },
+    "glass": {
+      "top": 8,
+      "side": 8,
+      "bottom": 8
+    },
+    "brick": {
+      "top": 1,
+      "side": 1,
+      "bottom": 1
+    },
+    "tile": {
+      "top": 19,
+      "side": 18,
+      "bottom": 19
+    },
+    "wool_white": {
+      "top": 24,
+      "side": 24,
+      "bottom": 24
+    },
+    "wool_red": {
+      "top": 23,
+      "side": 23,
+      "bottom": 23
+    },
+    "bookshelf": {
+      "top": 15,
+      "side": 0,
+      "bottom": 15
+    },
+    "lantern": {
+      "top": 9,
+      "side": 9,
+      "bottom": 9
+    },
+    "pumpkin": {
+      "top": 17,
+      "side": 16,
+      "bottom": 17
+    },
+    "flower": {
+      "top": 7,
+      "side": 7,
+      "bottom": 7
+    }
+  }
+}

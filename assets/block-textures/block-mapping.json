@@ -1,0 +1,35 @@
+{
+  "pack": "programmerart",
+  "tileSize": 16,
+  "extraTextures": [
+    "cobblestone",
+    "stonebrick",
+    "quartz_block_side",
+    "quartz_block_top",
+    "wool_colored_white",
+    "wool_colored_red",
+    "crafting_table_top",
+    "crafting_table_front",
+    "crafting_table_side",
+    "flower_rose",
+    "pumpkin_face_off"
+  ],
+  "blocks": {
+    "grass": { "top": "grass_top", "side": "grass_side", "bottom": "dirt" },
+    "dirt": { "top": "dirt", "side": "dirt", "bottom": "dirt" },
+    "stone": { "top": "stone", "side": "stone", "bottom": "stone" },
+    "planks": { "top": "planks_oak", "side": "planks_oak", "bottom": "planks_oak" },
+    "log": { "top": "log_oak_top", "side": "log_oak", "bottom": "log_oak_top" },
+    "leaves": { "top": "leaves_oak", "side": "leaves_oak", "bottom": "leaves_oak" },
+    "sand": { "top": "sand", "side": "sand", "bottom": "sand" },
+    "glass": { "top": "glass", "side": "glass", "bottom": "glass" },
+    "brick": { "top": "brick", "side": "brick", "bottom": "brick" },
+    "tile": { "top": "quartz_block_top", "side": "quartz_block_side", "bottom": "quartz_block_top" },
+    "wool_white": { "top": "wool_colored_white", "side": "wool_colored_white", "bottom": "wool_colored_white" },
+    "wool_red": { "top": "wool_colored_red", "side": "wool_colored_red", "bottom": "wool_colored_red" },
+    "bookshelf": { "top": "planks_oak", "side": "bookshelf", "bottom": "planks_oak" },
+    "lantern": { "top": "glowstone", "side": "glowstone", "bottom": "glowstone" },
+    "pumpkin": { "top": "pumpkin_top", "side": "pumpkin_face_off", "bottom": "pumpkin_top" },
+    "flower": { "top": "flower_rose", "side": "flower_rose", "bottom": "flower_rose" }
+  }
+}
