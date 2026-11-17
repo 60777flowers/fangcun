@@ -168,6 +168,15 @@ admin token：启动时生成 32 字节，打印到控制台并写入 `%LOCALAPP
 
 PC 检视页默认**只读**，允许查看、暂停/恢复 companion 和 undo；v0 的 `approve_plan` 只能由绑定 Android owner session 的手机客户端发起。PC inspector 不能充当手机 owner approval（除非未来单独增加明确的 owner 认证和审查过的二次确认路径）；不允许 `intent`。
 
+**已实现的本地检视接口（2026-11 桌面演示）**：当前 PC 页通过 `http://127.0.0.1:4173/api/host/*` 反向代理到 Host 的 loopback `/api/core/*`（仅 loopback 绑定、无 token；代理侧额外校验同源/Host）。桌宠配置端点：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/core/pet` | 返回 `{name, personaId, scale, actions:[{id,displayName}], activeAction, homeGrantActive, companionId}`；`actions` 即前端渲染的唯一动作清单 |
+| PATCH / POST | `/api/core/pet` | 严格 body：任意 `{name?, personaId?, scale?, action?}` 子集；拒绝未知字段（`additionalProperties`）；`name` 1–24 字符（trim 后）、`personaId` 1–64、`scale` 0.5–3、`action` 必须是 `actions[].id` 之一（未知 action 返回 `400 unknown_pet_action`） |
+
+桌宠配置持久化在 SQLite `meta` 表的 `petProfile` 键，Host 重启后保留；`PATCH` 分支直接访问 Host 生效，浏览器经代理时统一用 `POST`（代理只转发 POST body）。动作触发广播 `companion_action`；名称/persona/scale 变更以一条 `companion_state` 重新广播告知 replica。
+
 ### 4.4 MCP（本机）
 
 - 默认 stdio：`node packages/mcp-adapter/dist/server.js --host-url http://127.0.0.1:4174 --token-file <path>`。
@@ -182,7 +191,9 @@ PC 检视页默认**只读**，允许查看、暂停/恢复 companion 和 undo�
 
 ```ts
 type Coord = { x: number; y: number; z: number };          // 整数，WorldSpec v1 范围
-type BlockId = "grass" | "dirt" | "stone" | "planks" | "log" | "leaves" | "sand" | "glass";
+// 基础 8 个保持原顺序；装饰 8 个只允许在末尾追加（存档方块序号 index+1 因而稳定）。
+type BlockId = "grass" | "dirt" | "stone" | "planks" | "log" | "leaves" | "sand" | "glass"
+             | "brick" | "tile" | "wool_white" | "wool_red" | "bookshelf" | "lantern" | "pumpkin" | "flower";
 type Operation =
   | { type: "place"; at: Coord; blockId: BlockId }
   | { type: "break"; at: Coord; expectedBlock: BlockId };
@@ -194,7 +205,7 @@ type Actor = "player" | "ai" | "system";
 
 - 数据域 `16×16×16`，`origin=[-8,0,-8]`，合法 `x,z∈[-8,8)`、`y∈[0,16)`。
 - 每格 3 cm；footprint `x,z∈[-7,7)`；地形 `y∈[0,1)`（单层）；建造从 `y≥1` 开始。
-- 方块 ID 为稳定字符串；未知 ID 在**权威协议/存档加载**处 fail closed。
+- 方块 ID 为稳定字符串（当前 16 个：8 基础 + 8 装饰，规范顺序以 `BLOCK_IDS` 为准）；未知 ID 在**权威协议/存档加载**处 fail closed。
 - 单笔事务最多 256 个 op；世界最多 4096 个非空块。
 
 ### 5.2 错误码
@@ -281,6 +292,7 @@ type Actor = "player" | "ai" | "system";
 | `plot_revoked` | `grantId, revokedAtMs, reason?` | 收回 |
 | `companion_state` | `companionId, state, currentPlanId?, bubbleText?, updatedAtMs` | `idle/observing/planning/awaiting_approval/building/cooldown/paused` |
 | `companion_say` | `companionId, text, expiresAtMs` | ≤80 字；不含 TTS |
+| `companion_action` | `companionId, actionId, expiresAtMs` | 桌宠一次性动作；`actionId ∈ {stand, sit, lie, wave, jump, look_around}`，客户端播放/保持到 `expiresAtMs`；由 `PATCH\|POST /api/core/pet` 的 `action` 字段触发（未知 id 被 Host 拒绝）；名称/persona/scale 变更不新增消息，只重新广播 `companion_state` |
 | `undo_result` | `requestId, accepted, code?, rev?` | 撤销结果；成功时另有 `commit` |
 | `error` | `code, message, retryable, detail?` | 协议级错误；可能随后关闭连接 |
 
@@ -375,7 +387,7 @@ CREATE TABLE world (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   rev INTEGER NOT NULL,
-  blocks BLOB NOT NULL,              -- 4096 字节；0=空，1..8=方块序号；palette 由 blockCatalogHash 绑定
+  blocks BLOB NOT NULL,              -- 4096 字节；0=空，1..16=方块序号（BLOCK_IDS 顺序）；palette 由 blockCatalogHash 绑定
   updated_at_ms INTEGER NOT NULL
 );
 

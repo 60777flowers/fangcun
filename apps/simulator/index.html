@@ -95,6 +95,30 @@
             <button class="material-option" type="button" role="radio" aria-checked="false" data-material="leaves" aria-label="Leaves">
               <span class="swatch swatch-leaves" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Leaves</strong><small>LEAVES</small></span><span class="material-key">4</span>
             </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="brick" aria-label="Brick">
+              <span class="swatch swatch-brick" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Brick</strong><small>BRICK</small></span><span class="material-key">5</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="tile" aria-label="Roof tile">
+              <span class="swatch swatch-tile" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Roof tile</strong><small>TILE</small></span><span class="material-key">6</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="wool_white" aria-label="White wool">
+              <span class="swatch swatch-wool-white" aria-hidden="true"><i></i></span><span class="material-copy"><strong>White wool</strong><small>WOOL_WHITE</small></span><span class="material-key">7</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="wool_red" aria-label="Red wool">
+              <span class="swatch swatch-wool-red" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Red wool</strong><small>WOOL_RED</small></span><span class="material-key">8</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="bookshelf" aria-label="Bookshelf">
+              <span class="swatch swatch-bookshelf" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Bookshelf</strong><small>BOOKSHELF</small></span><span class="material-key">9</span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="lantern" aria-label="Lantern">
+              <span class="swatch swatch-lantern" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Lantern</strong><small>LANTERN</small></span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="pumpkin" aria-label="Pumpkin">
+              <span class="swatch swatch-pumpkin" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Pumpkin</strong><small>PUMPKIN</small></span>
+            </button>
+            <button class="material-option" type="button" role="radio" aria-checked="false" data-material="flower" aria-label="Flower">
+              <span class="swatch swatch-flower" aria-hidden="true"><i></i></span><span class="material-copy"><strong>Flower</strong><small>FLOWER</small></span>
+            </button>
           </div>
         </section>
 
@@ -162,6 +186,12 @@
           </div>
         </section>
 
+        <section id="pet-section" class="tool-section pet-section" aria-labelledby="pet-title" hidden>
+          <div class="section-heading"><span class="section-index">06</span><h2 id="pet-title">Desktop pet</h2><span class="heading-rule"></span></div>
+          <p class="section-caption">View and configure the companion. Host mode only.</p>
+          <div id="pet-panel-body" class="pet-panel-body"></div>
+        </section>
+
         <footer class="rail-footer"><span class="footer-mark" aria-hidden="true">F</span><span>FANGCUN <span>·</span> EXPERIMENTAL DESKTOP VIEW</span></footer>
       </aside>
     </section>
@@ -177,5 +207,6 @@
     }
   </script>
   <script type="module" src="/apps/simulator/app.js"></script>
+  <script type="module" src="/apps/simulator/pet-panel.js"></script>
 </body>
 </html>

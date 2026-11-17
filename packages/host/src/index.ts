@@ -3,11 +3,20 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from "node:stream";
 import { BLOCK_IDS, WORLD_SPEC } from "@fangcun/world-schema";
 import { worldStateToObject } from "@fangcun/voxel-core";
-import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type CompanionStateName, type ServerMessage } from "@fangcun/protocol";
+import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type CompanionActionId, type CompanionStateName, type ServerMessage } from "@fangcun/protocol";
 import { WorldAuthority, type CompanionTickDecision } from "@fangcun/worldd";
 import { findHomeCandidates, type HomeCandidate } from "@fangcun/companion-runtime";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
 import { HostStore } from "./persistence.ts";
+import {
+  COMPANION_ACTION_TTL_MS,
+  defaultPetProfile,
+  PET_ACTIONS,
+  validatePetPatch,
+  type PetAction,
+  type PetPatch,
+  type PetProfile,
+} from "./pet.ts";
 import {
   buildLine,
   CHAT_MAX_TEXT_LENGTH,
@@ -94,6 +103,7 @@ export class FangcunHost {
   #tokens = new Map<string, { clientId: string; expiresAtMs: number }>();
   #pairing: PairingCode | null = null;
   #companion: CompanionInstance;
+  #pet: PetProfile;
   #companionState: CompanionStateName = "idle";
   #lastTick: CompanionTickDecision | null = null;
   #grant: HomePlotGrant | null = null;
@@ -135,6 +145,7 @@ export class FangcunHost {
       autonomyEnabled: true,
       createdAt: new Date(this.#now()).toISOString(),
     });
+    this.#pet = defaultPetProfile(this.#companion.personaId, this.#now());
   }
 
   get worldId(): string { return this.#worldId; }
@@ -168,6 +179,16 @@ export class FangcunHost {
     for (const grant of store.loadGrants()) {
       if (!this.#authority.restoreHomeGrant(grant)) throw new TypeError(`failed to restore grant ${grant.grantId}`);
       this.#grant = grant;
+    }
+
+    // Pet profile: durable across restart. A store written before this feature has no
+    // row, so seed the defaults once; a corrupt row fails closed in loadPetProfile().
+    const storedPet = store.loadPetProfile();
+    if (storedPet) {
+      this.#pet = storedPet;
+    } else {
+      this.#pet = defaultPetProfile(this.#companion.personaId, this.#now());
+      store.savePetProfile(this.#pet);
     }
 
     const server = createServer((request, response) => {
@@ -364,6 +385,23 @@ export class FangcunHost {
       return send(200, this.#autonomyStatus());
     }
 
+    // Desktop-pet inspection/configuration. The GET view is also the action catalog
+    // the PC panel renders; the strict PATCH/POST body accepts any subset of
+    // { name, personaId, scale, action } and persists it across restart.
+    if (request.method === "GET" && path === "/api/core/pet") {
+      return send(200, this.#petState());
+    }
+
+    if ((request.method === "PATCH" || request.method === "POST") && path === "/api/core/pet") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const parsed = validatePetPatch(body.value);
+      if (!parsed.ok) return send(400, { error: parsed.error });
+      const outcome = this.#updatePet(parsed.value);
+      if (!outcome.ok) return send(outcome.status, { error: outcome.error });
+      return send(200, this.#petState());
+    }
+
     send(404, { error: "not_found" });
   }
 
@@ -385,6 +423,67 @@ export class FangcunHost {
       candidate: this.#currentCandidate() ?? undefined,
       homeGrantActive: this.#grant !== null,
     };
+  }
+
+  /** The single action list the PC panel renders: display names live here, not in JS. */
+  #petState(): Readonly<{
+    name: string;
+    personaId: string;
+    scale: number;
+    actions: readonly PetAction[];
+    activeAction: CompanionActionId;
+    homeGrantActive: boolean;
+    companionId: string;
+  }> {
+    return Object.freeze({
+      name: this.#pet.name,
+      personaId: this.#pet.personaId,
+      scale: this.#pet.scale,
+      actions: PET_ACTIONS,
+      activeAction: this.#pet.activeAction,
+      homeGrantActive: this.#grant !== null,
+      companionId: this.#companion.companionId,
+    });
+  }
+
+  /**
+   * Applies an already-validated pet patch and persists it before announcing it, so a
+   * client never sees a configuration the store cannot survive a restart with.
+   */
+  #updatePet(patch: PetPatch): { ok: true } | { ok: false; status: number; error: string } {
+    if (!this.#store) return { ok: false, status: 503, error: "host_stopping" };
+    const next: PetProfile = Object.freeze({
+      schemaVersion: 1,
+      name: patch.name ?? this.#pet.name,
+      personaId: patch.personaId ?? this.#pet.personaId,
+      scale: patch.scale ?? this.#pet.scale,
+      activeAction: patch.action ?? this.#pet.activeAction,
+      updatedAtMs: this.#now(),
+    });
+    try {
+      this.#store.savePetProfile(next);
+    } catch {
+      return { ok: false, status: 500, error: "pet_persist_failed" };
+    }
+    const profileChanged = patch.name !== undefined || patch.personaId !== undefined || patch.scale !== undefined;
+    this.#pet = next;
+    // Name/persona/scale have no dedicated wire message: re-announcing the existing
+    // companion state tells replicas the companion record changed. Actions carry the
+    // typed `companion_action` message because the tablet must play them.
+    if (profileChanged) this.#setCompanionState(this.#companionState);
+    if (patch.action !== undefined) this.#broadcastCompanionAction(patch.action);
+    return { ok: true };
+  }
+
+  #broadcastCompanionAction(actionId: CompanionActionId): void {
+    this.#broadcast({
+      protocolVersion: 1,
+      type: "companion_action",
+      worldId: this.#worldId,
+      companionId: this.#companion.companionId,
+      actionId,
+      expiresAtMs: this.#now() + COMPANION_ACTION_TTL_MS,
+    });
   }
 
   #broadcast(message: ServerMessage): void {

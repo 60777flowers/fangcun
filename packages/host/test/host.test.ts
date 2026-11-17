@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { applyTransaction, createSeedWorld, getBlock } from "@fangcun/voxel-core";
+import { COMPANION_ACTION_IDS, validateCompanionActionMessage } from "@fangcun/protocol";
 import { FangcunHost } from "../src/index.ts";
 import { HostStore } from "../src/persistence.ts";
 
@@ -50,11 +51,18 @@ function openSocket(url: string): Promise<WebSocket> {
 }
 
 type CoreAddress = Readonly<{ host: string; port: number }>;
+type CoreMethod = "GET" | "POST" | "PATCH";
 
-async function coreJson<T>(address: CoreAddress, path: string, body?: unknown): Promise<{ status: number; body: T }> {
-  const init: RequestInit = body === undefined
+async function coreJson<T>(
+  address: CoreAddress,
+  path: string,
+  body?: unknown,
+  method?: CoreMethod,
+): Promise<{ status: number; body: T }> {
+  const resolvedMethod = method ?? (body === undefined ? "GET" : "POST");
+  const init: RequestInit = resolvedMethod === "GET"
     ? { method: "GET" }
-    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    : { method: resolvedMethod, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) };
   const response = await fetch(`http://${address.host}:${address.port}/api/core${path}`, init);
   return { status: response.status, body: (await response.json()) as T };
 }
@@ -341,6 +349,153 @@ test("chat broadcasts the companion reply as companion_say", async () => {
       const say = await read();
       assert.equal(say.type, "companion_say");
       assert.equal(say.text, chat.body.reply);
+    } finally {
+      socket.close();
+    }
+  } finally {
+    await host.stop();
+  }
+});
+
+type PetState = Readonly<{
+  name: string;
+  personaId: string;
+  scale: number;
+  actions: Array<{ id: string; displayName: string }>;
+  activeAction: string;
+  homeGrantActive: boolean;
+  companionId: string;
+}>;
+
+test("pet profile round-trips defaults, a partial patch and survives a Host restart", async () => {
+  const db = tempDb();
+  try {
+    const first = new FangcunHost({ worldId: "pet-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const address = await first.start();
+    try {
+      const initial = await coreJson<PetState>(address, "/pet");
+      assert.equal(initial.status, 200);
+      assert.equal(initial.body.companionId, "fish-1");
+      assert.equal(initial.body.personaId, "playful-fish");
+      assert.equal(initial.body.name, "小鱼");
+      assert.equal(initial.body.scale, 1);
+      assert.equal(initial.body.activeAction, "stand");
+      assert.equal(initial.body.homeGrantActive, false);
+      assert.deepEqual(
+        initial.body.actions.map((action) => action.id),
+        [...COMPANION_ACTION_IDS],
+        "the GET action list is exactly the protocol contract, not a second hardcoded list",
+      );
+      for (const action of initial.body.actions) assert.ok(action.displayName.length > 0);
+
+      const patched = await coreJson<PetState>(address, "/pet", { name: " 小蓝 ", scale: 1.75, action: "wave" }, "PATCH");
+      assert.equal(patched.status, 200);
+      assert.equal(patched.body.name, "小蓝", "the name is trimmed before it is stored");
+      assert.equal(patched.body.scale, 1.75);
+      assert.equal(patched.body.activeAction, "wave");
+
+      // POST is an accepted synonym for PATCH so a form-style client can use it too.
+      const postPatch = await coreJson<PetState>(address, "/pet", { personaId: "playful-fish-2" }, "POST");
+      assert.equal(postPatch.status, 200);
+      assert.equal(postPatch.body.personaId, "playful-fish-2");
+      assert.equal(postPatch.body.name, "小蓝", "a partial patch leaves the other fields untouched");
+
+      const reverified = await coreJson<PetState>(address, "/pet");
+      assert.equal(reverified.body.name, "小蓝");
+      assert.equal(reverified.body.scale, 1.75);
+      assert.equal(reverified.body.activeAction, "wave");
+      assert.equal(reverified.body.homeGrantActive, false, "pet configuration never grants a home plot");
+    } finally {
+      await first.stop();
+    }
+
+    const second = new FangcunHost({ worldId: "pet-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const secondAddress = await second.start();
+    try {
+      const restored = await coreJson<PetState>(secondAddress, "/pet");
+      assert.equal(restored.body.name, "小蓝", "the renamed pet survives a Host restart");
+      assert.equal(restored.body.scale, 1.75, "the scale survives a Host restart");
+      assert.equal(restored.body.activeAction, "wave", "the active action survives a Host restart");
+      assert.equal(restored.body.personaId, "playful-fish-2");
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
+test("pet profile rejects unknown actions, oversized names, bad scale and unknown fields", async () => {
+  const host = new FangcunHost({ worldId: "pet-invalid-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    const rejected: Array<{ body: unknown; error: string }> = [
+      { body: { action: "dance" }, error: "unknown_pet_action" },
+      { body: { action: 42 }, error: "unknown_pet_action" },
+      { body: { name: "字".repeat(25) }, error: "invalid_pet_name" },
+      { body: { name: "   " }, error: "invalid_pet_name" },
+      { body: { name: 7 }, error: "invalid_pet_name" },
+      { body: { scale: 0.4 }, error: "invalid_pet_scale" },
+      { body: { scale: 3.1 }, error: "invalid_pet_scale" },
+      { body: { scale: "1" }, error: "invalid_pet_scale" },
+      { body: { name: "ok", extra: true }, error: "unknown_pet_field" },
+      { body: { personaId: "" }, error: "invalid_pet_persona" },
+      { body: [], error: "invalid_pet_request" },
+    ];
+    for (const { body, error } of rejected) {
+      const response = await coreJson<{ error: string }>(address, "/pet", body, "PATCH");
+      assert.equal(response.status, 400, `${JSON.stringify(body)} must be rejected`);
+      assert.equal(response.body.error, error);
+    }
+    const unchanged = await coreJson<PetState>(address, "/pet");
+    assert.equal(unchanged.body.name, "小鱼", "a rejected patch never mutates the profile");
+    assert.equal(unchanged.body.scale, 1);
+    assert.equal(unchanged.body.activeAction, "stand");
+
+    // A subset of zero fields is a valid no-op, not an error.
+    const noop = await coreJson<PetState>(address, "/pet", {}, "PATCH");
+    assert.equal(noop.status, 200);
+    assert.equal(noop.body.name, "小鱼");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("pet configuration broadcasts companion_state and companion_action to WebSocket clients", async () => {
+  const host = new FangcunHost({ worldId: "pet-ws-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    const code = host.issuePairingCode();
+    const pairResponse = await fetch(`http://${address.host}:${address.port}/api/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code.code, clientId: "tablet-1" }),
+    });
+    const pairing = (await pairResponse.json()) as { token: string };
+    const socket = await openSocket(`ws://${address.host}:${address.port}/api/ws`);
+    const read = socketReader(socket);
+    try {
+      socket.send(JSON.stringify({ protocolVersion: 1, type: "hello", worldId: "pet-ws-world", clientId: "tablet-1", credential: pairing.token, lastAppliedRev: 0 }));
+      assert.equal((await read()).type, "welcome");
+      assert.equal((await read()).type, "companion_state");
+
+      const renamed = await coreJson<PetState>(address, "/pet", { name: "小蓝", scale: 2 }, "PATCH");
+      assert.equal(renamed.status, 200);
+      const stateNotice = await read();
+      assert.equal(stateNotice.type, "companion_state", "name/scale changes re-announce the companion state");
+      assert.equal(stateNotice.companionId, "fish-1");
+
+      const triggered = await coreJson<PetState>(address, "/pet", { action: "jump" }, "POST");
+      assert.equal(triggered.status, 200);
+      assert.equal(triggered.body.activeAction, "jump");
+      const trigger = await read();
+      assert.equal(trigger.type, "companion_action");
+      assert.equal(trigger.worldId, "pet-ws-world");
+      assert.equal(trigger.companionId, "fish-1");
+      assert.equal(trigger.actionId, "jump");
+      assert.ok(Number.isSafeInteger(trigger.expiresAtMs) && (trigger.expiresAtMs as number) > Date.now(), "the action carries a future expiry");
+      // The broadcast is the same shape the protocol validator (and the tablet) accepts.
+      assert.equal(validateCompanionActionMessage(trigger).ok, true);
     } finally {
       socket.close();
     }

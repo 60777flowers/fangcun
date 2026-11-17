@@ -15,6 +15,7 @@ const host = "127.0.0.1";
 const allowedPaths = new Set([
   "/apps/simulator/index.html",
   "/apps/simulator/app.js",
+  "/apps/simulator/pet-panel.js",
   "/apps/simulator/styles.css",
   "/packages/protocol/dist/index.js",
   "/packages/voxel-core/dist/index.js",

@@ -53,8 +53,43 @@ export type CompanionSayMessage = Readonly<{
   expiresAtMs: number;
 }>;
 
+/**
+ * Stable pet action ids shared by the Host pet profile and the `companion_action`
+ * wire message. Display names live with the Host action catalog, never on the wire,
+ * so the tablet and the PC render exactly the list `GET /api/core/pet` returns.
+ */
+export const COMPANION_ACTION_IDS = Object.freeze([
+  "stand",
+  "sit",
+  "lie",
+  "wave",
+  "jump",
+  "look_around",
+] as const);
+
+export type CompanionActionId = (typeof COMPANION_ACTION_IDS)[number];
+
+const COMPANION_ACTION_ID_SET: ReadonlySet<string> = new Set(COMPANION_ACTION_IDS);
+
+export function isCompanionActionId(value: unknown): value is CompanionActionId {
+  return typeof value === "string" && COMPANION_ACTION_ID_SET.has(value);
+}
+
+/**
+ * One-off pet action trigger, broadcast after `PATCH/POST /api/core/pet`.
+ * The tablet consumes it to play an animation until `expiresAtMs`.
+ */
+export type CompanionActionMessage = Readonly<{
+  protocolVersion: typeof PROTOCOL_VERSION;
+  type: "companion_action";
+  worldId: string;
+  companionId: string;
+  actionId: CompanionActionId;
+  expiresAtMs: number;
+}>;
+
 export type ClientMessage = ClientIntent | HelloMessage | ResyncMessage | ApprovePlanMessage | PingMessage;
-export type ServerMessage = WelcomeMessage | ServerAck | CommitMessage | PongMessage | ApprovalGrantedMessage | CompanionStateMessage | CompanionSayMessage;
+export type ServerMessage = WelcomeMessage | ServerAck | CommitMessage | PongMessage | ApprovalGrantedMessage | CompanionStateMessage | CompanionSayMessage | CompanionActionMessage;
 
 export type CommitMessage = Readonly<{
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -195,6 +230,28 @@ export function validateCompanionSayMessage(value: unknown): ValidationResult<Co
   };
 }
 
+export function validateCompanionActionMessage(value: unknown): ValidationResult<CompanionActionMessage> {
+  if (!isRecord(value) || value.protocolVersion !== PROTOCOL_VERSION || value.type !== "companion_action") return { ok: false, error: "unsupported_message" };
+  if (!hasExactKeys(value, ["protocolVersion", "type", "worldId", "companionId", "actionId", "expiresAtMs"])) return { ok: false, error: "invalid_message_shape" };
+  const actionId = value.actionId;
+  if (!isNonEmptyString(value.worldId) || !isNonEmptyString(value.companionId)
+    || !isCompanionActionId(actionId)
+    || !Number.isSafeInteger(value.expiresAtMs) || (value.expiresAtMs as number) < 0) {
+    return { ok: false, error: "invalid_companion_action" };
+  }
+  return {
+    ok: true,
+    value: Object.freeze({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "companion_action",
+      worldId: value.worldId,
+      companionId: value.companionId,
+      actionId,
+      expiresAtMs: value.expiresAtMs as number,
+    }),
+  };
+}
+
 export function validateServerMessage(value: unknown): ValidationResult<ServerMessage> {
   if (!isRecord(value)) return { ok: false, error: "invalid_message" };
   if (value.type === "ack") return validateServerAck(value);
@@ -204,6 +261,7 @@ export function validateServerMessage(value: unknown): ValidationResult<ServerMe
   if (value.type === "approval_granted") return validateApprovalGrantedMessage(value);
   if (value.type === "companion_state") return validateCompanionStateMessage(value);
   if (value.type === "companion_say") return validateCompanionSayMessage(value);
+  if (value.type === "companion_action") return validateCompanionActionMessage(value);
   return { ok: false, error: "unsupported_message" };
 }
 

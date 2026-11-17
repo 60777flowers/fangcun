@@ -3,6 +3,7 @@ import { BLOCK_IDS, WORLD_CELL_COUNT, type BlockId } from "@fangcun/world-schema
 import { createSeedWorld, worldStateFromObject, type WorldState } from "@fangcun/voxel-core";
 import type { CommitMessage } from "@fangcun/protocol";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
+import { parseStoredPetProfile, type PetProfile } from "./pet.ts";
 
 /**
  * Durable Host storage. The world snapshot, the commit log and the companion
@@ -188,6 +189,28 @@ export class HostStore {
   loadCompanions(): readonly CompanionInstance[] {
     const rows = this.#db.prepare("SELECT json FROM companion").all() as Array<{ json: string }>;
     return Object.freeze(rows.map((row) => JSON.parse(row.json) as CompanionInstance));
+  }
+
+  /**
+   * The desktop-pet profile is stored in the generic `meta` table so the companion
+   * row schema (shared with the world authority) stays stable across this feature.
+   */
+  savePetProfile(profile: PetProfile): void {
+    this.#db
+      .prepare("INSERT INTO meta(key, value) VALUES ('petProfile', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(JSON.stringify(profile));
+  }
+
+  loadPetProfile(): PetProfile | null {
+    const row = this.#db.prepare("SELECT value FROM meta WHERE key = 'petProfile'").get() as { value?: string } | undefined;
+    if (row?.value === undefined) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.value);
+    } catch {
+      throw new TypeError("corrupt stored pet profile: invalid JSON");
+    }
+    return parseStoredPetProfile(parsed);
   }
 
   close(): void {
