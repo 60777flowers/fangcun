@@ -74,6 +74,8 @@ final class VrmModel {
     private float[] headTopRest;
     /** Posed top-of-head anchor in model space, refreshed by {@link #applyPose}. */
     private final float[] headTopModel = new float[3];
+    /** Minimum posed vertex Y in model space, refreshed by {@link #applyPose} (floor clamp). */
+    private float posedMinY = Float.MAX_VALUE;
 
     private VrmModel() { }
 
@@ -240,6 +242,7 @@ final class VrmModel {
         model.bounds[3] = maxX;
         model.bounds[4] = maxY;
         model.bounds[5] = maxZ;
+        model.posedMinY = minY;
         model.findHeadTopAnchor();
         return model;
     }
@@ -593,6 +596,14 @@ final class VrmModel {
     }
 
     /**
+     * Minimum Y of all skinned vertices in model space for the pose applied last. The renderer
+     * uses it to lift the object so no pose (sit/lie/walk) pushes the mesh through the terrain.
+     */
+    float posedMinY() {
+        return posedMinY;
+    }
+
+    /**
      * Re-skins the mesh for a procedural pose. {@code boneRotations} maps VRM humanoid bone
      * names to an axis-angle rotation in the bone's local space; {@code hipsOffset} is a
      * translation in bind units applied to the hips bone.
@@ -662,6 +673,7 @@ final class VrmModel {
             }
         }
 
+        float minPosedY = Float.MAX_VALUE;
         for (Primitive primitive : primitives) {
             float[] rest = primitive.restPositions;
             int[] vertexJoints = primitive.joints;
@@ -685,9 +697,11 @@ final class VrmModel {
                 out.put(vertex * 3, sx);
                 out.put(vertex * 3 + 1, sy);
                 out.put(vertex * 3 + 2, sz);
+                if (sy < minPosedY) minPosedY = sy;
             }
             out.position(0);
         }
+        posedMinY = minPosedY == Float.MAX_VALUE ? bounds[1] : minPosedY;
     }
 
     private static float[] lookupBone(SkinData skin, java.util.Map<String, float[]> rotations, int node) {

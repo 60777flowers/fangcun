@@ -178,15 +178,21 @@ final class CompanionActionRegistry {
     private static CompanionAction lie() {
         return new CompanionAction("lie", "躺下", true, 10000L, 1, phase -> {
             float breathe = CompanionPoseMath.sine(0.5f, phase);
+            float pitch = debugLiePitch != null ? debugLiePitch : 88f;
+            float drop = debugLieDrop != null ? debugLieDrop : -0.90f;
             return CompanionAction.Pose.builder()
-                .bone("hips", 1f, 0f, 0f, -88f)
+                .bone("hips", 1f, 0f, 0f, pitch)
                 .bone("head", 1f, 0f, 0f, 6f + 1.5f * breathe)
                 .bone("head", 0f, 0f, 1f, 5f)
                 .bone("spine", 1f, 0f, 0f, 1.5f * breathe)
-                .hips(0f, -0.90f + 0.014f * breathe, 0f)
+                .hips(0f, drop + 0.014f * breathe, 0f)
                 .build();
         });
     }
+
+    /** Debug tuning hooks for the lying pose (`--ef liePitch` / `--ef lieDrop`). */
+    static volatile Float debugLiePitch;
+    static volatile Float debugLieDrop;
 
     /**
      * One arm wave. The avatar is a chibi whose head is wider than its arm span, so the arm is

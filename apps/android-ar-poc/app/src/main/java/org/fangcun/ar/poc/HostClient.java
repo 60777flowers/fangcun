@@ -30,7 +30,7 @@ final class HostClient {
 
         void onWorldLoaded(int rev);
 
-        void onCommitApplied(int rev);
+        void onCommitApplied(int rev, int[] placedCells);
 
         /** Called once a pairing succeeded so the caller can persist the credential. */
         void onPaired(String token, String worldId);
@@ -44,6 +44,9 @@ final class HostClient {
 
         /** Companion display name from {@code GET /api/core/pet}; may arrive after connecting. */
         void onCompanionProfile(String displayName);
+
+        /** Pending house proposal (companion_build_proposal frame or houseProposal in state). */
+        void onBuildProposal(HouseProposal proposal);
     }
 
     private final String host;
@@ -129,6 +132,50 @@ final class HostClient {
         } catch (JSONException error) {
             listener.onStatus("Hello failed: " + describe(error));
         }
+        // A proposal may already be pending when this client connects (e.g. app restart).
+        fetchPendingProposal();
+    }
+
+    /**
+     * Decides a pending house proposal ({@code POST /api/core/house/decide}). Blocking; call from
+     * a background executor. Returns true when the Host accepted the decision.
+     */
+    boolean decideHouseProposal(String proposalId, boolean approve) {
+        String requestBody;
+        try {
+            requestBody = new JSONObject()
+                .put("proposalId", proposalId)
+                .put("approve", approve)
+                .toString();
+        } catch (JSONException error) {
+            listener.onStatus("提案处理失败：" + describe(error));
+            return false;
+        }
+        android.util.Log.i("HouseDecide", "POST /api/core/house/decide body=" + requestBody);
+        try {
+            postJson("/api/core/house/decide", new JSONObject(requestBody));
+            android.util.Log.i("HouseDecide", "response=200 approve=" + approve);
+            return true;
+        } catch (IOException | JSONException error) {
+            android.util.Log.i("HouseDecide", "failed approve=" + approve + " error=" + describe(error));
+            listener.onStatus("提案处理失败：" + describe(error));
+            return false;
+        }
+    }
+
+    /** Reads a pending {@code houseProposal} from the Host state on connect. */
+    private void fetchPendingProposal() {
+        try {
+            JSONObject state = getJson("/api/core/state");
+            JSONObject proposalJson = state.optJSONObject("houseProposal");
+            if (proposalJson == null) return;
+            HouseProposal proposal = HouseProposal.fromJson(proposalJson);
+            if (proposal != null && !proposal.expired(System.currentTimeMillis())) {
+                listener.onBuildProposal(proposal);
+            }
+        } catch (IOException | JSONException ignored) {
+            // Older Host without house proposals: nothing to restore.
+        }
     }
 
     void disconnect() {
@@ -200,7 +247,7 @@ final class HostClient {
             }
             if ("commit".equals(type)) {
                 if (world.applyCommit(message)) {
-                    listener.onCommitApplied(world.revision());
+                    listener.onCommitApplied(world.revision(), world.takePlacedCells());
                 } else {
                     listener.onStatus("Commit gap detected; resyncing.");
                     requestResync();
@@ -222,6 +269,11 @@ final class HostClient {
             if ("companion_action".equals(type)) {
                 // Host/PC pet command: `actionId` is one of the action registry's public ids.
                 listener.onCompanionAction(message.optString("actionId", ""), message.optLong("expiresAtMs", 0L));
+                return;
+            }
+            if ("companion_build_proposal".equals(type)) {
+                HouseProposal proposal = HouseProposal.fromJson(message);
+                if (proposal != null) listener.onBuildProposal(proposal);
             }
         } catch (JSONException error) {
             listener.onStatus("Malformed host message.");

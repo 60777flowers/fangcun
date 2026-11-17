@@ -24,7 +24,8 @@ final class VoxelWorld {
     /** Keep in sync with {@code packages/world-schema/src/index.ts} (append only). */
     private static final String[] BLOCK_IDS = {
         "grass", "dirt", "stone", "planks", "log", "leaves", "sand", "glass",
-        "brick", "tile", "wool_white", "wool_red", "bookshelf", "lantern", "pumpkin", "flower"
+        "brick", "tile", "wool_white", "wool_red", "bookshelf", "lantern", "pumpkin", "flower",
+        "stairs"
     };
 
     // Per-face fallback colours. Textured faces use the shade factor below instead, so the
@@ -40,6 +41,8 @@ final class VoxelWorld {
     private final byte[] blocks = new byte[SIZE * SIZE * SIZE];
     private String worldId = "";
     private int rev = -1;
+    /** Cells placed by the most recent applied commit, as x,y,z triples for the pop animation. */
+    private final java.util.ArrayList<int[]> lastPlaced = new java.util.ArrayList<>();
 
     int revision() { return rev; }
     String worldId() { return worldId; }
@@ -51,6 +54,11 @@ final class VoxelWorld {
 
     private static boolean inside(int x, int y, int z) {
         return x >= ORIGIN && x < ORIGIN + SIZE && z >= ORIGIN && z < ORIGIN + SIZE && y >= 0 && y < SIZE;
+    }
+
+    /** True when the column is inside the island footprint (used by companion locomotion). */
+    boolean insideColumn(int x, int z) {
+        return x >= ORIGIN && x < ORIGIN + SIZE && z >= ORIGIN && z < ORIGIN + SIZE;
     }
 
     byte blockAt(int x, int y, int z) {
@@ -96,11 +104,13 @@ final class VoxelWorld {
 
     /** Applies a `commit` frame only if it is the next revision. */
     boolean applyCommit(JSONObject commit) {
+        lastPlaced.clear();
         try {
             if (!commit.getString("worldId").equals(worldId)) return false;
             int nextRev = commit.getInt("rev");
             if (nextRev != rev + 1) return false;
             JSONArray operations = commit.getJSONArray("operations");
+            java.util.ArrayList<int[]> placed = new java.util.ArrayList<>();
             for (int i = 0; i < operations.length(); i += 1) {
                 JSONObject operation = operations.getJSONObject(i);
                 JSONObject at = operation.getJSONObject("at");
@@ -112,15 +122,79 @@ final class VoxelWorld {
                     byte code = codeFor(operation.getString("blockId"));
                     if (code == 0) return false;
                     blocks[index(x, y, z)] = code;
+                    placed.add(new int[] {x, y, z});
                 } else {
                     blocks[index(x, y, z)] = 0;
                 }
             }
             rev = nextRev;
+            lastPlaced.addAll(placed);
             return true;
         } catch (JSONException error) {
             return false;
         }
+    }
+
+    /**
+     * Returns and clears the placed cells of the last applied commit as a flat x,y,z array, so the
+     * renderer can play one small pop per newly committed block.
+     */
+    int[] takePlacedCells() {
+        if (lastPlaced.isEmpty()) return null;
+        int[] flat = new int[lastPlaced.size() * 3];
+        for (int i = 0; i < lastPlaced.size(); i += 1) {
+            int[] cell = lastPlaced.get(i);
+            flat[i * 3] = cell[0];
+            flat[i * 3 + 1] = cell[1];
+            flat[i * 3 + 2] = cell[2];
+        }
+        lastPlaced.clear();
+        return flat;
+    }
+
+    /** Stable key for a cell, used to hide cells that are currently playing a pop animation. */
+    static long cellKey(int x, int y, int z) {
+        return ((long) (x - ORIGIN) & 0x1fL)
+            | (((long) y & 0x1fL) << 5)
+            | (((long) (z - ORIGIN) & 0x1fL) << 10);
+    }
+
+    /**
+     * Debug ({@code --ez demo true}): seeds a small local island so the drop-in animation and the
+     * block pop-in can be verified without a Host snapshot. A later Host snapshot simply replaces
+     * the replica.
+     */
+    void debugSeedIsland() {
+        Arrays.fill(blocks, (byte) 0);
+        for (int z = ORIGIN; z < ORIGIN + SIZE; z += 1) {
+            for (int x = ORIGIN; x < ORIGIN + SIZE; x += 1) {
+                blocks[index(x, 0, z)] = codeFor("grass");
+            }
+        }
+        debugPlace("planks", -5, 1, -6);
+        debugPlace("planks", -5, 2, -6);
+        debugPlace("log", -4, 1, -6);
+        debugPlace("stone", -6, 1, -6);
+        debugPlace("planks", -4, 2, -6);
+        debugPlace("glass", -3, 1, -6);
+        debugPlace("brick", 3, 1, -6);
+        // A 2-block-high wall between the island centre and the far corner, so the demo walk has
+        // to hop over something (verifies "never clip through blocks").
+        debugPlace("stone", -2, 1, -2);
+        debugPlace("stone", -2, 2, -2);
+        debugPlace("torch", 0, 0, 0); // deliberately unknown id: must be ignored, never crash
+        rev = 0;
+        worldId = "debug-demo";
+    }
+
+    /** Debug helper for the local demo commit sequence. Returns false for unknown/occupied cells. */
+    boolean debugPlace(String blockId, int x, int y, int z) {
+        if (!inside(x, y, z)) return false;
+        byte code = codeFor(blockId);
+        if (code == 0) return false;
+        if (blocks[index(x, y, z)] != 0) return false;
+        blocks[index(x, y, z)] = code;
+        return true;
     }
 
     /** First empty build cell in a column, or -1 when the column is full. */
@@ -141,6 +215,13 @@ final class VoxelWorld {
         return -1;
     }
 
+    /** True when the highest block of the column is a {@code stairs} block (the seat). */
+    boolean isStairsColumn(int x, int z) {
+        int top = topSolidY(x, z);
+        if (top < 0) return false;
+        return "stairs".equals(blockIdForCode(blocks[index(x, top, z)]));
+    }
+
     int countBlocks() {
         int total = 0;
         for (byte block : blocks) if (block != 0) total += 1;
@@ -156,6 +237,14 @@ final class VoxelWorld {
      * issue two draw calls without a per-vertex texture flag.</p>
      */
     Mesh buildMesh(VoxelAtlas atlas) {
+        return buildMesh(atlas, null);
+    }
+
+    /**
+     * Builds the island mesh while omitting cells that are currently playing a pop-in animation
+     * (they are drawn separately with a scale animation, so the static mesh must not show them).
+     */
+    Mesh buildMesh(VoxelAtlas atlas, java.util.Set<Long> hiddenCells) {
         final float s = VOXEL_METERS;
         float[] positions = new float[SIZE * SIZE * SIZE * 6 * 6 * 3];
         float[] colors = new float[SIZE * SIZE * SIZE * 6 * 6 * 4];
@@ -171,6 +260,7 @@ final class VoxelWorld {
                     for (int x = ORIGIN; x < ORIGIN + SIZE; x += 1) {
                         byte code = blocks[index(x, y, z)];
                         if (code == 0) continue;
+                        if (hiddenCells != null && hiddenCells.contains(cellKey(x, y, z))) continue;
                         String blockId = BLOCK_IDS[code - 1];
                         VoxelAtlas.TileSet tiles = atlas == null ? null : atlas.tileSet(blockId);
                         boolean textured = tiles != null;
@@ -230,6 +320,72 @@ final class VoxelWorld {
             if (pass == 0) texturedVertexCount = cursor[0] / 3; // vertices emitted so far = textured count
         }
 
+        return new Mesh(
+            Arrays.copyOf(positions, cursor[0]),
+            Arrays.copyOf(colors, cursor[1]),
+            Arrays.copyOf(uvs, cursor[2]),
+            Arrays.copyOf(shades, cursor[3]),
+            cursor[0] / 3,
+            texturedVertexCount);
+    }
+
+    /**
+     * Builds a single unit cube for {@code code} centred on the origin, used by the renderer's
+     * per-cell pop-in animation. All six faces are emitted because a popping block is drawn on top
+     * of the island independently of its neighbours' visibility.
+     */
+    Mesh buildBlockMesh(VoxelAtlas atlas, int code) {
+        if (code < 1 || code > BLOCK_IDS.length) return new Mesh(new float[0], new float[0], new float[0], new float[0], 0, 0);
+        String blockId = BLOCK_IDS[code - 1];
+        VoxelAtlas.TileSet tiles = atlas == null ? null : atlas.tileSet(blockId);
+        boolean textured = tiles != null;
+        float[] palette = BLOCK_FACE_RGB[code - 1];
+        float alpha = BLOCK_ALPHA[code - 1];
+        final float half = 0.5f;
+        float[] positions = new float[6 * 6 * 3];
+        float[] colors = new float[6 * 6 * 4];
+        float[] uvs = new float[6 * 6 * 2];
+        float[] shades = new float[6 * 6];
+        int[] cursor = new int[4];
+        final float[] tileUv = new float[4];
+        for (int face = 0; face < 6; face += 1) {
+            int tile = tiles == null ? -1 : face == 0 ? tiles.top : face == 1 ? tiles.bottom : tiles.side;
+            if (textured) atlas.uvRect(tile, tileUv);
+            float shade = face == 0 ? SHADE_TOP : face == 1 ? SHADE_BOTTOM : (face == 2 || face == 3) ? SHADE_X : SHADE_Z;
+            switch (face) {
+                case 0: // +Y
+                    cursor = emitFace(cursor, positions, colors, uvs, shades, textured, tileUv, 0, palette, shade, alpha,
+                        -half, half, -half, half, -half, half,
+                        -half, half, -half, -half, half, half, half, half, half, half, half, -half);
+                    break;
+                case 1: // -Y
+                    cursor = emitFace(cursor, positions, colors, uvs, shades, textured, tileUv, 1, palette, shade, alpha,
+                        -half, half, -half, half, -half, half,
+                        -half, -half, -half, half, -half, -half, half, -half, half, -half, -half, half);
+                    break;
+                case 2: // +X
+                    cursor = emitFace(cursor, positions, colors, uvs, shades, textured, tileUv, 2, palette, shade, alpha,
+                        -half, half, -half, half, -half, half,
+                        half, -half, -half, half, -half, half, half, half, half, half, half, -half);
+                    break;
+                case 3: // -X
+                    cursor = emitFace(cursor, positions, colors, uvs, shades, textured, tileUv, 3, palette, shade, alpha,
+                        -half, half, -half, half, -half, half,
+                        -half, -half, -half, -half, half, -half, -half, half, half, -half, -half, half);
+                    break;
+                case 4: // +Z
+                    cursor = emitFace(cursor, positions, colors, uvs, shades, textured, tileUv, 4, palette, shade, alpha,
+                        -half, half, -half, half, -half, half,
+                        -half, -half, half, -half, half, half, half, half, half, half, -half, half);
+                    break;
+                default: // -Z
+                    cursor = emitFace(cursor, positions, colors, uvs, shades, textured, tileUv, 5, palette, shade, alpha,
+                        -half, half, -half, half, -half, half,
+                        -half, -half, -half, half, -half, -half, half, half, -half, -half, half, -half);
+                    break;
+            }
+        }
+        int texturedVertexCount = textured ? cursor[0] / 3 : 0;
         return new Mesh(
             Arrays.copyOf(positions, cursor[0]),
             Arrays.copyOf(colors, cursor[1]),
@@ -364,6 +520,7 @@ final class VoxelWorld {
         palette[indexOf("lantern")] = faces(0xf2c96b, 0x9a6a2b, 0xc2913f);
         palette[indexOf("pumpkin")] = faces(0xe08b3c, 0xa45a24, 0xc4722e);
         palette[indexOf("flower")] = faces(0xe3a4b6, 0x5d7f46, 0x7d9c5c);
+        palette[indexOf("stairs")] = faces(0x9d9486, 0x6e675d, 0x857d70);
         return palette;
     }
 

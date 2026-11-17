@@ -3,6 +3,7 @@ package org.fangcun.ar.poc;
 import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
+import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -117,6 +118,28 @@ public final class ArPocActivity extends Activity {
     /** Debug (`--ez notouch true`): ignore taps so a preview inspection session cannot anchor. */
     private boolean ignoreTaps;
 
+    // ---- video-demo feature state ----
+    private Animalese animalese;
+    private boolean voiceMuted;
+    private TextView voiceChip;
+    private HouseProposal pendingProposal;
+    /** Proposal that arrived before the island existed; shown once the anchor is placed. */
+    private HouseProposal proposalBeforeAnchor;
+    /** True once the island anchor exists (set by the renderer); gates all companion life. */
+    private volatile boolean islandPlaced;
+    private String voicePendingBeforeAnchor;
+    private LinearLayout proposalCard;
+    private TextView proposalText;
+    private boolean animationsEnabled = true;
+    private final Runnable clearProposalRunnable = () -> clearProposal(false);
+    /** Debug (`--ez demo true`): local demo island + simulated single-block commits, no Host. */
+    private boolean demoMode;
+    /** Demo build cells spread across the island corners, so the companion has to walk/hop. */
+    private final int[][] demoBuildCells = {
+        {-7, 1, -7}, {-7, 1, 6}, {6, 1, 6}, {6, 1, -7},
+        {-7, 2, -7}, {6, 2, 6}, {-7, 2, 6}, {6, 2, -7},
+    };
+
     private final Runnable hideBanner = () -> {
         if (banner != null) banner.setVisibility(View.GONE);
     };
@@ -133,11 +156,39 @@ public final class ArPocActivity extends Activity {
         root.addView(arView, new FrameLayout.LayoutParams(-1, -1));
 
         previewMode = getIntent().getBooleanExtra("preview", false);
+        animationsEnabled = !getIntent().getBooleanExtra("noanim", false);
+        arView.setAnimationsEnabled(animationsEnabled);
+        arView.setSlowAnimations(getIntent().getBooleanExtra("slowanim", false));
+        arView.setDemoAnchor(getIntent().getBooleanExtra("demoAnchor", false));
+        arView.setDemoLowAngle(getIntent().getBooleanExtra("demoLow", false));
+        animalese = new Animalese();
+        if (getIntent().hasExtra("voicePitch")) {
+            // Debug tuning hook: e.g. `--ef voicePitch 1.35` changes the animalese base pitch.
+            animalese.setPitchScale(getIntent().getFloatExtra("voicePitch", 1f));
+        }
+        voiceMuted = prefs.getBoolean("voiceMuted", false) || getIntent().getBooleanExtra("mute", false);
+        animalese.setMuted(voiceMuted);
+        demoMode = getIntent().getBooleanExtra("demo", false)
+            || getIntent().getBooleanExtra("demoBuild", false);
+        if (demoMode) {
+            // Debug: seed a local island and later simulate one-block commits so the drop-in and
+            // pop-in animations can be verified without a Host snapshot.
+            world.debugSeedIsland();
+            arView.markWorldDirty();
+            uiHandler.postDelayed(this::runDemoBuild, 10000L);
+        }
+
         buildStatusArea(root);
         buildBanner(root);
         buildSettingsPanel(root);
+        // Explicit manual orientation (fallback for devices whose auto-rotation is unreliable).
+        // The activity declares the full configChanges set, so forcing an orientation must not
+        // recreate it and must keep the ARCore session alive.
+        orientationMode = prefs.getInt("orientationMode", ORIENT_AUTO);
+        applyOrientation(false);
         buildChatPanel(root);
         buildFloatingButtons(root);
+        buildProposalCard(root);
         buildCoachOverlay(root);
         setContentView(root);
 
@@ -172,10 +223,11 @@ public final class ArPocActivity extends Activity {
                 setHostStatus("World loaded · rev " + rev + " · " + worldBlocks + " blocks");
             }
 
-            @Override public void onCommitApplied(int rev) {
+            @Override public void onCommitApplied(int rev, int[] placedCells) {
                 worldRev = rev;
                 worldBlocks = world.countBlocks();
                 arView.markWorldDirty();
+                arView.onBlocksCommitted(placedCells);
                 setHostStatus("Synced · rev " + rev + " · " + worldBlocks + " blocks");
             }
 
@@ -198,6 +250,7 @@ public final class ArPocActivity extends Activity {
             @Override public void onCompanionAction(String actionId, long expiresAtMs) {
                 runOnUiThread(() -> {
                     if (actionId == null || actionId.isEmpty()) return;
+                    if (!islandPlaced) return; // no companion life before the island exists
                     if (CompanionActionRegistry.get().find(actionId) == null) return;
                     requestedActionId = actionId;
                     arView.playTimedAction(actionId, expiresAtMs);
@@ -213,6 +266,10 @@ public final class ArPocActivity extends Activity {
                     }
                 });
             }
+
+            @Override public void onBuildProposal(HouseProposal proposal) {
+                runOnUiThread(() -> handleBuildProposal(proposal));
+            }
         });
 
         String preset = getIntent().getStringExtra("code");
@@ -222,6 +279,24 @@ public final class ArPocActivity extends Activity {
         String pose = getIntent().getStringExtra("pose");
         if (pose != null && !pose.isEmpty()) arView.setForcedPose(pose);
         if (getIntent().hasExtra("posePhase")) arView.setForcedPhase(getIntent().getFloatExtra("posePhase", -1f));
+        if (getIntent().hasExtra("liePitch")) {
+            CompanionActionRegistry.debugLiePitch = getIntent().getFloatExtra("liePitch", -88f);
+        }
+        if (getIntent().hasExtra("lieDrop")) {
+            CompanionActionRegistry.debugLieDrop = getIntent().getFloatExtra("lieDrop", -0.90f);
+        }
+        String debugProposal = getIntent().getStringExtra("proposal");
+        if (debugProposal != null && !debugProposal.trim().isEmpty()) {
+            // Debug (`--es proposal "x,y,z"`): synthesise a CompanionBuildProposal-shaped object
+            // (3x3 footprint from that origin, 24 blocks) and dispatch it through exactly the same
+            // handler as an incoming Host frame, so the highlight/card/decide path can be tested
+            // without the Host. `--ef proposalTtl <seconds>` overrides the 120 s TTL.
+            HouseProposal fake = parseDebugProposal(debugProposal.trim());
+            if (fake != null) handleBuildProposal(fake);
+        } else if (getIntent().getBooleanExtra("demoProposal", false)) {
+            HouseProposal fake = buildDebugProposal(-6, 1, -6);
+            if (fake != null) handleBuildProposal(fake);
+        }
         String nameExtra = getIntent().getStringExtra("name");
         if (nameExtra != null && !nameExtra.trim().isEmpty()) {
             intentCompanionName = nameExtra.trim();
@@ -229,10 +304,24 @@ public final class ArPocActivity extends Activity {
         } else {
             arView.setCompanionName(companionName);
         }
+        String sayExtra = getIntent().getStringExtra("say");
+        if (sayExtra != null && !sayExtra.trim().isEmpty()) {
+            // Debug (`--es say "..."`): plays one companion line without a Host broadcast, useful
+            // for bubble/animalese/mute verification.
+            final String line = sayExtra.trim();
+            uiHandler.postDelayed(() -> showCompanionSpeech(line), 2600L);
+        }
 
         String savedToken = prefs.getString("token", null);
         String savedWorld = prefs.getString("worldId", null);
-        if (preset != null && !preset.isEmpty()) {
+        boolean offlineDebug = getIntent().getBooleanExtra("offline", false);
+        if (offlineDebug) {
+            // Debug (`--ez offline true`): keep the locally seeded demo world, never contact the
+            // Host. Used for deterministic animation/pose screenshots.
+            paired = false;
+            updatePairSection();
+            setHostStatus("（调试）离线模式：使用本地演示世界");
+        } else if (preset != null && !preset.isEmpty()) {
             codeField.setText(preset);
             paired = true;
             updatePairSection();
@@ -557,6 +646,43 @@ public final class ArPocActivity extends Activity {
         reanchorParams.topMargin = dp(12);
         settingsPanel.addView(reanchor, reanchorParams);
 
+        // Animalese voice toggle (default ON; persisted in SharedPreferences).
+        LinearLayout voiceRow = new LinearLayout(this);
+        voiceRow.setOrientation(LinearLayout.HORIZONTAL);
+        voiceRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams voiceRowParams = new LinearLayout.LayoutParams(-1, -2);
+        voiceRowParams.topMargin = dp(10);
+        settingsPanel.addView(voiceRow, voiceRowParams);
+        TextView voiceLabel = new TextView(this);
+        voiceLabel.setText("兽语配音");
+        voiceLabel.setTextColor(COLOR_MUTED);
+        voiceLabel.setTextSize(11f);
+        voiceRow.addView(voiceLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+        voiceChip = pill("开", 0xFF3E6B52, 0xFFEAF7EE);
+        voiceChip.setOnClickListener(view -> setVoiceMuted(!voiceMuted));
+        voiceRow.addView(voiceChip);
+        updateVoiceChip();
+
+        // Screen orientation fallback: follow system / force landscape / force portrait.
+        LinearLayout orientationRow = new LinearLayout(this);
+        orientationRow.setOrientation(LinearLayout.HORIZONTAL);
+        orientationRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams orientationRowParams = new LinearLayout.LayoutParams(-1, -2);
+        orientationRowParams.topMargin = dp(10);
+        settingsPanel.addView(orientationRow, orientationRowParams);
+        TextView orientationLabel = new TextView(this);
+        orientationLabel.setText("屏幕方向");
+        orientationLabel.setTextColor(COLOR_MUTED);
+        orientationLabel.setTextSize(11f);
+        orientationRow.addView(orientationLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+        orientationChip = pill("跟随系统", 0x22FFFFFF, COLOR_TEXT);
+        orientationChip.setOnClickListener(view -> {
+            orientationMode = (orientationMode + 1) % 3;
+            applyOrientation(true);
+        });
+        orientationRow.addView(orientationChip);
+        updateOrientationChip();
+
         TextView actionsLabel = new TextView(this);
         actionsLabel.setText("动作");
         actionsLabel.setTextColor(COLOR_MUTED);
@@ -634,6 +760,221 @@ public final class ArPocActivity extends Activity {
     // ------------------------------------------------------------------------------------
     // UI state
     // ------------------------------------------------------------------------------------
+
+    /**
+     * Compact "may I build here?" card for a pending house proposal. Non-clickable except for its
+     * two buttons, so it does not swallow AR taps.
+     */
+    private void buildProposalCard(FrameLayout root) {
+        proposalCard = new LinearLayout(this);
+        proposalCard.setOrientation(LinearLayout.VERTICAL);
+        proposalCard.setPadding(dp(15), dp(12), dp(15), dp(13));
+        proposalCard.setBackground(rounded(0xF02E2513, 16, 0xCCFFB74A, 1));
+        proposalCard.setVisibility(View.GONE);
+
+        proposalText = new TextView(this);
+        proposalText.setTextColor(0xFFFFF3D6);
+        proposalText.setTextSize(12.5f);
+        proposalText.setLineSpacing(dp(1), 1f);
+        proposalCard.addView(proposalText);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams buttonsParams = new LinearLayout.LayoutParams(-1, -2);
+        buttonsParams.topMargin = dp(10);
+        proposalCard.addView(buttons, buttonsParams);
+        TextView approve = pill("好呀", 0xFF3E6B52, 0xFFEAF7EE);
+        approve.setOnClickListener(view -> decideProposal(true));
+        buttons.addView(approve, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView reject = pill("先不要", 0x33FFFFFF, 0xFFDCE8E1);
+        reject.setOnClickListener(view -> decideProposal(false));
+        LinearLayout.LayoutParams rejectParams = new LinearLayout.LayoutParams(0, -2, 1f);
+        rejectParams.leftMargin = dp(8);
+        buttons.addView(reject, rejectParams);
+
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(300), -2);
+        params.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        params.bottomMargin = dp(120);
+        root.addView(proposalCard, params);
+    }
+
+    /** Shows the highlight + prompt card for a Host proposal (or the debug fake one). */
+    private void showProposal(HouseProposal proposal) {
+        if (proposal == null) return;
+        pendingProposal = proposal;
+        android.util.Log.i("HouseProposal", "shown id=" + proposal.proposalId
+            + " blocks=" + proposal.blockCount + " debug=" + proposal.debug
+            + " ttlMs=" + (proposal.expiresAtMs - System.currentTimeMillis()));
+        if (proposalCard == null) return;
+        proposalText.setText("小鱼想在这里盖一间小房子（" + proposal.blockCount + " 块），可以吗？");
+        proposalCard.setVisibility(View.VISIBLE);
+        arView.setProposal(proposal);
+        uiHandler.removeCallbacks(clearProposalRunnable);
+        long delay = proposal.expiresAtMs > 0L
+            ? Math.max(1200L, proposal.expiresAtMs - System.currentTimeMillis() - 300L)
+            : 120000L;
+        uiHandler.postDelayed(clearProposalRunnable, delay);
+    }
+
+    /** Same entry point as an incoming {@code companion_build_proposal} Host frame. */
+    private void handleBuildProposal(HouseProposal proposal) {
+        if (proposal == null) return;
+        if (proposal.expired(System.currentTimeMillis())) {
+            onProposalExpired();
+            return;
+        }
+        if (!islandPlaced) {
+            // No island yet: hold the proposal quietly, do not show highlight/card.
+            proposalBeforeAnchor = proposal;
+            return;
+        }
+        showProposal(proposal);
+    }
+
+    /** Parses `--es proposal` either as an origin "x,y,z" or the legacy full-bounds form. */
+    private HouseProposal parseDebugProposal(String raw) {
+        try {
+            String[] parts = raw.split(",");
+            if (parts.length >= 7) {
+                return new HouseProposal("debug-proposal",
+                    Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()), Integer.parseInt(parts[2].trim()),
+                    Integer.parseInt(parts[3].trim()), Integer.parseInt(parts[4].trim()), Integer.parseInt(parts[5].trim()),
+                    Integer.parseInt(parts[6].trim()), System.currentTimeMillis() + 180000L, true);
+            }
+            if (parts.length >= 3) {
+                return buildDebugProposal(Integer.parseInt(parts[0].trim()),
+                    Integer.parseInt(parts[1].trim()), Integer.parseInt(parts[2].trim()));
+            }
+        } catch (RuntimeException ignored) {
+            // Malformed debug extra: ignore.
+        }
+        return null;
+    }
+
+    /** CompanionBuildProposal-shaped debug object: 3x3 footprint, 24 blocks, now + TTL. */
+    private HouseProposal buildDebugProposal(int originX, int originY, int originZ) {
+        float ttlSeconds = getIntent().getFloatExtra("proposalTtl", 120f);
+        long expiresAtMs = System.currentTimeMillis() + (long) (Math.max(2f, ttlSeconds) * 1000f);
+        return new HouseProposal("debug-proposal", originX, originY, originZ,
+            originX + 3, originY + 3, originZ + 3, 24, expiresAtMs, true);
+    }
+
+    /** Clears the highlight/card. {@code decided} is unused today but keeps the call sites clear. */
+    private void clearProposal(boolean decided) {
+        if (pendingProposal != null) {
+            android.util.Log.i("HouseProposal", "cleared id=" + pendingProposal.proposalId
+                + " decided=" + decided);
+        }
+        pendingProposal = null;
+        uiHandler.removeCallbacks(clearProposalRunnable);
+        if (proposalCard != null) proposalCard.setVisibility(View.GONE);
+        if (arView != null) arView.clearProposal();
+    }
+
+    /** Posts the decision to the Host ({@code approve=true|false}) and clears the highlight. */
+    private void decideProposal(boolean approve) {
+        HouseProposal proposal = pendingProposal;
+        if (proposal == null) return;
+        clearProposal(true);
+        android.util.Log.i("HouseDecide", "decision approve=" + approve
+            + " proposalId=" + proposal.proposalId + " debug=" + proposal.debug);
+        hostExecutor.execute(() -> {
+            boolean ok = hostClient.decideHouseProposal(proposal.proposalId, approve);
+            runOnUiThread(() -> {
+                if (ok) {
+                    showTransient(approve ? "已同意：小鱼开始盖房子啦" : "已回复：这次先不盖", false);
+                } else {
+                    showTransient("提案处理失败，请稍后再试", true);
+                }
+            });
+        });
+    }
+
+    /** Called from the GL thread when the user taps inside the highlighted footprint. */
+    void onProposalAreaTapped() {
+        runOnUiThread(() -> decideProposal(true));
+    }
+
+    /** Called from the GL thread when a proposal expired without a decision. */
+    void onProposalExpired() {
+        runOnUiThread(() -> {
+            if (pendingProposal != null) {
+                android.util.Log.i("HouseProposal", "expired id=" + pendingProposal.proposalId);
+                clearProposal(false);
+                showTransient("盖房子的提案已过期", false);
+            }
+        });
+    }
+
+    /** Debug (`--ez demo true`): places local demo blocks one at a time with 700 ms gaps. */
+    private void runDemoBuild() {
+        arView.setCompanionState("building");
+        for (int index = 0; index < demoBuildCells.length; index += 1) {
+            final int cell = index;
+            uiHandler.postDelayed(() -> {
+                int[] target = demoBuildCells[cell];
+                if (world.debugPlace("planks", target[0], target[1], target[2])) {
+                    arView.markWorldDirty();
+                    arView.onBlocksCommitted(new int[]{target[0], target[1], target[2]});
+                    setHostStatus("（调试）第 " + (cell + 1) + " 块方块落下");
+                }
+            }, index * 700L);
+        }
+        // Finish the debug build like the Host does: place a stairs seat, then sit + speak.
+        uiHandler.postDelayed(() -> {
+            arView.setCompanionState("idle");
+            if (world.debugPlace("stairs", 0, 1, 0)) {
+                arView.markWorldDirty();
+                arView.onBlocksCommitted(new int[]{0, 1, 0});
+            }
+            arView.setAction("sit");
+            arView.setCompanionSay("房子盖好啦，我先坐一会儿~");
+            setHostStatus("（调试）坐在楼梯座上并显示表情");
+        }, demoBuildCells.length * 700L + 900L);
+    }
+
+    private void setVoiceMuted(boolean muted) {
+        voiceMuted = muted;
+        prefs.edit().putBoolean("voiceMuted", muted).apply();
+        animalese.setMuted(muted);
+        updateVoiceChip();
+    }
+
+    private void updateVoiceChip() {
+        if (voiceChip == null) return;
+        voiceChip.setText(voiceMuted ? "关" : "开");
+        voiceChip.setBackground(rounded(voiceMuted ? 0x22FFFFFF : 0xFF3E6B52, 11));
+        voiceChip.setTextColor(voiceMuted ? COLOR_MUTED : 0xFFEAF7EE);
+    }
+
+    // ---- manual screen orientation (fallback for unreliable auto-rotation) --------------------
+    private static final int ORIENT_AUTO = 0;
+    private static final int ORIENT_LANDSCAPE = 1;
+    private static final int ORIENT_PORTRAIT = 2;
+    private int orientationMode = ORIENT_AUTO;
+    private TextView orientationChip;
+
+    /** Applies the saved orientation choice; persist=true also stores it. */
+    private void applyOrientation(boolean persist) {
+        if (persist) prefs.edit().putInt("orientationMode", orientationMode).apply();
+        int requested = orientationMode == ORIENT_LANDSCAPE
+            ? ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            : orientationMode == ORIENT_PORTRAIT
+                ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        setRequestedOrientation(requested);
+        updateOrientationChip();
+    }
+
+    private void updateOrientationChip() {
+        if (orientationChip == null) return;
+        String label = orientationMode == ORIENT_LANDSCAPE ? "强制横屏"
+            : orientationMode == ORIENT_PORTRAIT ? "强制竖屏" : "跟随系统";
+        orientationChip.setText(label);
+        boolean forced = orientationMode != ORIENT_AUTO;
+        orientationChip.setBackground(rounded(forced ? 0xFF3E6B52 : 0x22FFFFFF, 11));
+        orientationChip.setTextColor(forced ? 0xFFEAF7EE : COLOR_TEXT);
+    }
 
     private void setSettingsOpen(boolean open) {
         settingsOpen = open;
@@ -715,13 +1056,37 @@ public final class ArPocActivity extends Activity {
         }
     }
 
-    /** Companion dialogue is the 3D bubble; this only records it for the history panel. */
+    /** Companion dialogue is the 3D bubble; this records it and plays the animalese voice. */
     private void showCompanionSpeech(String text) {
         if (text == null || text.isEmpty()) return;
         runOnUiThread(() -> {
             appendChatLine(text);
+            if (!islandPlaced) {
+                // No island yet: keep the text in the chat panel only and drop the voice; do not
+                // queue it, the drop-in animation must be the first interaction the user sees.
+                return;
+            }
             arView.setCompanionSay(text);
+            if (!voiceMuted) animalese.speak(text);
         });
+    }
+
+    /** Renderer callback (GL thread): the island anchor was placed or lost. */
+    void setIslandPlaced(boolean placed) {
+        islandPlaced = placed;
+        if (placed) {
+            runOnUiThread(() -> {
+                HouseProposal pending = proposalBeforeAnchor;
+                if (pending != null) {
+                    proposalBeforeAnchor = null;
+                    showProposal(pending);
+                }
+                if (!voiceMuted && voicePendingBeforeAnchor != null) {
+                    // Voice was suppressed before the island existed; drop it rather than replay.
+                    voicePendingBeforeAnchor = null;
+                }
+            });
+        }
     }
 
     private void showTransient(String text, boolean error) {
@@ -921,6 +1286,7 @@ public final class ArPocActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (animalese != null) animalese.setPaused(false);
         if (ensureCameraPermission()) return;
         try {
             if (session == null) {
@@ -986,6 +1352,8 @@ public final class ArPocActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        // Never play animalese while the app is paused.
+        if (animalese != null) animalese.setPaused(true);
         if (session != null) session.pause();
         arView.onPause();
     }
@@ -995,6 +1363,7 @@ public final class ArPocActivity extends Activity {
         hostClient.disconnect();
         hostExecutor.shutdownNow();
         uiHandler.removeCallbacksAndMessages(null);
+        if (animalese != null) animalese.release();
         if (session != null) session.close();
         super.onDestroy();
     }

@@ -13,9 +13,9 @@
         <meta-data android:name="com.google.ar.core" android:value="optional" />
         <activity
             android:name=".ArPocActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
             android:exported="true"
-            android:screenOrientation="portrait">
+            android:screenOrientation="fullUser">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

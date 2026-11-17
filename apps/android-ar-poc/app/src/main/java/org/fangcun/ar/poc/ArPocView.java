@@ -35,6 +35,26 @@ final class ArPocView extends GLSurfaceView {
     /** Call on the GL thread after the replica changed. */
     void markWorldDirty() { queueEvent(() -> renderer.markWorldDirty()); }
 
+    /** Forwards the placed cells of a commit so the renderer can pop them in one at a time. */
+    void onBlocksCommitted(int[] placedCells) { queueEvent(() -> renderer.onBlocksCommitted(placedCells)); }
+
+    /** Shows/hides the translucent highlight over the pending house proposal footprint. */
+    void setProposal(HouseProposal proposal) { queueEvent(() -> renderer.setProposal(proposal)); }
+
+    void clearProposal() { queueEvent(() -> renderer.setProposal(null)); }
+
+    /** Debug (`--ez noanim true`): disables island drop/pop/pulse/emote animations. */
+    void setAnimationsEnabled(boolean enabled) { queueEvent(() -> renderer.setAnimationsEnabled(enabled)); }
+
+    /** Debug (`--ez slowanim true`): plays the island drop at 1/3 speed for frame capture. */
+    void setSlowAnimations(boolean slow) { queueEvent(() -> renderer.setSlowAnimations(slow)); }
+
+    /** Debug (`--ez demoAnchor true`): camera-relative virtual island pose for animation capture. */
+    void setDemoAnchor(boolean enabled) { queueEvent(() -> renderer.setDemoAnchor(enabled)); }
+
+    /** Debug (`--ez demoLow true`): eye-level virtual island pose for low-angle screenshots. */
+    void setDemoLowAngle(boolean enabled) { queueEvent(() -> renderer.setDemoLowAngle(enabled)); }
+
     /** Updates the placeholder companion's visible behaviour. */
     void setCompanionState(String state) { queueEvent(() -> renderer.setCompanionState(state)); }
 

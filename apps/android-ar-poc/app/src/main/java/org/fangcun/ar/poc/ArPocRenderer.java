@@ -16,6 +16,10 @@ import com.google.ar.core.exceptions.CameraNotAvailableException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.microedition.khronos.egl.EGLConfig;
@@ -52,10 +56,13 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private int positionHandle;
     private int colorHandle;
     private int mvpHandle;
+    private int colorAlphaHandle;
     private int surfaceWidth;
     private int surfaceHeight;
     private long lastStatusMs;
     private long lastArStateMs;
+    private long lastRotationLogMs;
+    private long lastPoseFloorLogMs;
     private long tapDiagnosticUntilMs;
     private String tapDiagnostic = "";
     private Session textureSession;
@@ -77,10 +84,8 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private volatile int hintVoxelX = Integer.MIN_VALUE;
     private volatile int hintVoxelZ = Integer.MIN_VALUE;
 
-    private static final float COMPANION_X = 0.10f;
     /** Feet rest on the terrain surface: BUILD_MIN_Y voxels above the anchor plane. */
     private static final float COMPANION_Y = VoxelWorld.BUILD_MIN_Y * VoxelWorld.VOXEL_METERS;
-    private static final float COMPANION_Z = 0.06f;
     private static final float PREVIEW_DISTANCE = 1.25f;
     /** Two voxels tall, so the character reads at the same scale as the built blocks. */
     private static final float COMPANION_HEIGHT_METERS = 0.06f;
@@ -156,6 +161,81 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private boolean glReady;
     private String startupError;
 
+    // ---- island drop-in, per-block pop-in and proposal highlight animations ------------------
+    private boolean animationsEnabled = true;
+    private boolean slowAnimations;
+    private long dropStartMs = -1;
+    private final float[] dropMatrix = new float[16];
+    private final float[] dropResult = new float[16];
+    private static final long DROP_DURATION_MS = 680L;
+    private static final float DROP_START_HEIGHT_METERS = 0.35f;
+    private static final long POP_DURATION_MS = 180L;
+    private final ArrayList<BlockPop> blockPops = new ArrayList<>();
+    private final HashSet<Long> hiddenCells = new HashSet<>();
+    private final HashMap<Integer, BlockTemplate> blockTemplates = new HashMap<>();
+    private volatile HouseProposal proposal;
+    private HouseProposal renderedProposal;
+    private long proposalStartMs;
+    private int proposalFillVertexCount;
+    private int proposalLineVertexCount;
+    private FloatBuffer proposalFillPositions;
+    private FloatBuffer proposalFillColors;
+    private FloatBuffer proposalLinePositions;
+    private FloatBuffer proposalLineColors;
+    private final float[] proposalPopLocal = new float[16];
+    private final float[] proposalPopMvp = new float[16];
+    private long lastDropLogMs;
+
+    private static final class BlockPop {
+        final int x;
+        final int y;
+        final int z;
+        final long startMs;
+        boolean logged;
+
+        BlockPop(int x, int y, int z, long startMs) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.startMs = startMs;
+        }
+    }
+
+    private static final class BlockTemplate {
+        final FloatBuffer positions;
+        final FloatBuffer colors;
+        final FloatBuffer uvs;
+        final FloatBuffer shades;
+        final int vertexCount;
+        final int texturedVertexCount;
+
+        BlockTemplate(FloatBuffer positions, FloatBuffer colors, FloatBuffer uvs, FloatBuffer shades,
+                      int vertexCount, int texturedVertexCount) {
+            this.positions = positions;
+            this.colors = colors;
+            this.uvs = uvs;
+            this.shades = shades;
+            this.vertexCount = vertexCount;
+            this.texturedVertexCount = texturedVertexCount;
+        }
+    }
+
+    // ---- companion locomotion (island-local position / facing / steps) ----------------------
+    private final CompanionLocomotion locomotion = new CompanionLocomotion();
+    private final float[] inverseIslandMatrix = new float[16];
+    private float lastBuildX;
+    private float lastBuildZ;
+    private long lastBuildMs = -1L;
+    private String lastSeatAction = "";
+
+    // ---- emote bubble while the companion sits / sleeps --------------------------------------
+    private EmoteBubble emoteBubble;
+    private long nextEmoteMs;
+    private static final String SLEEP_EMOTE = "💤";
+    private static final String[] SIT_EMOTES = {"♪", "❤️", "✨", "💤"};
+    /** Fraction of screen height the emote glyph should cover; matches its bitmap text size. */
+    private static final float EMOTE_HEIGHT_SCREEN_FRACTION = 0.016f;
+
     ArPocRenderer(ArPocActivity activity, AtomicReference<float[]> pendingTap, VoxelWorld world) {
         this.activity = activity;
         this.pendingTap = pendingTap;
@@ -171,6 +251,11 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     /** Called when the replica changed (initial snapshot, commit or resync). */
     void markWorldDirty() { meshDirty = true; }
+
+    /** True once the island anchor exists (or the debug virtual anchor is active). */
+    private volatile boolean islandPlaced;
+
+    boolean isIslandPlaced() { return islandPlaced; }
 
     /** Drives the build behaviour of the companion. */
     void setCompanionState(String state) { companionState = state; }
@@ -237,6 +322,88 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         if (bubble != null) bubble.show(text, System.currentTimeMillis());
     }
 
+    /** Registers the cells of a commit so each newly placed block pops in on its own. */
+    void onBlocksCommitted(int[] placedCells) {
+        if (placedCells == null || placedCells.length < 3) {
+            meshDirty = true;
+            return;
+        }
+        if (!animationsEnabled) {
+            meshDirty = true;
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (int index = 0; index + 2 < placedCells.length; index += 3) {
+            int x = placedCells[index];
+            int y = placedCells[index + 1];
+            int z = placedCells[index + 2];
+            float cellX = (x + 0.5f) * VoxelWorld.VOXEL_METERS;
+            float cellZ = (z + 0.5f) * VoxelWorld.VOXEL_METERS;
+            lastBuildX = cellX;
+            lastBuildZ = cellZ;
+            lastBuildMs = now;
+            // If the new block is out of reach, hide it and delay the visual pop until the
+            // companion has walked closer (the companion must not place blocks from afar).
+            long travelDelay = locomotion.extraTravelDelayMs(cellX, cellZ);
+            blockPops.add(new BlockPop(x, y, z, now + travelDelay));
+            hiddenCells.add(VoxelWorld.cellKey(x, y, z));
+            android.util.Log.i("BlockPop", "cell=" + x + "," + y + "," + z + " travelDelayMs=" + travelDelay
+                + " reach=" + locomotion.withinReach(cellX, cellZ));
+        }
+        meshDirty = true;
+    }
+
+    /** Shows the pending house proposal footprint highlight; {@code null} hides it. */
+    void setProposal(HouseProposal newProposal) {
+        if (newProposal == null) {
+            proposal = null;
+            renderedProposal = null;
+            proposalFillVertexCount = 0;
+            proposalLineVertexCount = 0;
+            return;
+        }
+        proposal = newProposal;
+        renderedProposal = null; // rebuild in the next frame
+        proposalStartMs = System.currentTimeMillis();
+    }
+
+    /** Debug (`--ez noanim true`): disables drop/pop/pulse/emote animations. */
+    void setAnimationsEnabled(boolean enabled) {
+        animationsEnabled = enabled;
+        if (!enabled) {
+            dropStartMs = -1;
+            blockPops.clear();
+            if (!hiddenCells.isEmpty()) {
+                hiddenCells.clear();
+                meshDirty = true;
+            }
+        }
+    }
+
+    /** Debug (`--ez slowanim true`): slows the drop/pop timing for frame capture. */
+    void setSlowAnimations(boolean slow) { slowAnimations = slow; }
+
+    /**
+     * Debug (`--ez demoAnchor true`): draw the island at a fixed camera-relative pose instead of an
+     * ARCore anchor, so the drop-in/pop-in animations can be captured with good framing even when
+     * no usable plane is in front of the camera.
+     */
+    void setDemoAnchor(boolean enabled) { demoAnchor = enabled; }
+
+    /** Debug (`--ez demoLow true`): lower the virtual anchor to eye level for low-angle shots. */
+    void setDemoLowAngle(boolean enabled) { demoLowAngle = enabled; }
+
+    private volatile boolean demoAnchor;
+    private volatile boolean demoLowAngle;
+    private boolean virtualDropStarted;
+
+    /** Working distance the companion walks to before a block is placed (its "arm's length"). */
+    private static final float BUILD_WORK_DISTANCE = 0.14f;
+
+    private long animationDuration(long baseMs) {
+        return slowAnimations ? baseMs * 3L : baseMs;
+    }
+
     private volatile boolean flipV;
     private volatile boolean previewMode;
 
@@ -272,6 +439,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             positionHandle = GLES20.glGetAttribLocation(program, "a_Position");
             colorHandle = GLES20.glGetAttribLocation(program, "a_Color");
             mvpHandle = GLES20.glGetUniformLocation(program, "u_Mvp");
+            colorAlphaHandle = GLES20.glGetUniformLocation(program, "u_Alpha");
             voxelProgram = createProgram(TEXTURED_VERTEX_SHADER, TEXTURED_FRAGMENT_SHADER);
             voxelPositionHandle = GLES20.glGetAttribLocation(voxelProgram, "a_Position");
             voxelUvHandle = GLES20.glGetAttribLocation(voxelProgram, "a_Uv");
@@ -284,6 +452,12 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             billboard = Billboard.create();
             nameplate = new Nameplate();
             speechBubble = new SpeechBubble();
+            emoteBubble = new EmoteBubble();
+            blockTemplates.clear();
+            hiddenCells.clear();
+            blockPops.clear();
+            dropStartMs = -1;
+            virtualDropStarted = false;
             vrmProgram = createProgram(VRM_VERTEX_SHADER, VRM_FRAGMENT_SHADER);
             vrmPositionHandle = GLES20.glGetAttribLocation(vrmProgram, "a_Position");
             vrmNormalHandle = GLES20.glGetAttribLocation(vrmProgram, "a_Normal");
@@ -316,8 +490,11 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         surfaceWidth = width;
         surfaceHeight = height;
         GLES20.glViewport(0, 0, width, height);
+        int rotation = activity.getWindowManager().getDefaultDisplay().getRotation();
+        android.util.Log.i("Rotation", "surfaceChanged " + width + "x" + height + " rotation=" + rotation
+            + " session=" + (session != null));
         if (session != null) {
-            try { session.setDisplayGeometry(activity.getWindowManager().getDefaultDisplay().getRotation(), width, height); }
+            try { session.setDisplayGeometry(rotation, width, height); }
             catch (RuntimeException ignored) { /* Session may be paused; next frame will retry. */ }
         }
     }
@@ -353,6 +530,13 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             }
             camera.getViewMatrix(viewMatrix, 0);
             camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100f);
+            long rotationLogNow = System.currentTimeMillis();
+            if (rotationLogNow - lastRotationLogMs > 1500L) {
+                lastRotationLogMs = rotationLogNow;
+                android.util.Log.i("Rotation", "frame surface=" + surfaceWidth + "x" + surfaceHeight
+                    + " displayRotation=" + activity.getWindowManager().getDefaultDisplay().getRotation()
+                    + " cameraTracking=" + camera.getTrackingState());
+            }
             camera.getPose().toMatrix(cameraPose, 0);
             cameraPosition[0] = cameraPose[12];
             cameraPosition[1] = cameraPose[13];
@@ -366,24 +550,63 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             processTap(current, frame);
             long now = System.currentTimeMillis();
             if (speechBubble != null) speechBubble.update(now);
+            updateAnimations(now);
             if (previewMode) {
-                // Preview inspection is immune to stray taps and to an existing anchor: it always
-                // draws the companion in front of the camera (and the island when one is up).
-                boolean anchored = anchor != null && anchor.getTrackingState() == TrackingState.TRACKING;
-                if (anchored) {
-                    anchor.getPose().toMatrix(modelMatrix, 0);
+                if (demoAnchor) {
+                    // Debug-only virtual anchor: island + companion drawn at a fixed camera-relative
+                    // pose so drop-in/pop-in animations can be captured with good framing.
+                    Matrix.invertM(modelMatrix, 0, viewMatrix, 0);
+                    if (demoLowAngle) {
+                        Matrix.translateM(modelMatrix, 0, 0f, -0.055f, -0.85f);
+                    } else {
+                        Matrix.translateM(modelMatrix, 0, 0f, -0.18f, -0.92f);
+                    }
+                    if (!virtualDropStarted) {
+                        virtualDropStarted = true;
+                        dropStartMs = now;
+                    }
+                    if (!islandPlaced) {
+                        islandPlaced = true;
+                        activity.setIslandPlaced(true);
+                    }
+                    applyIslandDrop(modelMatrix, now);
                     Matrix.multiplyMM(modelView, 0, viewMatrix, 0, modelMatrix, 0);
                     Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, modelView, 0);
                     if (meshDirty) rebuildMesh();
                     drawVoxels();
+                    drawProposalHighlight(now);
+                    drawBlockPops(now);
+                    drawCompanion();
+                    drawCompanionBillboards(now);
+                    publishArState(true, -1, true);
+                    publishStatus("预览模式（演示锚点）：小岛落桌 / 方块逐个弹出");
+                    return;
+                }
+                // Preview inspection is immune to stray taps and to an existing anchor: it always
+                // draws the companion in front of the camera (and the island when one is up).
+                boolean anchored = anchor != null && anchor.getTrackingState() == TrackingState.TRACKING;
+                if (!islandPlaced) {
+                    islandPlaced = true;
+                    activity.setIslandPlaced(true);
+                }
+                if (anchored) {
+                    buildAnchorContentMatrix(now);
+                    if (meshDirty) rebuildMesh();
+                    drawVoxels();
+                    drawProposalHighlight(now);
+                    drawBlockPops(now);
                 }
                 drawPreviewCompanion(camera);
-                drawCompanionBillboards();
+                drawCompanionBillboards(now);
                 publishArState(true, -1, anchored);
                 publishStatus("预览模式：仅用于检查动作与模型，点击不会放置小岛");
                 return;
             }
             if (anchor == null || anchor.getTrackingState() != TrackingState.TRACKING) {
+                if (islandPlaced) {
+                    islandPlaced = false;
+                    activity.setIslandPlaced(false);
+                }
                 int planeCount = 0;
                 for (Plane trackedPlane : current.getAllTrackables(Plane.class)) {
                     if (trackedPlane.getTrackingState() == TrackingState.TRACKING) planeCount++;
@@ -395,13 +618,13 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
                 publishStatus(message);
                 return;
             }
-            anchor.getPose().toMatrix(modelMatrix, 0);
-            Matrix.multiplyMM(modelView, 0, viewMatrix, 0, modelMatrix, 0);
-            Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, modelView, 0);
+            buildAnchorContentMatrix(now);
             if (meshDirty) rebuildMesh();
             drawVoxels();
+            drawProposalHighlight(now);
+            drawBlockPops(now);
             drawCompanion();
-            drawCompanionBillboards();
+            drawCompanionBillboards(now);
             publishArState(true, -1, true);
             float dcx = cameraPosition[0] - modelMatrix[12];
             float dcy = cameraPosition[1] - modelMatrix[13];
@@ -440,13 +663,269 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     private void rebuildMesh() {
         meshDirty = false;
-        VoxelWorld.Mesh mesh = world.buildMesh(voxelAtlas);
+        VoxelWorld.Mesh mesh = world.buildMesh(voxelAtlas, hiddenCells);
         voxelVertexCount = mesh.vertexCount;
         voxelTexturedVertexCount = voxelAtlas != null ? mesh.texturedVertexCount : 0;
         voxelVertices = directBuffer(mesh.positions);
         voxelColors = directBuffer(mesh.colors);
         voxelUvs = directBuffer(mesh.uvs);
         voxelShades = directBuffer(mesh.shades);
+    }
+
+    /**
+     * Builds the anchor pose plus the island drop-in animation into {@link #modelMatrix} and its
+     * MVP. The drop is object-level only: the whole island (and the companion riding on it) starts
+     * ~35 cm above the table, falls with an ease-in, bounces once and squashes briefly on impact.
+     */
+    private void buildAnchorContentMatrix(long now) {
+        anchor.getPose().toMatrix(modelMatrix, 0);
+        applyIslandDrop(modelMatrix, now);
+        Matrix.multiplyMM(modelView, 0, viewMatrix, 0, modelMatrix, 0);
+        Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, modelView, 0);
+    }
+
+    private void applyIslandDrop(float[] matrix, long now) {
+        if (dropStartMs < 0 || !animationsEnabled) return;
+        long duration = animationDuration(DROP_DURATION_MS);
+        long elapsed = now - dropStartMs;
+        if (elapsed >= duration) {
+            dropStartMs = -1;
+            return;
+        }
+        float t = elapsed / (float) duration;
+        float liftMeters;
+        float squash;
+        if (t < 0.55f) {
+            // Ease-in fall: slow at first, then accelerating down (gravity feel).
+            float u = t / 0.55f;
+            liftMeters = DROP_START_HEIGHT_METERS * (1f - u * u);
+            squash = 0f;
+        } else {
+            // Impact at t=0.55: brief squash plus a small bounce that settles.
+            float u = (t - 0.55f) / 0.45f;
+            liftMeters = u < 0.5f ? 0.045f * (float) Math.sin(Math.PI * u / 0.5f) : 0f;
+            squash = (float) Math.exp(-Math.pow((t - 0.55f) / 0.06f, 2.0));
+        }
+        Matrix.setIdentityM(dropMatrix, 0);
+        Matrix.translateM(dropMatrix, 0, 0f, liftMeters, 0f);
+        Matrix.scaleM(dropMatrix, 0, 1f + 0.10f * squash, 1f - 0.16f * squash, 1f + 0.10f * squash);
+        Matrix.multiplyMM(dropResult, 0, matrix, 0, dropMatrix, 0);
+        System.arraycopy(dropResult, 0, matrix, 0, 16);
+        if (now - lastDropLogMs > 120L) {
+            lastDropLogMs = now;
+            android.util.Log.i("IslandDrop", String.format(java.util.Locale.US,
+                "t=%.2f lift=%.3f squash=%.2f", t, liftMeters, squash));
+        }
+    }
+
+    /** Advances pop completion, proposal expiry and the sit/sleep emote scheduler. */
+    private void updateAnimations(long now) {
+        if (!blockPops.isEmpty()) {
+            boolean changed = false;
+            long popDuration = animationDuration(POP_DURATION_MS);
+            for (Iterator<BlockPop> iterator = blockPops.iterator(); iterator.hasNext(); ) {
+                BlockPop pop = iterator.next();
+                if (now - pop.startMs >= popDuration) {
+                    iterator.remove();
+                    hiddenCells.remove(VoxelWorld.cellKey(pop.x, pop.y, pop.z));
+                    changed = true;
+                }
+            }
+            if (changed) meshDirty = true;
+        }
+        HouseProposal active = proposal;
+        if (active != null && active.expired(now)) {
+            setProposal(null);
+            activity.onProposalExpired();
+        }
+    }
+
+    /** Draws one 180 ms scale-up pop for every newly committed block. */
+    private void drawBlockPops(long now) {
+        if (blockPops.isEmpty() || !animationsEnabled) return;
+        long popDuration = animationDuration(POP_DURATION_MS);
+        for (BlockPop pop : blockPops) {
+            if (now < pop.startMs) continue; // waiting for the companion to walk into reach
+            float t = (now - pop.startMs) / (float) popDuration;
+            if (t >= 1f) continue;
+            int code = world.blockAt(pop.x, pop.y, pop.z) & 0xff;
+            if (code == 0) continue;
+            BlockTemplate template = blockTemplate(code);
+            if (template == null) continue;
+            // Pop scale in voxel units: the cached template is a unit cube centred on the origin,
+            // so the matrix must be `anchor * T(block centre) * S(voxelSize * popScale)`. This is
+            // exactly the same anchor composition as the voxel mesh, only with a temporary scale
+            // about the block centre; the scale is clamped so a popping block can never exceed a
+            // little over one voxel (the earlier bug scaled the unit cube by ~1 metre).
+            float popScale = Math.min(1.05f, 0.35f + 0.70f * CompanionPoseMath.easeOutBack(t));
+            float size = VoxelWorld.VOXEL_METERS * popScale;
+            if (!pop.logged) {
+                pop.logged = true;
+                android.util.Log.i("BlockPop", String.format(java.util.Locale.US,
+                    "pop draw cell=%d,%d,%d sizeMeters=%.4f popScale=%.2f", pop.x, pop.y, pop.z, size, popScale));
+            }
+            Matrix.setIdentityM(proposalPopLocal, 0);
+            Matrix.translateM(proposalPopLocal, 0,
+                (pop.x + 0.5f) * VoxelWorld.VOXEL_METERS,
+                (pop.y + 0.5f) * VoxelWorld.VOXEL_METERS,
+                (pop.z + 0.5f) * VoxelWorld.VOXEL_METERS);
+            Matrix.scaleM(proposalPopLocal, 0, size, size, size);
+            Matrix.multiplyMM(proposalPopMvp, 0, mvp, 0, proposalPopLocal, 0);
+            if (template.texturedVertexCount > 0) {
+                drawTexturedMesh(template.positions, template.uvs, template.shades,
+                    template.texturedVertexCount, proposalPopMvp);
+            }
+            int flatCount = template.vertexCount - template.texturedVertexCount;
+            if (flatCount > 0) {
+                drawFlatMesh(template.positions, template.colors, template.texturedVertexCount,
+                    flatCount, proposalPopMvp);
+            }
+        }
+    }
+
+    /** Builds and caches the unit-cube template used for pop-in blocks of one block id. */
+    private BlockTemplate blockTemplate(int code) {
+        BlockTemplate cached = blockTemplates.get(code);
+        if (cached != null) return cached;
+        VoxelWorld.Mesh mesh = world.buildBlockMesh(voxelAtlas, code);
+        if (mesh.vertexCount == 0) return null;
+        BlockTemplate template = new BlockTemplate(
+            directBuffer(mesh.positions), directBuffer(mesh.colors),
+            directBuffer(mesh.uvs), directBuffer(mesh.shades),
+            mesh.vertexCount, voxelAtlas != null ? mesh.texturedVertexCount : 0);
+        blockTemplates.put(code, template);
+        return template;
+    }
+
+    /**
+     * Rebuilds the proposal footprint highlight: a translucent warm fill over the top face of the
+     * proposed cells plus brighter edge lines, with a slow pulse.
+     */
+    private void buildProposalBuffers(HouseProposal active) {
+        int cells = active.footprintCells();
+        if (cells <= 0) {
+            proposalFillVertexCount = 0;
+            proposalLineVertexCount = 0;
+            return;
+        }
+        final float s = VoxelWorld.VOXEL_METERS;
+        float topY = active.maxY * s + 0.0016f;
+        float edgeY = topY + 0.0008f;
+        float[] fillPositions = new float[cells * 6 * 3];
+        float[] fillColors = new float[cells * 6 * 4];
+        float[] linePositions = new float[cells * 8 * 3];
+        float[] lineColors = new float[cells * 8 * 4];
+        int fillCursor = 0;
+        int colorCursor = 0;
+        int lineCursor = 0;
+        int lineColorCursor = 0;
+        for (int x = active.minX; x < active.maxX; x += 1) {
+            for (int z = active.minZ; z < active.maxZ; z += 1) {
+                float x0 = x * s;
+                float x1 = (x + 1) * s;
+                float z0 = z * s;
+                float z1 = (z + 1) * s;
+                // Two triangles for the cell's top face.
+                float[][] corners = {
+                    {x0, topY, z0}, {x0, topY, z1}, {x1, topY, z1},
+                    {x0, topY, z0}, {x1, topY, z1}, {x1, topY, z0},
+                };
+                for (float[] corner : corners) {
+                    fillPositions[fillCursor++] = corner[0];
+                    fillPositions[fillCursor++] = corner[1];
+                    fillPositions[fillCursor++] = corner[2];
+                    fillColors[colorCursor++] = 1.0f;
+                    fillColors[colorCursor++] = 0.72f;
+                    fillColors[colorCursor++] = 0.26f;
+                    fillColors[colorCursor++] = 1.0f;
+                }
+                // Perimeter lines per cell on the top face (four edges -> 8 vertices for GL_LINES).
+                float[][] edges = {
+                    {x0, edgeY, z0}, {x1, edgeY, z0},
+                    {x1, edgeY, z0}, {x1, edgeY, z1},
+                    {x1, edgeY, z1}, {x0, edgeY, z1},
+                    {x0, edgeY, z1}, {x0, edgeY, z0},
+                };
+                for (float[] point : edges) {
+                    linePositions[lineCursor++] = point[0];
+                    linePositions[lineCursor++] = point[1];
+                    linePositions[lineCursor++] = point[2];
+                    lineColors[lineColorCursor++] = 1.0f;
+                    lineColors[lineColorCursor++] = 0.92f;
+                    lineColors[lineColorCursor++] = 0.62f;
+                    lineColors[lineColorCursor++] = 1.0f;
+                }
+            }
+        }
+        proposalFillPositions = directBuffer(fillPositions);
+        proposalFillColors = directBuffer(fillColors);
+        proposalLinePositions = directBuffer(linePositions);
+        proposalLineColors = directBuffer(lineColors);
+        proposalFillVertexCount = cells * 6;
+        proposalLineVertexCount = cells * 8;
+    }
+
+    private void drawProposalHighlight(long now) {
+        HouseProposal active = proposal;
+        if (active == null || active.footprintCells() <= 0) return;
+        if (renderedProposal != active) {
+            buildProposalBuffers(active);
+            renderedProposal = active;
+        }
+        if (proposalFillVertexCount == 0 || proposalFillPositions == null) return;
+        float alpha = animationsEnabled
+            ? 0.30f + 0.12f * (float) Math.sin((now - proposalStartMs) * 0.0044f)
+            : 0.34f;
+        GLES20.glUseProgram(program);
+        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        GLES20.glDepthMask(false);
+        // Translucent pulsing fill.
+        GLES20.glUniform1f(colorAlphaHandle, alpha);
+        proposalFillPositions.position(0);
+        GLES20.glEnableVertexAttribArray(positionHandle);
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, proposalFillPositions);
+        proposalFillColors.position(0);
+        GLES20.glEnableVertexAttribArray(colorHandle);
+        GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, proposalFillColors);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, proposalFillVertexCount);
+        // Brighter edge lines.
+        GLES20.glUniform1f(colorAlphaHandle, 1f);
+        GLES20.glLineWidth(2f);
+        proposalLinePositions.position(0);
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, proposalLinePositions);
+        proposalLineColors.position(0);
+        GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, proposalLineColors);
+        GLES20.glDrawArrays(GLES20.GL_LINES, 0, proposalLineVertexCount);
+        GLES20.glDisableVertexAttribArray(positionHandle);
+        GLES20.glDisableVertexAttribArray(colorHandle);
+        GLES20.glDepthMask(true);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glUniform1f(colorAlphaHandle, 1f);
+    }
+
+    /**
+     * Schedules the emote bubble while the companion sits ("♪"/"❤️"/"✨"/"💤" occasionally) or
+     * lies down ("💤" sleep emote). Uses the existing action registry ids, no new poses.
+     */
+    private void updateEmote(long now) {
+        EmoteBubble bubble = emoteBubble;
+        if (bubble == null) return;
+        boolean sitting = "sit".equals(activeActionId);
+        boolean sleeping = "lie".equals(activeActionId);
+        if (!sitting && !sleeping) {
+            bubble.hide();
+            nextEmoteMs = 0;
+            return;
+        }
+        bubble.update(now);
+        if (bubble.visible() || now < nextEmoteMs) return;
+        String emote = sleeping
+            ? SLEEP_EMOTE
+            : SIT_EMOTES[(int) (Math.random() * SIT_EMOTES.length)];
+        bubble.show(emote, now);
+        nextEmoteMs = now + (sleeping ? 3400L : 2600L + (long) (Math.random() * 1400));
     }
 
     private void processTap(Session current, Frame frame) {
@@ -474,6 +953,15 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         }
         hintVoxelX = column[0];
         hintVoxelZ = column[1];
+        android.util.Log.i("TapMap", "tap surface=" + surfaceWidth + "x" + surfaceHeight
+            + " rotation=" + activity.getWindowManager().getDefaultDisplay().getRotation()
+            + " -> column x=" + column[0] + " z=" + column[1]);
+        // Tapping the highlighted proposal footprint is equivalent to pressing 「好呀」.
+        HouseProposal active = proposal;
+        if (active != null && !active.expired(System.currentTimeMillis()) && active.containsColumn(column[0], column[1])) {
+            activity.onProposalAreaTapped();
+            return;
+        }
         activity.onColumnTapped(column[0], column[1]);
     }
 
@@ -496,6 +984,28 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             releaseAnchor();
             anchor = newAnchor;
             meshDirty = true;
+            dropStartMs = System.currentTimeMillis();
+            // Requirement: on spawn/re-anchor the companion is teleported to the island centre and
+            // faces the user (its facing is recomputed from the camera on the first frame).
+            locomotion.resetToCentre();
+            lastBuildMs = -1L;
+            lastSeatAction = "";
+            // Start from a clean companion state: the drop-in animation is the first thing the
+            // user sees, then normal idle behaviour, regardless of frames received earlier.
+            requestedAction = CompanionActionRegistry.AUTO;
+            autoEpochMs = -1;
+            actionEpochMs = 0;
+            actionHoldUntilMs = 0;
+            forcedAction = null;
+            activeActionId = "";
+            islandPlaced = true;
+            activity.setIslandPlaced(true);
+            float adx = cameraPosition[0] - newAnchor.getPose().tx();
+            float ady = cameraPosition[1] - newAnchor.getPose().ty();
+            float adz = cameraPosition[2] - newAnchor.getPose().tz();
+            android.util.Log.i("IslandDrop", String.format(java.util.Locale.US,
+                "anchor created dist=%.2f — replaying drop-in animation",
+                Math.sqrt(adx * adx + ady * ady + adz * adz)));
             publishStatus("已放置小岛");
             activity.showArNotice("已放置小岛：点岛上的格子开始建造吧");
             return;
@@ -575,20 +1085,26 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     /** Pixel-art atlas path: position + uv + per-face shade, alpha discarded for glass. */
     private void drawVoxelsTextured(int vertexCount) {
+        drawTexturedMesh(voxelVertices, voxelUvs, voxelShades, vertexCount, mvp);
+    }
+
+    private void drawTexturedMesh(FloatBuffer positions, FloatBuffer uvs, FloatBuffer shades,
+                                  int vertexCount, float[] mvpMatrix) {
+        if (voxelAtlas == null || !voxelAtlas.ready()) return;
         GLES20.glUseProgram(voxelProgram);
-        GLES20.glUniformMatrix4fv(voxelMvpHandle, 1, false, mvp, 0);
+        GLES20.glUniformMatrix4fv(voxelMvpHandle, 1, false, mvpMatrix, 0);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, voxelAtlas.textureId());
         GLES20.glUniform1i(voxelTextureHandle, 0);
-        voxelVertices.position(0);
+        positions.position(0);
         GLES20.glEnableVertexAttribArray(voxelPositionHandle);
-        GLES20.glVertexAttribPointer(voxelPositionHandle, 3, GLES20.GL_FLOAT, false, 0, voxelVertices);
-        voxelUvs.position(0);
+        GLES20.glVertexAttribPointer(voxelPositionHandle, 3, GLES20.GL_FLOAT, false, 0, positions);
+        uvs.position(0);
         GLES20.glEnableVertexAttribArray(voxelUvHandle);
-        GLES20.glVertexAttribPointer(voxelUvHandle, 2, GLES20.GL_FLOAT, false, 0, voxelUvs);
-        voxelShades.position(0);
+        GLES20.glVertexAttribPointer(voxelUvHandle, 2, GLES20.GL_FLOAT, false, 0, uvs);
+        shades.position(0);
         GLES20.glEnableVertexAttribArray(voxelShadeHandle);
-        GLES20.glVertexAttribPointer(voxelShadeHandle, 1, GLES20.GL_FLOAT, false, 0, voxelShades);
+        GLES20.glVertexAttribPointer(voxelShadeHandle, 1, GLES20.GL_FLOAT, false, 0, shades);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
         GLES20.glDisableVertexAttribArray(voxelPositionHandle);
         GLES20.glDisableVertexAttribArray(voxelUvHandle);
@@ -597,15 +1113,21 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     /** Flat-colour fallback path for blocks absent from the atlas mapping. */
     private void drawVoxelsFlat(int firstVertex, int vertexCount) {
-        if (vertexCount <= 0 || voxelColors == null) return;
+        drawFlatMesh(voxelVertices, voxelColors, firstVertex, vertexCount, mvp);
+    }
+
+    private void drawFlatMesh(FloatBuffer positions, FloatBuffer colors, int firstVertex,
+                              int vertexCount, float[] mvpMatrix) {
+        if (vertexCount <= 0 || positions == null || colors == null) return;
         GLES20.glUseProgram(program);
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0);
-        voxelVertices.position(firstVertex * 3);
+        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0);
+        GLES20.glUniform1f(colorAlphaHandle, 1f);
+        positions.position(firstVertex * 3);
         GLES20.glEnableVertexAttribArray(positionHandle);
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, voxelVertices);
-        voxelColors.position(firstVertex * 4);
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, positions);
+        colors.position(firstVertex * 4);
         GLES20.glEnableVertexAttribArray(colorHandle);
-        GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, voxelColors);
+        GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, colors);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCount);
         GLES20.glDisableVertexAttribArray(positionHandle);
         GLES20.glDisableVertexAttribArray(colorHandle);
@@ -699,24 +1221,94 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         }
     }
 
+    /**
+     * Surface the companion rests on: the grass top, or the top of the highest block in its current
+     * column (used for the stairs seat and for climbing onto built blocks).
+     */
+    private float companionFloorY() {
+        int voxelX = (int) Math.floor(locomotion.x / VoxelWorld.VOXEL_METERS);
+        int voxelZ = (int) Math.floor(locomotion.z / VoxelWorld.VOXEL_METERS);
+        int top = world.topSolidY(voxelX, voxelZ);
+        if (top < 0) return COMPANION_Y;
+        return Math.max(COMPANION_Y, (top + 1) * VoxelWorld.VOXEL_METERS);
+    }
+
+    /**
+     * Updates the companion's island-local behaviour for this frame: face the camera and slowly
+     * sway while idle, walk toward and face the cell currently being built, and walk to a nearby
+     * free spot before sitting/lying down. Keeps the avatar out of occupied cells (see
+     * {@link CompanionLocomotion}).
+     */
+    private void updateCompanionBehaviour(long now) {
+        boolean busy = "building".equals(companionState) || "planning".equals(companionState);
+        boolean recentBuild = lastBuildMs > 0L && now - lastBuildMs < 2200L;
+        Matrix.invertM(inverseIslandMatrix, 0, modelMatrix, 0);
+        float localCameraX = inverseIslandMatrix[0] * cameraPosition[0]
+            + inverseIslandMatrix[4] * cameraPosition[1]
+            + inverseIslandMatrix[8] * cameraPosition[2]
+            + inverseIslandMatrix[12];
+        float localCameraZ = inverseIslandMatrix[2] * cameraPosition[0]
+            + inverseIslandMatrix[6] * cameraPosition[1]
+            + inverseIslandMatrix[10] * cameraPosition[2]
+            + inverseIslandMatrix[14];
+        float idleSway = (float) Math.sin(now * 0.00063f) * 12f;
+        if (recentBuild || busy) {
+            // Leaving a seat flow (e.g. after the build) must re-arm the seat walk next time the
+            // companion sits down.
+            lastSeatAction = "";
+            locomotion.faceTowards(lastBuildX, lastBuildZ);
+            if (!locomotion.moving() && !locomotion.withinDistance(lastBuildX, lastBuildZ, BUILD_WORK_DISTANCE)) {
+                locomotion.walkNear(lastBuildX, lastBuildZ, now, world, BUILD_WORK_DISTANCE);
+            }
+        } else {
+            if ("sit".equals(activeActionId) || "lie".equals(activeActionId)) {
+                if (!activeActionId.equals(lastSeatAction)) {
+                    lastSeatAction = activeActionId;
+                    // Prefer the finished house's stairs block as the seat; fall back to any free
+                    // spot on the grass.
+                    if (!locomotion.walkToNearestSeat(now, world)) {
+                        locomotion.walkToNearestFreeSpot(now, world);
+                    }
+                }
+            } else {
+                lastSeatAction = "";
+            }
+            locomotion.faceCamera(localCameraX, localCameraZ, idleSway);
+        }
+        locomotion.update(now, world);
+    }
+
     private void drawCompanionModel(VrmModel model) {
         long now = System.currentTimeMillis();
         updateActionClock(now);
-        float avatarHeight = previewMode ? PREVIEW_COMPANION_HEIGHT_METERS : COMPANION_HEIGHT_METERS;
+        // The enlarged camera-relative preview model is only for pose inspection; when drawing on
+        // the debug virtual anchor the companion keeps its real island scale/facing.
+        boolean bigPreview = previewMode && !demoAnchor;
+        float avatarHeight = bigPreview ? PREVIEW_COMPANION_HEIGHT_METERS : COMPANION_HEIGHT_METERS;
         model.normalise(avatarHeight);
-        float lift = currentBodyLiftHeights * avatarHeight;
-
+        updateCompanionBehaviour(now);
+        float baseY = bigPreview ? 0f : companionFloorY();
+        float poseLift = currentBodyLiftHeights * avatarHeight;
+        float hopLift = locomotion.lift;
+        // Bidirectional floor clamp: the lowest posed skinned vertex must rest exactly on the
+        // surface under the companion (grass, a stairs seat, or any block top). The correction is
+        // applied to the resting transform and can be negative (lie pose was left hovering by the
+        // old lift-only clamp); intentional lifts (jump arc, walk hop/bob) are added afterwards.
+        float minModelY = model.hasSkin() ? model.posedMinY() : 0f;
+        float lowestOffset = model.scale() * (minModelY + model.offsetY());
+        float floorY = bigPreview ? 0f : baseY;
+        float correction = (floorY + 0.002f) - (baseY + lowestOffset);
+        float lift = poseLift + hopLift + correction;
+        if (now - lastPoseFloorLogMs > 700L) {
+            lastPoseFloorLogMs = now;
+            android.util.Log.i("PoseFloor", String.format(java.util.Locale.US,
+                "action=%s floor=%.3f baseY=%.3f minModelY=%.3f lowestOffset=%.3f correction=%+.3f poseLift=%.3f x=%.3f z=%.3f",
+                activeActionId, floorY, baseY, minModelY, lowestOffset, correction, poseLift,
+                locomotion.x, locomotion.z));
+        }
         Matrix.setIdentityM(characterFrame, 0);
-        // Preview mode centres the avatar on the camera ray so its silhouette and scale are
-        // easy to judge without an anchor.
-        float offsetX = previewMode ? 0f : COMPANION_X;
-        float offsetY = previewMode ? 0f : COMPANION_Y;
-        float offsetZ = previewMode ? 0f : COMPANION_Z;
-        Matrix.translateM(characterFrame, 0, offsetX, offsetY + lift, offsetZ);
-        // Preview turns the avatar toward the camera so textures and the silhouette can be
-        // compared against the model's own thumbnail.
-        float baseYaw = previewMode ? 0f : 180f;
-        Matrix.rotateM(characterFrame, 0, baseYaw + currentBodyYaw, 0f, 1f, 0f);
+        Matrix.translateM(characterFrame, 0, locomotion.x, baseY + lift, locomotion.z);
+        Matrix.rotateM(characterFrame, 0, locomotion.yawDeg + currentBodyYaw, 0f, 1f, 0f);
         Matrix.multiplyMM(characterFrameWorld, 0, modelMatrix, 0, characterFrame, 0);
         // Anchor the nameplate/bubble on the posed top-of-head vertex so they follow the head
         // through sit/lie/jump instead of assuming the standing height.
@@ -777,10 +1369,13 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         if (mesh == null || mesh.vertexCount == 0) return;
         long now = System.currentTimeMillis();
         updateActionClock(now);
-        float lift = currentBodyLiftHeights * FALLBACK_COMPANION_HEIGHT_METERS;
+        updateCompanionBehaviour(now);
+        float lift = currentBodyLiftHeights * FALLBACK_COMPANION_HEIGHT_METERS + locomotion.lift;
+        float baseY = companionFloorY();
+        lift += (baseY + 0.002f) - (baseY + lift);
         Matrix.setIdentityM(characterFrame, 0);
-        Matrix.translateM(characterFrame, 0, COMPANION_X, COMPANION_Y + lift, COMPANION_Z);
-        Matrix.rotateM(characterFrame, 0, 180f + currentBodyYaw, 0f, 1f, 0f);
+        Matrix.translateM(characterFrame, 0, locomotion.x, baseY + lift, locomotion.z);
+        Matrix.rotateM(characterFrame, 0, locomotion.yawDeg + currentBodyYaw, 0f, 1f, 0f);
         Matrix.multiplyMM(characterFrameWorld, 0, modelMatrix, 0, characterFrame, 0);
         companionHeadWorld[0] = characterFrameWorld[4] * FALLBACK_COMPANION_HEIGHT_METERS + characterFrameWorld[12];
         companionHeadWorld[1] = characterFrameWorld[5] * FALLBACK_COMPANION_HEIGHT_METERS + characterFrameWorld[13];
@@ -793,6 +1388,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
         GLES20.glUseProgram(program);
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, characterMvp, 0);
+        GLES20.glUniform1f(colorAlphaHandle, 1f);
         mesh.positions.position(0);
         GLES20.glEnableVertexAttribArray(positionHandle);
         GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, mesh.positions);
@@ -805,13 +1401,15 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     }
 
     /**
-     * Draws the nameplate and (when speaking) the speech bubble. Both are camera-facing billboards
-     * drawn after the avatar with depth testing disabled so they never clip into the model.
+     * Draws the nameplate, the sit/sleep emote bubble and (when speaking) the speech bubble. All
+     * are camera-facing billboards drawn after the avatar with depth testing disabled so they
+     * never clip into the model.
      */
-    private void drawCompanionBillboards() {
+    private void drawCompanionBillboards(long now) {
         Billboard quad = billboard;
         Nameplate plate = nameplate;
         if (!companionVisible || quad == null || plate == null) return;
+        updateEmote(now);
         float dx = cameraPosition[0] - companionHeadWorld[0];
         float dy = cameraPosition[1] - companionHeadWorld[1];
         float dz = cameraPosition[2] - companionHeadWorld[2];
@@ -829,13 +1427,26 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         float nameY = companionHeadWorld[1] + cameraUp[1] * nameCenterOffset;
         float nameZ = companionHeadWorld[2] + cameraUp[2] * nameCenterOffset;
 
-        float bubbleHeight = 0f;
         SpeechBubble bubble = speechBubble;
+        boolean bubbleVisible = bubble != null && bubble.visible();
+        float bubbleHeight = 0f;
         float bubbleBottomOffset = nameHeight + gap * 2f;
-        if (bubble != null && bubble.visible()) {
+        if (bubbleVisible) {
             float bubblePixelScale = BUBBLE_TEXT_SCREEN_FRACTION / (SpeechBubble.TEXT_SIZE_PX * FOV_FOCAL_FACTOR);
             bubbleHeight = bubble.pixelHeight() * bubblePixelScale * clampedDistance * bubble.scale();
             bubbleBottomOffset += (previewMode ? 0.055f : 0.012f) * clampedDistance;
+        }
+
+        EmoteBubble emote = emoteBubble;
+        float emoteHeight = 0f;
+        float emoteOffset = 0f;
+        if (emote != null && emote.visible() && !bubbleVisible) {
+            float emotePixelScale = EMOTE_HEIGHT_SCREEN_FRACTION / (EmoteBubble.TEXT_SIZE_PX * FOV_FOCAL_FACTOR);
+            emoteHeight = emote.pixelHeight() * emotePixelScale * clampedDistance * emote.scale();
+            float bob = animationsEnabled
+                ? (float) Math.sin(now * 0.006) * 0.004f * clampedDistance
+                : 0f;
+            emoteOffset = nameHeight + gap * 2f + (previewMode ? 0.02f : 0.004f) * clampedDistance + bob;
         }
 
         GLES20.glDisable(GLES20.GL_DEPTH_TEST);
@@ -845,7 +1456,16 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
         plate.draw(quad, 1f, viewMatrix, projectionMatrix, cameraRight, cameraUp,
             nameX, nameY, nameZ, nameHeight);
-        if (bubble != null && bubble.visible() && bubbleHeight > 0f) {
+        if (emoteHeight > 0f) {
+            float emoteWidth = emoteHeight * emote.aspect();
+            float emoteCenterOffset = emoteOffset + emoteHeight * 0.5f;
+            float emoteX = companionHeadWorld[0] + cameraUp[0] * emoteCenterOffset;
+            float emoteY = companionHeadWorld[1] + cameraUp[1] * emoteCenterOffset;
+            float emoteZ = companionHeadWorld[2] + cameraUp[2] * emoteCenterOffset;
+            quad.draw(emote.textureId(), emote.alpha(), viewMatrix, projectionMatrix,
+                cameraRight, cameraUp, emoteX, emoteY, emoteZ, emoteWidth, emoteHeight);
+        }
+        if (bubbleVisible && bubbleHeight > 0f) {
             float bubbleWidth = bubbleHeight * bubble.aspect();
             float bubbleCenterOffset = bubbleBottomOffset + bubbleHeight * 0.5f;
             float bubbleX = companionHeadWorld[0] + cameraUp[0] * bubbleCenterOffset;
@@ -863,6 +1483,16 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private void releaseAnchor() {
         Anchor old = anchor;
         anchor = null;
+        dropStartMs = -1;
+        if (islandPlaced) {
+            islandPlaced = false;
+            activity.setIslandPlaced(false);
+        }
+        if (!blockPops.isEmpty() || !hiddenCells.isEmpty()) {
+            blockPops.clear();
+            hiddenCells.clear();
+            meshDirty = true;
+        }
         if (old != null) old.detach();
     }
 
@@ -911,7 +1541,8 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         "uniform mat4 u_Mvp; attribute vec3 a_Position; attribute vec4 a_Color; varying vec4 v_Color;"
         + "void main(){ gl_Position=u_Mvp*vec4(a_Position,1.0); v_Color=a_Color; }";
     private static final String FRAGMENT_SHADER =
-        "precision mediump float; varying vec4 v_Color; void main(){ gl_FragColor=v_Color; }";
+        "precision mediump float; uniform float u_Alpha; varying vec4 v_Color;"
+        + "void main(){ gl_FragColor=vec4(v_Color.rgb, v_Color.a*u_Alpha); }";
 
     /**
      * Textured voxel shader: one atlas sample per vertex UV, multiplied by the per-face shade so
