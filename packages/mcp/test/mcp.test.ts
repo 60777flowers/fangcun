@@ -144,6 +144,25 @@ test("tools/list exposes exactly the seven v0 tools with strict, bounded schemas
   }
 });
 
+test("every catalog block id round-trips through place_block", async () => {
+  let rev = 0;
+  const stub = createStubFetch((request) => {
+    if (request.url.endsWith("/api/core/state")) return { status: 200, body: stateBody({ rev }) };
+    if (request.url.endsWith("/api/core/intent")) {
+      rev += 1;
+      return intentAccepted(rev);
+    }
+    return { status: 404, body: { error: "not_found" } };
+  });
+  const server = createServer(stub);
+  // Derived from BLOCK_IDS so a catalog addition is covered without a new case here.
+  for (const blockId of BLOCK_IDS) {
+    const response = await callToolRpc(server, "place_block", { x: 0, y: BUILD_Y, z: 0, blockId });
+    assert.deepEqual(toolJson(response).placed, blockId, `place_block rejected catalog block ${blockId}`);
+  }
+  assert.equal(stub.requests.filter((request) => request.url.endsWith("/api/core/intent")).length, BLOCK_IDS.length);
+});
+
 test("initialize, notifications/initialized, ping and unknown methods follow JSON-RPC framing", async () => {
   const stub = createStubFetch(() => ({ status: 500, body: { error: "unused" } }));
   const server = createServer(stub);

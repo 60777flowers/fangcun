@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import protocolSchema from "../schema/protocol-v1.json" with { type: "json" };
-import { WORLD_CELL_COUNT } from "@fangcun/world-schema";
+import { BLOCK_IDS, WORLD_CELL_COUNT } from "@fangcun/world-schema";
 import { validateClientMessage, validateServerMessage } from "../src/index.ts";
 import { decodeClientMessageFrame, decodeServerMessageFrame, encodeClientMessageFrame, encodeServerMessageFrame } from "../src/codec.ts";
 
@@ -55,4 +55,29 @@ test("credentials and snapshots are strictly validated and bounded", () => {
   assert.equal(validateServerMessage({ ...ack, mystery: 1 }).ok, false);
   const tooLarge = { ...hello, credential: "x".repeat(20_000) };
   assert.equal(encodeClientMessageFrame(tooLarge as never).ok, false);
+});
+
+type EnumHolder = Readonly<{ enum?: readonly unknown[] }>;
+
+/** Reads a sub-schema's `enum` without duplicating the JSON Schema shape in types. */
+function readEnum(root: unknown, path: readonly (string | number)[]): readonly unknown[] {
+  let current: unknown = root;
+  for (const key of path) {
+    current = typeof key === "number" ? (current as readonly unknown[])[key] : (current as Record<string, unknown>)[key];
+  }
+  return (current as EnumHolder | undefined)?.enum ?? [];
+}
+
+test("protocol JSON Schema block enums mirror the catalog", () => {
+  // The wire schema is a static contract, so pin its enums to BLOCK_IDS here: a
+  // catalog change that forgets the schema must fail instead of drifting silently.
+  assert.deepEqual(readEnum(protocolSchema, ["$defs", "operation", "oneOf", 0, "properties", "blockId"]), [...BLOCK_IDS]);
+  assert.deepEqual(readEnum(protocolSchema, ["$defs", "operation", "oneOf", 1, "properties", "expectedBlock"]), [...BLOCK_IDS]);
+  assert.deepEqual(readEnum(protocolSchema, ["$defs", "welcome", "properties", "snapshot", "properties", "blocks", "items"]), [...BLOCK_IDS, null]);
+
+  for (const blockId of BLOCK_IDS) {
+    assert.equal(validateJsonSchema({ protocolVersion: 1, type: "intent", worldId: "w", clientId: "c", seq: 1, baseRev: 0, operation: { type: "place", at: { x: 0, y: 4, z: 0 }, blockId } }), true, `JSON Schema rejected catalog block ${blockId}`);
+  }
+  const catalogSnapshot = { ...snapshot, blocks: [...BLOCK_IDS, ...Array<null>(WORLD_CELL_COUNT - BLOCK_IDS.length).fill(null)] };
+  assert.equal(validateJsonSchema({ ...welcome, snapshot: catalogSnapshot }), true, "a snapshot may contain every catalog block id");
 });

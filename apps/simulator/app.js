@@ -8,14 +8,27 @@ const HOST_MODE = QUERY_MODE === "host";
 const CORE_MODE = QUERY_MODE === "core" || HOST_MODE;
 const API_BASE = HOST_MODE ? "/api/host" : "/api/core";
 
-const MATERIALS = ["planks", "stone", "glass", "leaves"];
+// Isometric face palette: `top` is the lit face, `x` the right face, `z` the left.
+// Every catalog block needs an entry so a snapshot with any valid block id renders.
 const COLORS = {
   grass: { top: "#819f62", x: "#60794a", z: "#6f8954" },
   dirt: { top: "#8a6444", x: "#644730", z: "#765338" },
   stone: { top: "#9aa39a", x: "#727c74", z: "#838d85" },
   planks: { top: "#bd895b", x: "#875b3d", z: "#a37149" },
+  log: { top: "#a9835a", x: "#6d4f35", z: "#8a6543" },
   glass: { top: "#a6ded2", x: "#5d9993", z: "#7cb8ae" },
   leaves: { top: "#91ad5d", x: "#53794a", z: "#6d914c" },
+  sand: { top: "#e4d6a8", x: "#b3a276", z: "#cdbd8d" },
+  // Decorative set: warm masonry, cool roof tile, two wools, wood/metal accents
+  // and a bright pumpkin/flower so builds read apart at iso scale.
+  brick: { top: "#b2624a", x: "#7a3f32", z: "#964d3c" },
+  tile: { top: "#8ea6b5", x: "#57707e", z: "#6f8898" },
+  wool_white: { top: "#ece9e0", x: "#b6b1a4", z: "#d3cec0" },
+  wool_red: { top: "#c4554e", x: "#8c3733", z: "#a84743" },
+  bookshelf: { top: "#a07a4f", x: "#62432c", z: "#82593a" },
+  lantern: { top: "#f2c96b", x: "#9a6a2b", z: "#c2913f" },
+  pumpkin: { top: "#e08b3c", x: "#a45a24", z: "#c4722e" },
+  flower: { top: "#e3a4b6", x: "#5d7f46", z: "#7d9c5c" },
 };
 const BUILD_MIN_Y = WORLD_SPEC.terrainTopY;
 const BUILD_MAX_Y = WORLD_SPEC.size.y - 1;
@@ -25,6 +38,13 @@ const grid = document.querySelector("#tile-grid");
 const placeButton = document.querySelector("#place-button");
 const breakButton = document.querySelector("#break-button");
 const materialButtons = [...document.querySelectorAll(".material-option")];
+// The picker buttons are the curated build palette; derive the id list from them so
+// the keyboard shortcuts and the buttons cannot drift apart, and fail loudly if a
+// button names an id the catalog does not have.
+const MATERIALS = materialButtons.map((button) => button.dataset.material);
+for (const material of MATERIALS) {
+  if (!BLOCK_DEFS[material]) throw new Error(`Material picker offers an unknown block id: ${material}`);
+}
 const modeButtons = [...document.querySelectorAll(".mode-button")];
 const proposalPanel = document.querySelector("#proposal-panel");
 const toast = document.querySelector("#toast");

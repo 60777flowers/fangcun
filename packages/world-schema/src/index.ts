@@ -13,6 +13,10 @@ export const WORLD_SPEC = Object.freeze({
 export type Coord = Readonly<{ x: number; y: number; z: number }>;
 export type BlockId = (typeof BLOCK_IDS)[number];
 
+// The first eight ids are the v1 terrain/build set and MUST keep their positions:
+// durable stores encode a block as `index + 1`, so appending is the only compatible
+// way to grow the catalog. The last eight are decorative; they are ordinary
+// placeable blocks with no extra world rules (no gravity, collision or light).
 export const BLOCK_IDS = [
   "grass",
   "dirt",
@@ -22,6 +26,14 @@ export const BLOCK_IDS = [
   "leaves",
   "sand",
   "glass",
+  "brick",
+  "tile",
+  "wool_white",
+  "wool_red",
+  "bookshelf",
+  "lantern",
+  "pumpkin",
+  "flower",
 ] as const;
 
 export type BlockDef = Readonly<{
@@ -40,6 +52,15 @@ export const BLOCK_DEFS: Readonly<Record<BlockId, BlockDef>> = Object.freeze({
   leaves: Object.freeze({ id: "leaves", label: "树叶", solid: true, placeable: true }),
   sand: Object.freeze({ id: "sand", label: "沙子", solid: true, placeable: true }),
   glass: Object.freeze({ id: "glass", label: "玻璃", solid: false, placeable: true }),
+  // Decorative set: labels read naturally in the Chinese product UI.
+  brick: Object.freeze({ id: "brick", label: "红砖", solid: true, placeable: true }),
+  tile: Object.freeze({ id: "tile", label: "瓦片", solid: true, placeable: true }),
+  wool_white: Object.freeze({ id: "wool_white", label: "白色羊毛", solid: true, placeable: true }),
+  wool_red: Object.freeze({ id: "wool_red", label: "红色羊毛", solid: true, placeable: true }),
+  bookshelf: Object.freeze({ id: "bookshelf", label: "书架", solid: true, placeable: true }),
+  lantern: Object.freeze({ id: "lantern", label: "灯笼", solid: true, placeable: true }),
+  pumpkin: Object.freeze({ id: "pumpkin", label: "南瓜", solid: true, placeable: true }),
+  flower: Object.freeze({ id: "flower", label: "小花", solid: true, placeable: true }),
 });
 
 export const WORLD_CELL_COUNT = WORLD_SPEC.size.x * WORLD_SPEC.size.y * WORLD_SPEC.size.z;

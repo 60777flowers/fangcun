@@ -85,7 +85,7 @@ Host 当前每次只提议一个候选（最近一次 tick 的结果），因此
 
 ## 4. 安全边界
 
-1. **坐标与方块**：所有坐标在本地按 `WorldSpec` 校验（整数、`x/z∈[-8,8)`、`y∈[0,16)`）；`blockId` 必须属于 8 种方块；`y < terrainTopY` 的地形层拒绝写入。`world_observe` 会回传 `terrainTopY`，模型应以它为准，不要假设固定的地形层厚度。
+1. **坐标与方块**：所有坐标在本地按 `WorldSpec` 校验（整数、`x/z∈[-8,8)`、`y∈[0,16)`）；`blockId` 必须属于 16 种方块（8 基础 + 8 装饰，以 `BLOCK_IDS` 为准）；`y < terrainTopY` 的地形层拒绝写入。`world_observe` 会回传 `terrainTopY`，模型应以它为准，不要假设固定的地形层厚度。
 2. **越权**：模型不能设置 `ownerUserId`、`grantId`、`plotId`、`approvalId`；工具不暴露这些身份字段。世界写入仍由 Host 做最终校验（占用/过期/预算/approval）。
 3. **隐私**：工具返回只含世界摘要、候选、状态与错误码；不返回用户音频、文本、相机数据、文件路径或 token。
 4. **宿主边界**：只访问 `FANGCUN_HOST` 指向的 loopback HTTP API，不读存档、不执行 shell、不联网。
