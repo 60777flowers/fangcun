@@ -118,6 +118,53 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
      */
     void setPreviewMode(boolean enabled) { previewMode = enabled; }
 
+    /** Forces a pose for tuning: "stand", "sit", "lie", or "auto" to cycle on its own. */
+    void setForcedPose(String pose) { forcedPose = pose; }
+
+    private volatile String forcedPose = "auto";
+    private static final long POSE_UPDATE_MS = 120;
+    private long lastPoseMs;
+    private int poseIndex = -1;
+
+    /**
+     * Cycles stand → sit → lie while idle so the companion looks alive, and stands up while
+     * building. Poses are procedural bone rotations because the source VRM ships no clips.
+     */
+    private void applyCharacterPose(VrmModel model) {
+        if (!model.hasSkin()) return;
+        long now = System.currentTimeMillis();
+        String pose;
+        if (previewMode || !"auto".equals(forcedPose)) {
+            pose = "auto".equals(forcedPose) ? "stand" : forcedPose;
+        } else if ("building".equals(companionState) || "planning".equals(companionState)) {
+            pose = "stand";
+        } else {
+            long cycle = (now / 1000L) % 45L;
+            pose = cycle < 20 ? "stand" : cycle < 32 ? "sit" : "lie";
+        }
+        if (now - lastPoseMs < POSE_UPDATE_MS && pose.equals(lastPose)) return;
+        lastPoseMs = now;
+        lastPose = pose;
+
+        java.util.Map<String, float[]> rotations = new java.util.HashMap<>();
+        float[] hips = {0f, 0f, 0f};
+        if ("sit".equals(pose)) {
+            rotations.put("leftUpperLeg", VrmModel.axisAngle(1f, 0f, 0f, -85f));
+            rotations.put("rightUpperLeg", VrmModel.axisAngle(1f, 0f, 0f, -85f));
+            rotations.put("leftLowerLeg", VrmModel.axisAngle(1f, 0f, 0f, 85f));
+            rotations.put("rightLowerLeg", VrmModel.axisAngle(1f, 0f, 0f, 85f));
+            rotations.put("spine", VrmModel.axisAngle(1f, 0f, 0f, 6f));
+            hips[1] = -0.30f;
+        } else if ("lie".equals(pose)) {
+            rotations.put("hips", VrmModel.axisAngle(1f, 0f, 0f, -88f));
+            rotations.put("head", VrmModel.axisAngle(1f, 0f, 0f, 12f));
+            hips[1] = -0.90f;
+        }
+        model.applyPose(rotations, hips);
+    }
+
+    private String lastPose = "";
+
     /**
      * Debug switch for the glTF-vs-GL texture V orientation. Off by default because
      * Android's GLUtils.texImage2D already lands rows where glTF UVs expect them; flipping
@@ -415,6 +462,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private void drawCompanionModel(VrmModel model) {
         // Preview enlarges the avatar so textures and material assignment can be inspected.
         model.normalise(previewMode ? 0.45f : COMPANION_HEIGHT_METERS);
+        applyCharacterPose(model);
         double seconds = System.currentTimeMillis() / 1000.0;
         boolean busy = "building".equals(companionState) || "planning".equals(companionState);
         // Grounded by default: the avatar stands on the terrain and only hops while building.

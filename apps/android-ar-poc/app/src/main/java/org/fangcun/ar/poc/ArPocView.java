@@ -44,6 +44,9 @@ final class ArPocView extends GLSurfaceView {
     /** Debug: flips the texture V orientation. */
     void setFlipV(boolean enabled) { queueEvent(() -> renderer.setFlipV(enabled)); }
 
+    /** Debug: forces a companion pose for tuning. */
+    void setForcedPose(String pose) { queueEvent(() -> renderer.setForcedPose(pose)); }
+
     /** Drops the island anchor so the next tap re-anchors (used by the UI button). */
     void resetAnchor() { queueEvent(() -> renderer.releaseAnchorNow()); }
 

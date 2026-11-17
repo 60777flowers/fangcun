@@ -39,20 +39,33 @@ final class VrmModel {
         final ShortBuffer indices;
         final int indexCount;
         final int textureId;
+        final int vertexCount;
+        /** Bind-pose positions in metres; skinning rewrites {@link #positions} from these. */
+        final float[] restPositions;
+        /** Four joint slots per vertex, already mapped to the skin's joint order. */
+        final int[] joints;
+        /** Four weights per vertex, normalised to sum to 1. */
+        final float[] weights;
 
-        Primitive(FloatBuffer positions, FloatBuffer normals, FloatBuffer uvs, ShortBuffer indices, int indexCount, int textureId) {
+        Primitive(FloatBuffer positions, FloatBuffer normals, FloatBuffer uvs, ShortBuffer indices, int indexCount,
+                  int textureId, int vertexCount, float[] restPositions, int[] joints, float[] weights) {
             this.positions = positions;
             this.normals = normals;
             this.uvs = uvs;
             this.indices = indices;
             this.indexCount = indexCount;
             this.textureId = textureId;
+            this.vertexCount = vertexCount;
+            this.restPositions = restPositions;
+            this.joints = joints;
+            this.weights = weights;
         }
     }
 
     private final List<Primitive> primitives = new ArrayList<>();
     private final float[] bounds = new float[6];
     private volatile boolean flipV;
+    private SkinData skin;
     private float uniformScale = 1f;
     private float offsetX;
     private float offsetY;
@@ -192,16 +205,31 @@ final class VrmModel {
                     : "(none)";
                 Log.i(TAG, "primitive mesh=" + meshIndex + " material=" + materialName + " verts=" + vertexCount
                     + " indices=" + indexArray.length + " textureId=" + textureId);
+                int[] joints = attributes.has("JOINTS_0") ? readJoints(gltf, bin, attributes.getInt("JOINTS_0"), vertexCount) : null;
+                float[] weights = attributes.has("WEIGHTS_0") ? readWeights(gltf, bin, attributes.getInt("WEIGHTS_0"), vertexCount) : null;
+                if (joints == null || weights == null) {
+                    joints = new int[vertexCount * 4];
+                    weights = new float[vertexCount * 4];
+                    for (int vertex = 0; vertex < vertexCount; vertex += 1) weights[vertex * 4] = 1f;
+                }
+                normalizeWeights(weights, vertexCount);
+
                 model.primitives.add(new Primitive(
                     direct(positions),
                     direct(normals),
                     direct(uvs),
                     directIndices(indexArray),
                     indexArray.length,
-                    textureId));            }
+                    textureId,
+                    vertexCount,
+                    positions.clone(),
+                    joints,
+                    weights));
+            }
         }
 
         if (model.primitives.isEmpty()) throw new IllegalStateException("no triangle primitives");
+        model.skin = parseSkin(gltf, bin);
         model.bounds[0] = minX;
         model.bounds[1] = minY;
         model.bounds[2] = minZ;
@@ -392,6 +420,303 @@ final class VrmModel {
         buffer.put(values);
         buffer.position(0);
         return buffer;
+    }
+
+    /**
+     * Skeleton needed to pose the avatar: the node graph, the skin's joint order with its
+     * inverse bind matrices, and the humanoid bone names VRM guarantees.
+     */
+    private static final class SkinData {
+        final int nodeCount;
+        final int[] parent;
+        final int[] order;
+        final float[][] localT;
+        final float[][] localR;
+        final float[][] localS;
+        final int[] jointNodes;
+        final float[] inverseBind;
+        final int[] slotOfNode;
+        final java.util.Map<String, Integer> boneNode;
+
+        SkinData(int nodeCount, int[] parent, int[] order, float[][] localT, float[][] localR, float[][] localS,
+                 int[] jointNodes, float[] inverseBind, int[] slotOfNode, java.util.Map<String, Integer> boneNode) {
+            this.nodeCount = nodeCount;
+            this.parent = parent;
+            this.order = order;
+            this.localT = localT;
+            this.localR = localR;
+            this.localS = localS;
+            this.jointNodes = jointNodes;
+            this.inverseBind = inverseBind;
+            this.slotOfNode = slotOfNode;
+            this.boneNode = boneNode;
+        }
+    }
+
+    private static SkinData parseSkin(JSONObject gltf, ByteBuffer bin) throws JSONException {
+        JSONArray skins = gltf.optJSONArray("skins");
+        if (skins == null || skins.length() == 0) return null;
+        JSONObject skin = skins.getJSONObject(0);
+        JSONArray jointNodesJson = skin.getJSONArray("joints");
+        int jointCount = jointNodesJson.length();
+        int[] jointNodes = new int[jointCount];
+        for (int index = 0; index < jointCount; index += 1) jointNodes[index] = jointNodesJson.getInt(index);
+
+        float[] inverseBind = new float[jointCount * 16];
+        if (skin.has("inverseBindMatrices")) {
+            float[] raw = readFloats(gltf, bin, skin.getInt("inverseBindMatrices"), 16);
+            System.arraycopy(raw, 0, inverseBind, 0, Math.min(raw.length, inverseBind.length));
+        } else {
+            for (int joint = 0; joint < jointCount; joint += 1) {
+                inverseBind[joint * 16] = 1f;
+                inverseBind[joint * 16 + 5] = 1f;
+                inverseBind[joint * 16 + 10] = 1f;
+                inverseBind[joint * 16 + 15] = 1f;
+            }
+        }
+
+        JSONArray nodes = gltf.getJSONArray("nodes");
+        int nodeCount = nodes.length();
+        float[][] localT = new float[nodeCount][3];
+        float[][] localR = new float[nodeCount][4];
+        float[][] localS = new float[nodeCount][3];
+        int[] parent = new int[nodeCount];
+        java.util.Arrays.fill(parent, -1);
+        java.util.List<java.util.List<Integer>> children = new ArrayList<>();
+        for (int index = 0; index < nodeCount; index += 1) children.add(new ArrayList<>());
+        for (int index = 0; index < nodeCount; index += 1) {
+            JSONObject node = nodes.getJSONObject(index);
+            JSONArray translation = node.optJSONArray("translation");
+            JSONArray rotation = node.optJSONArray("rotation");
+            JSONArray scale = node.optJSONArray("scale");
+            localT[index] = translation == null ? new float[] {0f, 0f, 0f} : new float[] {
+                (float) translation.getDouble(0), (float) translation.getDouble(1), (float) translation.getDouble(2)};
+            localR[index] = rotation == null ? new float[] {0f, 0f, 0f, 1f} : new float[] {
+                (float) rotation.getDouble(0), (float) rotation.getDouble(1),
+                (float) rotation.getDouble(2), (float) rotation.getDouble(3)};
+            localS[index] = scale == null ? new float[] {1f, 1f, 1f} : new float[] {
+                (float) scale.getDouble(0), (float) scale.getDouble(1), (float) scale.getDouble(2)};
+            JSONArray nodeChildren = node.optJSONArray("children");
+            if (nodeChildren != null) {
+                for (int childIndex = 0; childIndex < nodeChildren.length(); childIndex += 1) {
+                    int child = nodeChildren.getInt(childIndex);
+                    parent[child] = index;
+                    children.get(index).add(child);
+                }
+            }
+        }
+
+        // Parents before children, so world matrices can be composed in one pass.
+        int[] order = new int[nodeCount];
+        int cursor = 0;
+        java.util.ArrayDeque<Integer> stack = new java.util.ArrayDeque<>();
+        for (int index = 0; index < nodeCount; index += 1) if (parent[index] < 0) stack.push(index);
+        while (!stack.isEmpty()) {
+            int node = stack.pop();
+            order[cursor++] = node;
+            java.util.List<Integer> kids = children.get(node);
+            for (int index = kids.size() - 1; index >= 0; index -= 1) stack.push(kids.get(index));
+        }
+        for (int index = cursor; index < nodeCount; index += 1) order[index] = index;
+
+        int[] slotOfNode = new int[nodeCount];
+        java.util.Arrays.fill(slotOfNode, -1);
+        for (int slot = 0; slot < jointCount; slot += 1) {
+            int node = jointNodes[slot];
+            if (node >= 0 && node < nodeCount) slotOfNode[node] = slot;
+        }
+
+        java.util.Map<String, Integer> boneNode = new java.util.HashMap<>();
+        JSONObject extensions = gltf.optJSONObject("extensions");
+        JSONObject vrm = extensions == null ? null : extensions.optJSONObject("VRMC_vrm");
+        JSONObject humanoid = vrm == null ? null : vrm.optJSONObject("humanoid");
+        JSONObject humanBones = humanoid == null ? null : humanoid.optJSONObject("humanBones");
+        if (humanBones != null) {
+            java.util.Iterator<String> keys = humanBones.keys();
+            while (keys.hasNext()) {
+                String bone = keys.next();
+                JSONObject entry = humanBones.optJSONObject(bone);
+                if (entry != null && entry.has("node")) boneNode.put(bone, entry.getInt("node"));
+            }
+        }
+        return new SkinData(nodeCount, parent, order, localT, localR, localS, jointNodes, inverseBind, slotOfNode, boneNode);
+    }
+
+    boolean hasSkin() { return skin != null; }
+
+    /**
+     * Re-skins the mesh for a procedural pose. {@code boneRotations} maps VRM humanoid bone
+     * names to an axis-angle rotation in the bone's local space; {@code hipsOffset} is a
+     * translation in bind units applied to the hips bone.
+     */
+    void applyPose(java.util.Map<String, float[]> boneRotations, float[] hipsOffset) {
+        SkinData s = skin;
+        if (s == null) return;
+        int nodeCount = s.nodeCount;
+        float[][] local = new float[nodeCount][16];
+        int hipsNode = s.boneNode.getOrDefault("hips", -1);
+        for (int node = 0; node < nodeCount; node += 1) {
+            float[] rotation = s.localR[node];
+            float qx = rotation[0], qy = rotation[1], qz = rotation[2], qw = rotation[3];
+            float[] extra = boneRotations == null ? null : lookupBone(s, boneRotations, node);
+            if (extra != null) {
+                float ex = extra[0], ey = extra[1], ez = extra[2], ew = extra[3];
+                float nx = ew * qx + ex * qw + ey * qz - ez * qy;
+                float ny = ew * qy - ex * qz + ey * qw + ez * qx;
+                float nz = ew * qz + ex * qy - ey * qx + ez * qw;
+                float nw = ew * qw - ex * qx - ey * qy - ez * qz;
+                qx = nx; qy = ny; qz = nz; qw = nw;
+            }
+            float tx = s.localT[node][0];
+            float ty = s.localT[node][1];
+            float tz = s.localT[node][2];
+            if (node == hipsNode && hipsOffset != null) {
+                tx += hipsOffset[0];
+                ty += hipsOffset[1];
+                tz += hipsOffset[2];
+            }
+            composeTRS(local[node], tx, ty, tz, qx, qy, qz, qw, s.localS[node][0], s.localS[node][1], s.localS[node][2]);
+        }
+
+        float[][] world = new float[nodeCount][16];
+        for (int index = 0; index < nodeCount; index += 1) {
+            int node = s.order[index];
+            int parent = s.parent[node];
+            if (parent < 0) System.arraycopy(local[node], 0, world[node], 0, 16);
+            else android.opengl.Matrix.multiplyMM(world[node], 0, world[parent], 0, local[node], 0);
+        }
+
+        int jointCount = s.jointNodes.length;
+        float[][] joints = new float[jointCount][16];
+        for (int slot = 0; slot < jointCount; slot += 1) {
+            int node = s.jointNodes[slot];
+            if (node < 0 || node >= nodeCount) {
+                android.opengl.Matrix.setIdentityM(joints[slot], 0);
+                continue;
+            }
+            android.opengl.Matrix.multiplyMM(joints[slot], 0, world[node], 0, s.inverseBind, slot * 16);
+        }
+
+        for (Primitive primitive : primitives) {
+            float[] rest = primitive.restPositions;
+            int[] vertexJoints = primitive.joints;
+            float[] vertexWeights = primitive.weights;
+            FloatBuffer out = primitive.positions;
+            for (int vertex = 0; vertex < primitive.vertexCount; vertex += 1) {
+                float px = rest[vertex * 3];
+                float py = rest[vertex * 3 + 1];
+                float pz = rest[vertex * 3 + 2];
+                float sx = 0f, sy = 0f, sz = 0f;
+                for (int influence = 0; influence < 4; influence += 1) {
+                    float weight = vertexWeights[vertex * 4 + influence];
+                    if (weight == 0f) continue;
+                    int slot = vertexJoints[vertex * 4 + influence];
+                    if (slot < 0 || slot >= jointCount) continue;
+                    float[] m = joints[slot];
+                    sx += weight * (m[0] * px + m[4] * py + m[8] * pz + m[12]);
+                    sy += weight * (m[1] * px + m[5] * py + m[9] * pz + m[13]);
+                    sz += weight * (m[2] * px + m[6] * py + m[10] * pz + m[14]);
+                }
+                out.put(vertex * 3, sx);
+                out.put(vertex * 3 + 1, sy);
+                out.put(vertex * 3 + 2, sz);
+            }
+            out.position(0);
+        }
+    }
+
+    private static float[] lookupBone(SkinData skin, java.util.Map<String, float[]> rotations, int node) {
+        for (java.util.Map.Entry<String, float[]> entry : rotations.entrySet()) {
+            Integer target = skin.boneNode.get(entry.getKey());
+            if (target != null && target == node) return entry.getValue();
+        }
+        return null;
+    }
+
+    /** Column-major T*R*S for a unit quaternion. */
+    private static void composeTRS(float[] out, float tx, float ty, float tz,
+                                   float qx, float qy, float qz, float qw,
+                                   float sx, float sy, float sz) {
+        float x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
+        float xx = qx * x2, xy = qx * y2, xz = qx * z2;
+        float yy = qy * y2, yz = qy * z2, zz = qz * z2;
+        float wx = qw * x2, wy = qw * y2, wz = qw * z2;
+        out[0] = (1f - (yy + zz)) * sx;
+        out[1] = (xy + wz) * sx;
+        out[2] = (xz - wy) * sx;
+        out[3] = 0f;
+        out[4] = (xy - wz) * sy;
+        out[5] = (1f - (xx + zz)) * sy;
+        out[6] = (yz + wx) * sy;
+        out[7] = 0f;
+        out[8] = (xz + wy) * sz;
+        out[9] = (yz - wx) * sz;
+        out[10] = (1f - (xx + yy)) * sz;
+        out[11] = 0f;
+        out[12] = tx;
+        out[13] = ty;
+        out[14] = tz;
+        out[15] = 1f;
+    }
+
+    /** Quaternion for an axis-angle rotation, used by the pose tables. */
+    static float[] axisAngle(float x, float y, float z, float degrees) {
+        double radians = Math.toRadians(degrees) * 0.5;
+        double length = Math.sqrt(x * x + y * y + z * z);
+        if (length < 1e-6) return new float[] {0f, 0f, 0f, 1f};
+        float sin = (float) Math.sin(radians);
+        return new float[] {(float) (x / length) * sin, (float) (y / length) * sin, (float) (z / length) * sin, (float) Math.cos(radians)};
+    }
+
+    private static int[] readJoints(JSONObject gltf, ByteBuffer bin, int accessorIndex, int vertexCount) throws JSONException {
+        JSONArray accessors = gltf.getJSONArray("accessors");
+        JSONObject accessor = accessors.getJSONObject(accessorIndex);
+        int bufferViewIndex = accessor.getInt("bufferView");
+        JSONObject view = gltf.getJSONArray("bufferViews").getJSONObject(bufferViewIndex);
+        int start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0);
+        int stride = view.optInt("byteStride", 4);
+        int componentType = accessor.getInt("componentType");
+        int[] out = new int[vertexCount * 4];
+        ByteBuffer slice = bin.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        for (int vertex = 0; vertex < vertexCount; vertex += 1) {
+            slice.position(start + vertex * stride);
+            for (int component = 0; component < 4; component += 1) {
+                out[vertex * 4 + component] = componentType == 5123 ? (slice.getShort() & 0xffff) : (slice.get() & 0xff);
+            }
+        }
+        return out;
+    }
+
+    private static float[] readWeights(JSONObject gltf, ByteBuffer bin, int accessorIndex, int vertexCount) throws JSONException {
+        JSONArray accessors = gltf.getJSONArray("accessors");
+        JSONObject accessor = accessors.getJSONObject(accessorIndex);
+        int componentType = accessor.getInt("componentType");
+        if (componentType == 5126) return readFloats(gltf, bin, accessorIndex, 4);
+        int bufferViewIndex = accessor.getInt("bufferView");
+        JSONObject view = gltf.getJSONArray("bufferViews").getJSONObject(bufferViewIndex);
+        int start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0);
+        int stride = view.optInt("byteStride", 8);
+        float[] out = new float[vertexCount * 4];
+        ByteBuffer slice = bin.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+        for (int vertex = 0; vertex < vertexCount; vertex += 1) {
+            slice.position(start + vertex * stride);
+            for (int component = 0; component < 4; component += 1) {
+                out[vertex * 4 + component] = componentType == 5121 ? (slice.get() & 0xff) / 255f : (slice.getShort() & 0xffff) / 65535f;
+            }
+        }
+        return out;
+    }
+
+    private static void normalizeWeights(float[] weights, int vertexCount) {
+        for (int vertex = 0; vertex < vertexCount; vertex += 1) {
+            float sum = 0f;
+            for (int component = 0; component < 4; component += 1) sum += weights[vertex * 4 + component];
+            if (sum <= 1e-6f) {
+                weights[vertex * 4] = 1f;
+                continue;
+            }
+            for (int component = 0; component < 4; component += 1) weights[vertex * 4 + component] /= sum;
+        }
     }
 
     private static boolean allFinite(float[] values) {
