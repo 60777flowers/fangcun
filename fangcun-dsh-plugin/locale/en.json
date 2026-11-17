@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Fangcun World Panel",
+    "description": "Runs and monitors the local Fangcun Host in a bottom panel: process status, world revision and block count, the startup pairing code, companion chat, and one-click build ticks."
+  }
+}

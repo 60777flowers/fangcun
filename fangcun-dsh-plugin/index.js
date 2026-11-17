@@ -1,0 +1,1003 @@
+/**
+ * Host half of the Fangcun world panel.
+ *
+ * Owns the local Fangcun Host process: probes `GET /api/health`, spawns
+ * `node scripts/run-host.mjs` (cwd `D:/研一上/AR_MC`) only when nothing is
+ * already listening, captures the startup pairing code from its stdout, keeps
+ * it alive (one automatic restart), and terminates the process it started when
+ * this plugin unloads. The state is exposed through the Host Service
+ * `ctx.fangcunHost` and an authenticated Fetch-route surface under
+ * `/api/fangcun-host/*` that the package's Client half calls.
+ */
+import { spawn } from 'node:child_process'
+
+export const name = 'fangcun-dsh-plugin'
+// The route surface is the only Client-facing transport, so the plugin needs the
+// Connection service that owns authenticated exact Fetch routes.
+export const inject = ['connection']
+
+const DEFAULT_PORT = 8765
+const DEFAULT_HOST_URL = `http://127.0.0.1:${DEFAULT_PORT}`
+const DEFAULT_REPO_DIR = 'D:/研一上/AR_MC'
+const HOST_ENTRY = 'scripts/run-host.mjs'
+const API_PREFIX = '/api/fangcun-host'
+
+const HEALTH_TIMEOUT_MS = 1200
+const READ_TIMEOUT_MS = 2500
+const START_HEALTH_TIMEOUT_MS = 25000
+const START_POLL_MS = 300
+const RESTART_DELAY_MS = 1200
+const MAX_RESTARTS = 1
+const FULL_REFRESH_MIN_INTERVAL_MS = 4000
+const KILL_GRACE_MS = 3000
+const MAX_MESSAGES = 8
+const MAX_CHAT_TEXT = 500
+const MAX_COMPANIONS = 12
+const SOCIAL_CACHE_MS = 1500
+const ISLAND_CACHE_MS = 10000
+const ISLAND_PREFLIGHT_TIMEOUT_MS = 2000
+const ISLAND_URL = 'http://127.0.0.1:4173/?mode=host'
+
+const PAIRING_LINE = /pairing code[^:\n]*:\s*([A-Za-z0-9]{4,20})/
+
+const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
+
+/** A failure the route layer maps to an HTTP status. */
+class FangcunError extends Error {
+  constructor(code, message, status = 400) {
+    super(message)
+    this.code = code
+    this.status = status
+  }
+}
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  })
+}
+
+function errorJson(error) {
+  const status = error instanceof FangcunError ? error.status
+    : (typeof error?.status === 'number' ? error.status : 500)
+  return json({
+    ok: false,
+    error: {
+      code: error?.code ?? 'internal_error',
+      message: error?.message ?? String(error),
+    },
+  }, status)
+}
+
+async function readJsonBody(request) {
+  const text = await request.text()
+  if (!text || !text.trim()) return {}
+  let value
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new FangcunError('invalid_json', 'request body is not valid JSON')
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new FangcunError('invalid_body', 'request body must be a JSON object')
+  }
+  return value
+}
+
+/**
+ * The Host Service behind the panel: one owner of the Fangcun Host process and
+ * of the cached world snapshot the Client half renders.
+ */
+class FangcunHostService {
+  #hostUrl
+  #repoDir
+  #port
+  #manualCommand
+
+  #status = 'stopped'
+  #managed = false
+  #pid = null
+  #revision = null
+  #blockCount = null
+  #worldId = null
+  #companionState = null
+  #pairingCode = null
+  #pairingCodeIssuedAtMs = null
+  #lastError = null
+  #healthError = null
+  #spawnFailed = false
+  #restarts = 0
+  #messages = []
+  #checkedAtMs = null
+
+  #child = null
+  #stdoutBuf = ''
+  #stderrTail = ''
+  #restartTimer = null
+  #syncChain = Promise.resolve()
+  #lastFullRefreshAt = 0
+  #disposing = false
+  #socialCache = { key: null, at: 0, value: null }
+  #islandCache = { at: 0, value: null }
+
+  constructor({ hostUrl = DEFAULT_HOST_URL, repoDir = DEFAULT_REPO_DIR, port = DEFAULT_PORT } = {}) {
+    this.#hostUrl = hostUrl
+    this.#repoDir = repoDir
+    this.#port = port
+    this.#manualCommand = `cd "${repoDir}" then run: node ${HOST_ENTRY}`
+  }
+
+  get hostUrl() { return this.#hostUrl }
+  get repoDir() { return this.#repoDir }
+
+  /** Immutable view of everything the panel shows. */
+  snapshot() {
+    return {
+      status: this.#status,
+      managed: this.#managed,
+      pid: this.#pid,
+      revision: this.#revision,
+      blockCount: this.#blockCount,
+      worldId: this.#worldId,
+      companionState: this.#companionState,
+      pairingCode: this.#pairingCode,
+      pairingCodeIssuedAtMs: this.#pairingCodeIssuedAtMs,
+      hostUrl: this.#hostUrl,
+      port: this.#port,
+      repoDir: this.#repoDir,
+      manualCommand: this.#manualCommand,
+      restarts: this.#restarts,
+      maxRestarts: MAX_RESTARTS,
+      spawnFailed: this.#spawnFailed,
+      lastError: this.#lastError,
+      healthError: this.#healthError,
+      stderrTail: this.#stderrTail || null,
+      messages: this.#messages.slice(-MAX_MESSAGES),
+      checkedAtMs: this.#checkedAtMs,
+    }
+  }
+
+  /** Activation path: adopt an already-listening Host, otherwise start one. */
+  async bootstrap() {
+    const health = await this.#probe()
+    if (health.ok) {
+      this.#applyHealth(health)
+      await this.refresh({ full: true }).catch(() => this.snapshot())
+      return this.snapshot()
+    }
+    return this.start()
+  }
+
+  /** Probe the Host and (optionally) refresh world + chat. */
+  refresh({ full = true } = {}) {
+    const run = () => this.#syncOnce(full)
+    const next = this.#syncChain.then(run, run)
+    this.#syncChain = next.then(() => undefined, () => undefined)
+    return next
+  }
+
+  /** Start the Host unless one is already listening; never spawns a duplicate. */
+  async start() {
+    if (this.#child) {
+      await this.#waitHealthy(1500)
+      return this.snapshot()
+    }
+    const health = await this.#probe()
+    if (health.ok) {
+      this.#managed = false
+      this.#spawnFailed = false
+      this.#applyHealth(health)
+      await this.refresh({ full: true }).catch(() => this.snapshot())
+      return this.snapshot()
+    }
+    this.#restarts = 0
+    this.#spawnHost()
+    return this.snapshot()
+  }
+
+  /** One companion chat turn through the Host's local core API. */
+  async chat(rawText, companionId) {
+    const text = typeof rawText === 'string' ? rawText.trim() : ''
+    if (!text) throw new FangcunError('invalid_chat_text', 'chat text must not be empty')
+    if (text.length > MAX_CHAT_TEXT) {
+      throw new FangcunError('invalid_chat_text', `chat text must be at most ${MAX_CHAT_TEXT} characters`)
+    }
+    await this.#ensureRunning()
+    const target = typeof companionId === 'string' && companionId ? companionId : null
+    const body = target === null
+      ? await this.#requestJson('POST', '/api/core/chat', { text })
+      : await this.#requestJson('POST', '/api/core/chat', { companionId: target, text })
+    this.#applyWorld(body?.state?.world)
+    this.#socialCache.at = 0
+    const transcript = await this.#readChatFor(target).catch(() => null)
+    if (transcript?.available) this.#messages = transcript.messages.slice(-MAX_MESSAGES)
+    else await this.#readChat().catch(() => {})
+    return {
+      reply: typeof body?.reply === 'string' ? body.reply : '',
+      companionId: target,
+      messages: this.#messages.slice(-MAX_MESSAGES),
+      snapshot: this.snapshot(),
+    }
+  }
+
+  /** One companion build tick. */
+  async tick() {
+    await this.#ensureRunning()
+    const body = await this.#requestJson('POST', '/api/core/companion/tick')
+    this.#applyWorld(body?.world)
+    this.#socialCache.at = 0
+    await this.#readChat().catch(() => {})
+    return { result: body?.result ?? null, snapshot: this.snapshot() }
+  }
+
+  /**
+   * The social messenger payload: every companion (with its latest say), the
+   * user's inventory, the selected companion's transcript, and the host status.
+   * Missing Companion/Inventory endpoints degrade to `available: false` plus a
+   * single-companion fallback built from `/api/core/state` + `/api/core/pet`, so
+   * the panel stays usable while the Host side lands those endpoints.
+   */
+  async social({ companionId = null, force = false } = {}) {
+    await this.#ensureRunning()
+    if (this.#status !== 'running') {
+      throw new FangcunError('host_not_running', this.#healthError ?? 'Fangcun Host is not reachable', 503)
+    }
+    const selected = typeof companionId === 'string' && companionId ? companionId : null
+    const cacheKey = selected ?? ''
+    const now = Date.now()
+    if (!force && this.#socialCache.key === cacheKey && now - this.#socialCache.at < SOCIAL_CACHE_MS) {
+      return this.#socialCache.value
+    }
+
+    const snapshot = await this.refresh({ full: false })
+    const [stateResult, petResult, companionsResult, inventoryResult, itemsResult] = await Promise.all([
+      this.#hostGet('/api/core/state'),
+      this.#hostGet('/api/core/pet'),
+      this.#hostGet('/api/core/companions'),
+      this.#hostGet('/api/core/inventory'),
+      this.#hostGet('/api/core/items'),
+    ])
+
+    const state = stateResult.ok ? stateResult.payload : null
+    const ownerUserId = typeof state?.ownerUserId === 'string' ? state.ownerUserId : null
+    const pet = petResult.ok ? petResult.payload : null
+    const companionsAvailable = companionsResult.ok
+    const inventoryAvailable = inventoryResult.ok
+    // Display text for items lives only in the Host's catalog (never on the
+    // inventory wire): inventory rows carry ids + counts, companion bags ids.
+    const catalog = new Map()
+    for (const entry of this.#itemsFrom(itemsResult.ok ? itemsResult.payload : null)) {
+      catalog.set(entry.itemId, entry)
+    }
+    const resolveItem = (raw) => {
+      const item = normalizeItem(raw)
+      if (!item) return null
+      const known = catalog.get(item.itemId)
+      return {
+        itemId: item.itemId,
+        name: known?.name ?? item.name,
+        icon: item.icon ?? known?.icon ?? null,
+        description: item.description ?? known?.description ?? null,
+        count: item.count,
+      }
+    }
+    const inventory = inventoryAvailable
+      ? this.#itemsFrom(inventoryResult.payload).map(resolveItem).filter(Boolean)
+      : []
+
+    let companions = []
+    if (companionsAvailable) {
+      const rawList = Array.isArray(companionsResult.payload)
+        ? companionsResult.payload
+        : (Array.isArray(companionsResult.payload?.companions) ? companionsResult.payload.companions : [])
+      companions = rawList
+        .slice(0, MAX_COMPANIONS)
+        .map((raw) => normalizeCompanion(raw))
+        .filter(Boolean)
+        .map((companion) => ({
+          ...companion,
+          isMine: ownerUserId === null ? companion.isMine : companion.ownerUserId === ownerUserId,
+          activeAction: companion.activeAction ?? (companion.isMine ? pet?.activeAction ?? null : null),
+          personaId: companion.personaId ?? (companion.isMine ? pet?.personaId ?? null : null),
+          avatarModelId: companion.avatarModelId ?? (companion.isMine ? pet?.personaId ?? null : null),
+          items: companion.items.map(resolveItem).filter(Boolean),
+        }))
+    } else if (state?.companion && typeof state.companion === 'object') {
+      // Single-companion fallback for a Host that predates the companions API.
+      const raw = state.companion
+      const fallback = normalizeCompanion({
+        ...raw,
+        name: pet?.name ?? raw.name,
+        personaId: pet?.personaId ?? raw.personaId,
+        activeAction: pet?.activeAction ?? null,
+        items: [],
+        isMine: true,
+      })
+      if (fallback) {
+        fallback.isMine = ownerUserId === null ? true : fallback.ownerUserId === ownerUserId
+        companions = [fallback]
+      }
+    }
+
+    const effectiveSelected = selected && companions.some((c) => c.companionId === selected)
+      ? selected
+      : companions[0]?.companionId ?? null
+
+    // With the companions API the transcript is per companion; without it the
+    // Host only has the single global chat log, so read that instead of asking
+    // for an id-scoped chat the Host would answer with 404.
+    let transcript
+    if (effectiveSelected === null) {
+      transcript = { available: false, companionId: null, messages: [], reason: 'no_companion' }
+    } else if (companionsAvailable) {
+      transcript = await this.#readChatFor(effectiveSelected)
+        .catch(() => ({ available: false, companionId: effectiveSelected, messages: [], reason: 'chat_unavailable' }))
+    } else {
+      transcript = await this.#readChatFor(null)
+        .catch(() => ({ available: false, companionId: null, messages: [], reason: 'chat_unavailable' }))
+      transcript = { ...transcript, companionId: effectiveSelected }
+    }
+
+    const lastMessages = new Map()
+    await Promise.all(companions.map(async (companion) => {
+      if (companion.companionId === effectiveSelected && transcript.available) {
+        lastMessages.set(companion.companionId, transcript.messages.at(-1) ?? null)
+        return
+      }
+      if (!companionsAvailable) {
+        // Legacy mode: every row shares the one global log.
+        lastMessages.set(companion.companionId, transcript.available ? (transcript.messages.at(-1) ?? null) : null)
+        return
+      }
+      const chat = await this.#readChatFor(companion.companionId).catch(() => null)
+      lastMessages.set(companion.companionId, chat?.available ? (chat.messages.at(-1) ?? null) : null)
+    }))
+
+    const value = {
+      ok: true,
+      host: snapshot,
+      available: companionsAvailable,
+      inventoryAvailable,
+      reason: companionsAvailable ? null : (companionsResult.error ?? 'companions_unavailable'),
+      legacyChat: !companionsAvailable,
+      pet: pet && typeof pet === 'object'
+        ? {
+            name: typeof pet.name === 'string' ? pet.name : null,
+            personaId: typeof pet.personaId === 'string' ? pet.personaId : null,
+            scale: typeof pet.scale === 'number' ? pet.scale : null,
+            activeAction: typeof pet.activeAction === 'string' ? pet.activeAction : null,
+            actions: Array.isArray(pet.actions) ? pet.actions : [],
+          }
+        : null,
+      companions: companions.map((companion) => ({
+        ...companion,
+        lastMessage: lastMessages.get(companion.companionId) ?? null,
+      })),
+      inventory,
+      selectedCompanionId: effectiveSelected,
+      transcript: {
+        available: transcript.available,
+        companionId: transcript.companionId ?? effectiveSelected,
+        messages: transcript.messages.slice(-MAX_MESSAGES),
+        reason: transcript.reason ?? null,
+      },
+      fetchedAtMs: now,
+    }
+    this.#socialCache = { key: cacheKey, at: now, value }
+    return value
+  }
+
+  /** Give one owned item to one companion the user owns. */
+  async give(companionId, itemId) {
+    if (typeof companionId !== 'string' || !companionId) {
+      throw new FangcunError('invalid_companion', 'companionId is required')
+    }
+    if (typeof itemId !== 'string' || !itemId) {
+      throw new FangcunError('invalid_item', 'itemId is required')
+    }
+    await this.#ensureRunning()
+    const result = await this.#hostPost('/api/core/inventory/give', { companionId, itemId })
+    if (result.ok) {
+      this.#socialCache.at = 0
+      return { companionId, itemId }
+    }
+    const code = typeof result.error === 'string' && result.error ? result.error : 'give_failed'
+    // A missing endpoint answers generic 404 `not_found`; any other 4xx is the
+    // Host's real refusal and is forwarded with its code and status.
+    if (result.status === 404 && code === 'not_found') {
+      throw new FangcunError('social_unavailable', 'Host does not expose /api/core/inventory/give yet', 503)
+    }
+    const messages = {
+      companion_inventory_full: 'companion inventory is full',
+      item_not_owned: 'item is not in the user inventory',
+      unknown_item: 'unknown item id',
+      companion_not_found: 'unknown companion',
+      not_owner: 'companion belongs to another user',
+      invalid_companion: 'unknown companion',
+      invalid_item: 'unknown item',
+      invalid_give_request: 'malformed give request',
+    }
+    const status = result.status >= 400 && result.status < 500 ? result.status : 409
+    throw new FangcunError(code, messages[code] ?? code, status)
+  }
+
+  /** Preflight the island console so the panel can decide before framing it. */
+  async island() {
+    const now = Date.now()
+    if (now - this.#islandCache.at < ISLAND_CACHE_MS && this.#islandCache.value) {
+      return this.#islandCache.value
+    }
+    let value
+    try {
+      const response = await fetch(ISLAND_URL, {
+        method: 'GET',
+        signal: AbortSignal.timeout(ISLAND_PREFLIGHT_TIMEOUT_MS),
+        cache: 'no-store',
+      })
+      const headers = response.headers
+      const xfo = headers.get('x-frame-options')
+      const csp = headers.get('content-security-policy') ?? ''
+      const frameAncestors = /frame-ancestors([^;]*)/i.exec(csp)?.[1]?.trim() ?? null
+      const blockedByXfo = xfo !== null && !/^allowall$/i.test(xfo.trim())
+      const blockedByCsp = frameAncestors !== null && !/(\*|127\.0\.0\.1|localhost)/i.test(frameAncestors)
+      const reasons = []
+      if (!response.ok) reasons.push(`console answered HTTP ${response.status}`)
+      if (blockedByXfo) reasons.push(`x-frame-options: ${xfo}`)
+      if (blockedByCsp) reasons.push(`frame-ancestors: ${frameAncestors}`)
+      value = {
+        ok: true,
+        url: ISLAND_URL,
+        reachable: response.ok,
+        status: response.status,
+        contentType: headers.get('content-type'),
+        embeddable: response.ok && !blockedByXfo && !blockedByCsp,
+        reasons,
+        checkedAtMs: now,
+      }
+    } catch (error) {
+      value = {
+        ok: true,
+        url: ISLAND_URL,
+        reachable: false,
+        status: 0,
+        contentType: null,
+        embeddable: false,
+        reasons: [error?.name === 'TimeoutError' ? 'console preflight timed out' : (error?.message ?? String(error))],
+        checkedAtMs: now,
+      }
+    }
+    this.#islandCache = { at: now, value }
+    return value
+  }
+
+  /** Terminate the process this plugin started; never touch an external Host. */
+  async dispose() {
+    this.#disposing = true
+    if (this.#restartTimer) {
+      clearTimeout(this.#restartTimer)
+      this.#restartTimer = null
+    }
+    this.#pairingCode = null
+    this.#pairingCodeIssuedAtMs = null
+    const child = this.#child
+    if (!child) {
+      this.#status = 'stopped'
+      return
+    }
+    this.#child = null
+    this.#pid = null
+    const exited = new Promise((resolve) => {
+      let settled = false
+      const done = () => { if (!settled) { settled = true; resolve() } }
+      child.once('exit', done)
+      setTimeout(done, KILL_GRACE_MS)
+    })
+    try {
+      child.kill()
+    } catch {
+      // already gone
+    }
+    await exited
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+    }
+    this.#status = 'stopped'
+  }
+
+  // ---------------------------------------------------------------- internals
+
+  async #syncOnce(full) {
+    const health = await this.#probe()
+    const now = Date.now()
+    if (health.ok) {
+      this.#applyHealth(health)
+      this.#healthError = null
+      if (full && now - this.#lastFullRefreshAt >= FULL_REFRESH_MIN_INTERVAL_MS) {
+        this.#lastFullRefreshAt = now
+        await Promise.all([
+          this.#readCore().catch(() => {}),
+          this.#readChat().catch(() => {}),
+        ])
+      }
+    } else {
+      this.#healthError = health.error
+      if (this.#status === 'running') {
+        this.#status = this.#child ? 'starting' : 'stopped'
+      } else if (this.#child || this.#restartTimer) {
+        // A pending automatic restart is still "starting", not "stopped".
+        this.#status = 'starting'
+      } else {
+        this.#status = 'stopped'
+      }
+    }
+    this.#checkedAtMs = now
+    return this.snapshot()
+  }
+
+  #applyHealth(health) {
+    this.#status = 'running'
+    if (typeof health.rev === 'number') this.#revision = health.rev
+    if (typeof health.worldId === 'string') this.#worldId = health.worldId
+  }
+
+  #applyWorld(world) {
+    if (!world || typeof world !== 'object') return
+    if (typeof world.rev === 'number') this.#revision = world.rev
+    if (typeof world.worldId === 'string') this.#worldId = world.worldId
+    if (Array.isArray(world.blocks)) {
+      let count = 0
+      for (const block of world.blocks) if (block !== null && block !== undefined) count += 1
+      this.#blockCount = count
+    }
+  }
+
+  async #probe() {
+    try {
+      const response = await fetch(`${this.#hostUrl}/api/health`, {
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+        cache: 'no-store',
+      })
+      if (!response.ok) return { ok: false, error: `health endpoint answered HTTP ${response.status}` }
+      const body = await response.json()
+      if (body?.ok !== true) return { ok: false, error: 'health endpoint reported not ok' }
+      return {
+        ok: true,
+        rev: typeof body.rev === 'number' ? body.rev : null,
+        worldId: typeof body.worldId === 'string' ? body.worldId : null,
+      }
+    } catch (error) {
+      const message = error?.name === 'TimeoutError'
+        ? 'health check timed out'
+        : (error?.message ?? String(error))
+      return { ok: false, error: message }
+    }
+  }
+
+  /**
+   * Probe once when the cached status is not `running`, so a panel opened after a
+   * Host restart (or an HMR reload) heals before the first action instead of
+   * reporting a stale stopped state.
+   */
+  async #ensureRunning() {
+    if (this.#status === 'running') return true
+    await this.refresh({ full: false }).catch(() => {})
+    return this.#status === 'running'
+  }
+
+  async #requestJson(method, path, body) {
+    if (this.#status !== 'running') {
+      throw new FangcunError(
+        'host_not_running',
+        this.#healthError ?? 'Fangcun Host is not reachable',
+        503,
+      )
+    }
+    let response
+    try {
+      response = await fetch(`${this.#hostUrl}${path}`, {
+        method,
+        headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+        cache: 'no-store',
+      })
+    } catch (error) {
+      throw new FangcunError('host_unreachable', error?.message ?? String(error), 503)
+    }
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) {
+      const message = payload?.error ? String(payload.error) : `Host answered HTTP ${response.status}`
+      throw new FangcunError('host_rejected', message, response.status === 400 ? 400 : 502)
+    }
+    return payload
+  }
+
+  async #readCore() {
+    const state = await this.#requestJson('GET', '/api/core/state')
+    this.#applyWorld(state?.world)
+    this.#companionState = state?.companion?.state ?? null
+  }
+
+  async #readChat() {
+    const body = await this.#requestJson('GET', '/api/core/chat')
+    const messages = Array.isArray(body?.messages) ? body.messages : []
+    this.#messages = messages
+      .filter((message) => message && typeof message.text === 'string')
+      .slice(-MAX_MESSAGES)
+      .map((message) => ({
+        role: message.role === 'user' ? 'user' : 'companion',
+        text: message.text,
+        atMs: typeof message.atMs === 'number' ? message.atMs : null,
+      }))
+  }
+
+  /**
+   * One optional Host read. Never throws: an endpoint that is not mounted yet
+   * comes back as `{ ok: false, status: 404 }` so the caller can degrade.
+   */
+  async #hostGet(path) {
+    let response
+    try {
+      response = await fetch(`${this.#hostUrl}${path}`, {
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+        cache: 'no-store',
+      })
+    } catch (error) {
+      return { ok: false, status: 0, error: error?.message ?? String(error), payload: null }
+    }
+    let payload = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: typeof payload?.error === 'string' ? payload.error : `http_${response.status}`,
+        payload,
+      }
+    }
+    return { ok: true, status: response.status, payload }
+  }
+
+  /** One optional Host write with the same non-throwing contract as #hostGet. */
+  async #hostPost(path, body) {
+    let response
+    try {
+      response = await fetch(`${this.#hostUrl}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+        cache: 'no-store',
+      })
+    } catch (error) {
+      return { ok: false, status: 0, error: error?.message ?? String(error), payload: null }
+    }
+    let payload = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: typeof payload?.error === 'string' ? payload.error : `http_${response.status}`,
+        payload,
+      }
+    }
+    return { ok: true, status: response.status, payload }
+  }
+
+  /** The transcript of one companion, or of the single shared chat when id-less. */
+  async #readChatFor(companionId) {
+    const query = typeof companionId === 'string' && companionId
+      ? `?companionId=${encodeURIComponent(companionId)}`
+      : ''
+    const result = await this.#hostGet(`/api/core/chat${query}`)
+    if (!result.ok) {
+      return { available: false, companionId: companionId ?? null, messages: [], reason: result.error ?? `http_${result.status}` }
+    }
+    const raw = Array.isArray(result.payload?.messages) ? result.payload.messages : []
+    return {
+      available: true,
+      companionId: companionId ?? null,
+      messages: raw.map(normalizeMessage).filter(Boolean),
+      reason: null,
+    }
+  }
+
+  /** Inventory/catalog rows from either `{ items: [] }` or a bare array. */
+  #itemsFrom(payload) {
+    const raw = Array.isArray(payload) ? payload : (Array.isArray(payload?.items) ? payload.items : [])
+    return raw.map(normalizeItem).filter(Boolean)
+  }
+
+  #spawnHost() {
+    if (this.#disposing) return
+    this.#status = 'starting'
+    this.#managed = true
+    this.#spawnFailed = false
+    this.#lastError = null
+    this.#healthError = null
+    this.#stdoutBuf = ''
+    this.#stderrTail = ''
+    this.#pairingCode = null
+    this.#pairingCodeIssuedAtMs = null
+
+    let child
+    try {
+      child = spawn(process.execPath, [HOST_ENTRY], {
+        cwd: this.#repoDir,
+        env: { ...process.env, PORT: String(this.#port) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    } catch (error) {
+      this.#failSpawn(error)
+      return
+    }
+    this.#child = child
+    this.#pid = typeof child.pid === 'number' ? child.pid : null
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk) => this.#onStdout(String(chunk)))
+    child.stderr?.on('data', (chunk) => this.#onStderr(String(chunk)))
+    child.on('error', (error) => {
+      if (this.#child !== child) return
+      this.#spawnFailed = true
+      this.#lastError = `Host process failed to start: ${error?.message ?? String(error)}. ` +
+        `Start it manually: ${this.#manualCommand}`
+      this.#status = 'stopped'
+      this.#child = null
+      this.#pid = null
+    })
+    child.on('exit', (code, signal) => {
+      if (this.#child !== child) return
+      this.#onExit(code, signal)
+    })
+
+    this.#waitHealthy(START_HEALTH_TIMEOUT_MS)
+  }
+
+  #failSpawn(error) {
+    this.#spawnFailed = true
+    this.#status = 'stopped'
+    this.#managed = false
+    this.#child = null
+    this.#pid = null
+    this.#lastError = `Could not spawn the Fangcun Host: ${error?.message ?? String(error)}. ` +
+      `Start it manually: ${this.#manualCommand}`
+  }
+
+  #onStdout(chunk) {
+    this.#stdoutBuf += chunk
+    const lines = this.#stdoutBuf.split(/\r?\n/)
+    this.#stdoutBuf = lines.pop() ?? ''
+    for (const line of lines) {
+      const match = PAIRING_LINE.exec(line)
+      if (match) {
+        this.#pairingCode = match[1]
+        this.#pairingCodeIssuedAtMs = Date.now()
+      }
+    }
+  }
+
+  #onStderr(chunk) {
+    this.#stderrTail = (this.#stderrTail + chunk).slice(-2000)
+  }
+
+  #onExit(code, signal) {
+    this.#child = null
+    this.#pid = null
+    this.#status = 'stopped'
+    this.#pairingCode = null
+    this.#pairingCodeIssuedAtMs = null
+    if (this.#disposing) return
+    const reason = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`
+    this.#lastError = `Host exited unexpectedly (${reason})`
+    if (this.#restarts < MAX_RESTARTS) {
+      this.#restarts += 1
+      this.#status = 'starting'
+      this.#restartTimer = setTimeout(() => {
+        this.#restartTimer = null
+        if (this.#disposing) return
+        this.#spawnHost()
+      }, RESTART_DELAY_MS)
+      if (typeof this.#restartTimer?.unref === 'function') this.#restartTimer.unref()
+    } else {
+      this.#lastError += `; automatic restart limit (${MAX_RESTARTS}) reached`
+    }
+  }
+
+  async #waitHealthy(timeoutMs) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (this.#disposing) return false
+      const health = await this.#probe()
+      if (health.ok) {
+        this.#applyHealth(health)
+        this.#healthError = null
+        this.#lastFullRefreshAt = Date.now()
+        await Promise.all([
+          this.#readCore().catch(() => {}),
+          this.#readChat().catch(() => {}),
+        ])
+        return true
+      }
+      await delay(START_POLL_MS)
+    }
+    if (this.#child && !this.#disposing) {
+      this.#lastError = this.#lastError
+        ?? `Host did not answer /api/health within ${Math.round(timeoutMs / 1000)}s`
+    }
+    return false
+  }
+}
+
+/**
+ * One chat row in the wire shape the Client renders. The Host may send extra
+ * fields; only these three cross the panel.
+ */
+function normalizeMessage(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.text !== 'string') return null
+  return {
+    role: raw.role === 'user' ? 'user' : 'companion',
+    text: raw.text,
+    atMs: typeof raw.atMs === 'number' ? raw.atMs : null,
+  }
+}
+
+/** An item as the panel shows it; `icon` is a sprite name the Client draws. */
+function normalizeItem(raw) {
+  if (typeof raw === 'string') return { itemId: raw, name: raw, icon: null, description: null, count: 1 }
+  if (!raw || typeof raw !== 'object') return null
+  const itemId = raw.itemId ?? raw.id ?? raw.item_id
+  if (typeof itemId !== 'string' || !itemId) return null
+  const name = raw.name ?? raw.displayName ?? raw.display_name
+  return {
+    itemId,
+    name: typeof name === 'string' && name ? name : itemId,
+    icon: typeof raw.icon === 'string' && raw.icon ? raw.icon : null,
+    description: typeof raw.description === 'string' ? raw.description
+      : (typeof raw.desc === 'string' ? raw.desc : null),
+    count: typeof raw.count === 'number' && raw.count > 0 ? raw.count : 1,
+  }
+}
+
+/**
+ * One companion in the messenger's wire shape. Missing optional fields stay
+ * null so the panel renders placeholders instead of inventing content.
+ */
+function normalizeCompanion(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const companionId = raw.companionId ?? raw.id
+  if (typeof companionId !== 'string' || !companionId) return null
+  const items = Array.isArray(raw.items) ? raw.items.map(normalizeItem).filter(Boolean) : []
+  return {
+    companionId,
+    name: typeof raw.name === 'string' && raw.name ? raw.name : companionId,
+    ownerUserId: typeof raw.ownerUserId === 'string' ? raw.ownerUserId : null,
+    isMine: raw.isMine === true,
+    personality: typeof raw.personality === 'string' && raw.personality ? raw.personality : null,
+    personaId: typeof raw.personaId === 'string' && raw.personaId ? raw.personaId : null,
+    avatarModelId: typeof raw.avatarModelId === 'string' && raw.avatarModelId ? raw.avatarModelId
+      : (typeof raw.avatar?.modelId === 'string' ? raw.avatar.modelId
+        : (typeof raw.personaId === 'string' ? raw.personaId : null)),
+    state: typeof raw.state === 'string' ? raw.state : null,
+    activeAction: typeof raw.activeAction === 'string' ? raw.activeAction : null,
+    items: items.slice(0, 2),
+  }
+}
+
+/** Build the authenticated exact-Fetch routes the Client half calls. */
+function createRoutes(service) {
+  const route = (path, methods, handler) => ({
+    path,
+    methods,
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      try {
+        return await handler(request)
+      } catch (error) {
+        return errorJson(error)
+      }
+    },
+  })
+
+  return [
+    route(`${API_PREFIX}/state`, ['GET'], async (request) => {
+      const full = new URL(request.url).searchParams.get('full') !== '0'
+      const snapshot = await service.refresh({ full })
+      return json({ ok: true, host: snapshot })
+    }),
+    route(`${API_PREFIX}/social`, ['GET'], async (request) => {
+      const params = new URL(request.url).searchParams
+      const companionId = params.get('companionId') ?? undefined
+      const force = params.get('force') === '1'
+      const social = await service.social({ companionId, force })
+      return json(social)
+    }),
+    route(`${API_PREFIX}/chat`, ['POST'], async (request) => {
+      const body = await readJsonBody(request)
+      const companionId = typeof body.companionId === 'string' ? body.companionId : undefined
+      const outcome = await service.chat(body.text, companionId)
+      return json({
+        ok: true,
+        reply: outcome.reply,
+        companionId: outcome.companionId,
+        messages: outcome.messages,
+        host: outcome.snapshot,
+      })
+    }),
+    route(`${API_PREFIX}/give`, ['POST'], async (request) => {
+      const body = await readJsonBody(request)
+      const result = await service.give(body.companionId, body.itemId)
+      return json({ ok: true, companionId: result.companionId, itemId: result.itemId })
+    }),
+    route(`${API_PREFIX}/island`, ['GET'], async () => json(await service.island())),
+    route(`${API_PREFIX}/tick`, ['POST'], async () => {
+      const outcome = await service.tick()
+      return json({ ok: true, result: outcome.result, host: outcome.snapshot })
+    }),
+    route(`${API_PREFIX}/start`, ['POST'], async () => {
+      const snapshot = await service.start()
+      return json({ ok: true, host: snapshot })
+    }),
+  ]
+}
+
+/**
+ * Host plugin entry: provide `ctx.fangcunHost`, register the route surface, and
+ * adopt or start the Fangcun Host process.
+ * @param ctx - owning Cordis context.
+ * @param config - optional `{ hostUrl, repoDir }` overrides.
+ * @returns disposer that stops the process this plugin started.
+ */
+export function apply(ctx, config = {}) {
+  const port = Number.isInteger(config?.port) && config.port > 0 && config.port < 65536 ? config.port : DEFAULT_PORT
+  const hostUrl = typeof config?.hostUrl === 'string' && config.hostUrl
+    ? config.hostUrl
+    : `http://127.0.0.1:${port}`
+  const repoDir = typeof config?.repoDir === 'string' && config.repoDir ? config.repoDir : DEFAULT_REPO_DIR
+  const service = new FangcunHostService({ hostUrl, repoDir, port })
+  const disposers = []
+
+  if (typeof ctx.reflect?.provide === 'function') {
+    try {
+      disposers.push(ctx.reflect.provide('fangcunHost', service))
+    } catch (error) {
+      // A reload racing the previous instance is not fatal: the routes below are
+      // the Client-facing surface and the process ownership still belongs here.
+      ctx.logger?.warn?.(`[fangcun] could not provide ctx.fangcunHost: ${error?.message ?? String(error)}`)
+    }
+  }
+  for (const route of createRoutes(service)) {
+    disposers.push(ctx.connection.fetch.register(route))
+  }
+
+  ctx.logger?.info?.(`[fangcun] panel host plugin active (${hostUrl}, repo ${repoDir})`)
+  service.bootstrap().catch((error) => {
+    ctx.logger?.warn?.(`[fangcun] startup probe failed: ${error?.message ?? String(error)}`)
+  })
+
+  return () => {
+    for (const dispose of disposers.reverse()) {
+      try {
+        const result = typeof dispose === 'function' ? dispose() : undefined
+        if (result && typeof result.then === 'function') result.catch(() => {})
+      } catch {
+        // ignore teardown failures
+      }
+    }
+    service.dispose().catch(() => {})
+  }
+}

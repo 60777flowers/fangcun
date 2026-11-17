@@ -1,0 +1,6 @@
+# Fangcun world panel: one Host row manages the local Fangcun Host process and
+# exposes an authenticated route surface; the package's ./client half draws the
+# bottom panel in the DSH Web UI. Removing this row removes both halves.
+- insert:
+    - id: fangcun-panel
+      name: '@local/fangcun-dsh-plugin'
