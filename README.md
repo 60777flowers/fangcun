@@ -13,6 +13,8 @@
 
 不是投屏，不是 VR，不是把 MC 画面贴到摄像头里 —— 是一个**真正存在于桌面上、有 3 cm 体素尺度、由手机/平板做取景与输入**的 AR 沙盒。
 
+**演示视频**：[B站 · 方寸 AR 桌面微缩世界](https://www.bilibili.com/video/BV11Jsk6dEGd)　｜　**QQ 交流群**：`1136546467`
+
 ---
 
 ## 这是什么
@@ -218,9 +220,20 @@ fangcun/
   [docs/BLOCK-TEXTURES.md](docs/BLOCK-TEXTURES.md) 的映射接口接入。
 - `效果图/`、`docs/model-check-*.png` 等第三方素材**不在 MIT 范围内**，公开发布前需清权或移除。
 
+## 交流、演示与预览
+
+| 渠道 | 链接 |
+|---|---|
+| **演示视频**（B站） | <https://www.bilibili.com/video/BV11Jsk6dEGd> |
+| **QQ 交流群** | 群号 `1136546467`（点击加群：<https://qm.qq.com/q/1136546467>） |
+| **Issues / 讨论** | <https://github.com/60777flowers/fangcun/issues> |
+
+> 想先看效果再动手：视频里从放岛、AI 提议盖房到逐块建造、坐下休息是完整一段；
+> 想自己在电脑上跑，看上面「快速开始」，不需要平板也能用 PC 检视器玩世界和桌宠逻辑。
+
 ## 参与
 
 - 先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 - 提 issue 时说明设备型号、Android/ARCore 版本、复现步骤。
-- 提交前请跑：`npm run build && npm test && npm run test:core-api && npm run test:simulator`。
+- 提交前请跑：`npm run build && npm test && npm run test:browser`。
 - 素材类 PR 请附来源与授权说明；**未授权、来源不明的素材一律不进仓库**。

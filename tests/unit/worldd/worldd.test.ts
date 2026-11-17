@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { validateClientIntent } from "@fangcun/protocol";
 import { createEmptyWorld, getBlock } from "@fangcun/voxel-core";

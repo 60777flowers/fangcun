@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { createEmptyWorld, getBlock } from "../../../packages/voxel-core/src/index.ts";
 import { applyCommit } from "../../../packages/voxel-core/src/replica.ts";

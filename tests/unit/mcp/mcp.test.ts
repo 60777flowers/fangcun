@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { BLOCK_IDS, WORLD_CELL_COUNT, WORLD_SPEC, type BlockId, type Coord } from "@fangcun/world-schema";
 import {

@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { WORLD_SPEC } from "@fangcun/world-schema";
 import { applyTransaction, countBlocks, createEmptyWorld, createSeedWorld, getBlock, worldStateFromObject, worldStateToObject } from "../../../packages/voxel-core/src/index.ts";

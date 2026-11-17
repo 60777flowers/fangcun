@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { canWriteWorld, choosePreferredMode, confirmRelocalization, createInitialTracking, detectCapabilities, mapNativeTimestampToJs, updateTracking, type CapabilityProbe } from "../../../packages/ar-provider/src/index.ts";
 

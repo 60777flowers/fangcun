@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { BLOCK_IDS } from "@fangcun/world-schema";
 import { validateClientIntent, validateCommitMessage } from "../../../packages/protocol/src/index.ts";

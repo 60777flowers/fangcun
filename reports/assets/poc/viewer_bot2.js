@@ -1,4 +1,4 @@
-﻿// Keeps a bot + viewer alive so a browser can attach
+// Keeps a bot + viewer alive so a browser can attach
 const mineflayer = require("mineflayer");
 const { mineflayer: mineflayerViewer } = require("prismarine-viewer");
 

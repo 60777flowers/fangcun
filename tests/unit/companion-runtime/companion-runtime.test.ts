@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { WORLD_SPEC } from "@fangcun/world-schema";
 import { applyTransaction, createEmptyWorld, createSeedWorld, getBlock } from "@fangcun/voxel-core";

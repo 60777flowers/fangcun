@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import protocolSchema from "../../../packages/protocol/schema/protocol-v1.json" with { type: "json" };

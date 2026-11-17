@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { createEmptyWorld, createSeedWorld } from "@fangcun/voxel-core";
 import { buildStarterHomePlan, findHomeCandidates, type HashCanonicalDiff } from "@fangcun/companion-runtime";
