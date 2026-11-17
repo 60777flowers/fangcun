@@ -35,6 +35,9 @@ final class ArPocView extends GLSurfaceView {
     /** Call on the GL thread after the replica changed. */
     void markWorldDirty() { queueEvent(() -> renderer.markWorldDirty()); }
 
+    /** Updates the placeholder companion's visible behaviour. */
+    void setCompanionState(String state) { queueEvent(() -> renderer.setCompanionState(state)); }
+
     /** Drops the island anchor so the next tap re-anchors (used by the UI button). */
     void resetAnchor() { queueEvent(() -> renderer.releaseAnchorNow()); }
 

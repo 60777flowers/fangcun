@@ -33,8 +33,28 @@ export type ApprovePlanMessage = Readonly<{ protocolVersion: typeof PROTOCOL_VER
 export type PingMessage = Readonly<{ protocolVersion: typeof PROTOCOL_VERSION; type: "ping"; worldId: string; nonce: string }>;
 export type PongMessage = Readonly<{ protocolVersion: typeof PROTOCOL_VERSION; type: "pong"; worldId: string; nonce: string }>;
 export type ApprovalGrantedMessage = Readonly<{ protocolVersion: typeof PROTOCOL_VERSION; type: "approval_granted"; worldId: string; planId: string; approvalId: string; diffHash: string; expiresAt: number }>;
+export type CompanionStateName = "idle" | "observing" | "planning" | "awaiting_approval" | "building" | "cooldown" | "paused";
+
+export type CompanionStateMessage = Readonly<{
+  protocolVersion: typeof PROTOCOL_VERSION;
+  type: "companion_state";
+  worldId: string;
+  companionId: string;
+  state: CompanionStateName;
+  updatedAtMs: number;
+}>;
+
+export type CompanionSayMessage = Readonly<{
+  protocolVersion: typeof PROTOCOL_VERSION;
+  type: "companion_say";
+  worldId: string;
+  companionId: string;
+  text: string;
+  expiresAtMs: number;
+}>;
+
 export type ClientMessage = ClientIntent | HelloMessage | ResyncMessage | ApprovePlanMessage | PingMessage;
-export type ServerMessage = WelcomeMessage | ServerAck | CommitMessage | PongMessage | ApprovalGrantedMessage;
+export type ServerMessage = WelcomeMessage | ServerAck | CommitMessage | PongMessage | ApprovalGrantedMessage | CompanionStateMessage | CompanionSayMessage;
 
 export type CommitMessage = Readonly<{
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -132,6 +152,49 @@ export function validateClientMessage(value: unknown): ValidationResult<ClientMe
   return { ok: false, error: "unsupported_message" };
 }
 
+export function validateCompanionStateMessage(value: unknown): ValidationResult<CompanionStateMessage> {
+  if (!isRecord(value) || value.protocolVersion !== PROTOCOL_VERSION || value.type !== "companion_state") return { ok: false, error: "unsupported_message" };
+  if (!hasExactKeys(value, ["protocolVersion", "type", "worldId", "companionId", "state", "updatedAtMs"])) return { ok: false, error: "invalid_message_shape" };
+  const states: readonly string[] = ["idle", "observing", "planning", "awaiting_approval", "building", "cooldown", "paused"];
+  if (!isNonEmptyString(value.worldId) || !isNonEmptyString(value.companionId)
+    || typeof value.state !== "string" || !states.includes(value.state)
+    || !Number.isSafeInteger(value.updatedAtMs) || (value.updatedAtMs as number) < 0) {
+    return { ok: false, error: "invalid_companion_state" };
+  }
+  return {
+    ok: true,
+    value: Object.freeze({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "companion_state",
+      worldId: value.worldId,
+      companionId: value.companionId,
+      state: value.state as CompanionStateName,
+      updatedAtMs: value.updatedAtMs as number,
+    }),
+  };
+}
+
+export function validateCompanionSayMessage(value: unknown): ValidationResult<CompanionSayMessage> {
+  if (!isRecord(value) || value.protocolVersion !== PROTOCOL_VERSION || value.type !== "companion_say") return { ok: false, error: "unsupported_message" };
+  if (!hasExactKeys(value, ["protocolVersion", "type", "worldId", "companionId", "text", "expiresAtMs"])) return { ok: false, error: "invalid_message_shape" };
+  if (!isNonEmptyString(value.worldId) || !isNonEmptyString(value.companionId)
+    || !isNonEmptyString(value.text, 120)
+    || !Number.isSafeInteger(value.expiresAtMs) || (value.expiresAtMs as number) < 0) {
+    return { ok: false, error: "invalid_companion_say" };
+  }
+  return {
+    ok: true,
+    value: Object.freeze({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "companion_say",
+      worldId: value.worldId,
+      companionId: value.companionId,
+      text: value.text,
+      expiresAtMs: value.expiresAtMs as number,
+    }),
+  };
+}
+
 export function validateServerMessage(value: unknown): ValidationResult<ServerMessage> {
   if (!isRecord(value)) return { ok: false, error: "invalid_message" };
   if (value.type === "ack") return validateServerAck(value);
@@ -139,6 +202,8 @@ export function validateServerMessage(value: unknown): ValidationResult<ServerMe
   if (value.type === "welcome") return validateWelcomeMessage(value);
   if (value.type === "pong") return validateHeartbeat(value, "pong");
   if (value.type === "approval_granted") return validateApprovalGrantedMessage(value);
+  if (value.type === "companion_state") return validateCompanionStateMessage(value);
+  if (value.type === "companion_say") return validateCompanionSayMessage(value);
   return { ok: false, error: "unsupported_message" };
 }
 

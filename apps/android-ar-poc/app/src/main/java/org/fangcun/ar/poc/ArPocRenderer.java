@@ -65,6 +65,16 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private volatile int hintVoxelX = Integer.MIN_VALUE;
     private volatile int hintVoxelZ = Integer.MIN_VALUE;
 
+    private static final float COMPANION_X = 0.14f;
+    private static final float COMPANION_Y = 0.22f;
+    private static final float COMPANION_Z = -0.10f;
+    private final float[] characterModel = new float[16];
+    private final float[] characterMvp = new float[16];
+    private final float[] characterViewA = new float[16];
+    private final float[] characterViewB = new float[16];
+    private CompanionMesh.Mesh companionMesh;
+    private volatile String companionState = "idle";
+
     ArPocRenderer(ArPocActivity activity, AtomicReference<float[]> pendingTap, VoxelWorld world) {
         this.activity = activity;
         this.pendingTap = pendingTap;
@@ -83,6 +93,9 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     /** Called when the replica changed (initial snapshot, commit or resync). */
     void markWorldDirty() { meshDirty = true; }
+
+    /** Drives the idle/building behaviour of the placeholder companion. */
+    void setCompanionState(String state) { companionState = state; }
 
     void releaseAnchorNow() {
         pendingTap.set(null);
@@ -112,6 +125,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             mvpHandle = GLES20.glGetUniformLocation(program, "u_Mvp");
             background = new BackgroundRenderer();
             background.createOnGlThread(activity);
+            companionMesh = CompanionMesh.build();
             glReady = true;
             Session current = session != null ? session : activity.currentSession();
             if (current != null) attachSessionTexture(current);
@@ -180,6 +194,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, modelView, 0);
             if (meshDirty) rebuildMesh();
             drawVoxels();
+            drawCompanion();
             camera.getPose().toMatrix(cameraPose, 0);
             float dcx = cameraPose[12] - modelMatrix[12];
             float dcy = cameraPose[13] - modelMatrix[13];
@@ -370,6 +385,39 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         GLES20.glEnableVertexAttribArray(colorHandle);
         GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, voxelColors);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, voxelVertexCount);
+        GLES20.glDisableVertexAttribArray(positionHandle);
+        GLES20.glDisableVertexAttribArray(colorHandle);
+    }
+
+    /**
+     * Draws the placeholder companion hovering over the island. Idle it bobs slowly while
+     * turning; while building the motion gets faster so the state is visible without UI.
+     */
+    private void drawCompanion() {
+        CompanionMesh.Mesh mesh = companionMesh;
+        if (mesh == null || mesh.vertexCount == 0) return;
+        double seconds = System.currentTimeMillis() / 1000.0;
+        boolean busy = "building".equals(companionState) || "planning".equals(companionState);
+        double bobRate = busy ? 6.0 : 1.6;
+        float bob = (float) (Math.sin(seconds * bobRate) * (busy ? 0.022 : 0.012));
+        float yaw = (float) (Math.sin(seconds * (busy ? 2.4 : 0.6)) * 22.0);
+
+        Matrix.setIdentityM(characterModel, 0);
+        Matrix.translateM(characterModel, 0, COMPANION_X, COMPANION_Y + bob, COMPANION_Z);
+        Matrix.rotateM(characterModel, 0, 180f + yaw, 0f, 1f, 0f);
+        Matrix.multiplyMM(characterViewA, 0, viewMatrix, 0, modelMatrix, 0);
+        Matrix.multiplyMM(characterViewB, 0, characterViewA, 0, characterModel, 0);
+        Matrix.multiplyMM(characterMvp, 0, projectionMatrix, 0, characterViewB, 0);
+
+        GLES20.glUseProgram(program);
+        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, characterMvp, 0);
+        mesh.positions.position(0);
+        GLES20.glEnableVertexAttribArray(positionHandle);
+        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, mesh.positions);
+        mesh.colors.position(0);
+        GLES20.glEnableVertexAttribArray(colorHandle);
+        GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, mesh.colors);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, mesh.vertexCount);
         GLES20.glDisableVertexAttribArray(positionHandle);
         GLES20.glDisableVertexAttribArray(colorHandle);
     }

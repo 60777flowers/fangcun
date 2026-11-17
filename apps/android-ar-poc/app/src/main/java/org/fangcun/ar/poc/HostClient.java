@@ -26,6 +26,10 @@ final class HostClient {
 
         /** Called once a pairing succeeded so the caller can persist the credential. */
         void onPaired(String token, String worldId);
+
+        void onCompanionState(String state);
+
+        void onCompanionSay(String text);
     }
 
     private final String host;
@@ -70,6 +74,9 @@ final class HostClient {
 
     private void openSocket(String token, String targetWorldId) {
         worldId = targetWorldId;
+        // The Host scopes sequence numbers to one live connection, so every socket
+        // starts again at seq 1; carrying the old counter over would cause sequence_gap.
+        seq = 0;
         WebSocketClient client = new WebSocketClient();
         try {
             client.connect(host, port, "/api/ws", new WebSocketClient.Listener() {
@@ -181,6 +188,14 @@ final class HostClient {
             }
             if ("error".equals(type)) {
                 listener.onStatus("Host error: " + message.optString("code", "unknown"));
+                return;
+            }
+            if ("companion_state".equals(type)) {
+                listener.onCompanionState(message.optString("state", "idle"));
+                return;
+            }
+            if ("companion_say".equals(type)) {
+                listener.onCompanionSay(message.optString("text", ""));
             }
         } catch (JSONException error) {
             listener.onStatus("Malformed host message.");

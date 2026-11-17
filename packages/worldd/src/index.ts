@@ -264,6 +264,17 @@ export class WorldAuthority {
   }
 
   /**
+   * Aligns the per-client replay window with a caller that keeps its own counter
+   * (the PC inspector survives Host restarts). Conflict safety still comes from
+   * `baseRev`, so accepting a later sequence cannot replay an applied edit.
+   */
+  adoptClientSequence(clientId: string, seq: number): void {
+    if (!Number.isSafeInteger(seq) || seq < 1) return;
+    this.#lastSeq.set(clientId, seq - 1);
+    this.#decisions.delete(clientId);
+  }
+
+  /**
    * Clears per-client replay state. Sequence numbers are scoped to one live
    * connection, so a reconnecting client starts again at seq 1.
    */

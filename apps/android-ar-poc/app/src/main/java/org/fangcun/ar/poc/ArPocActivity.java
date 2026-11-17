@@ -9,6 +9,7 @@ import android.text.InputFilter;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -49,6 +50,7 @@ public final class ArPocActivity extends Activity {
     private final VoxelWorld world = new VoxelWorld();
     private final ExecutorService hostExecutor = Executors.newSingleThreadExecutor();
     private android.content.SharedPreferences prefs;
+    private TextView bubble;
     private HostClient hostClient;
     private String arStatus = "Starting…";
     private String hostStatus = "Not connected";
@@ -107,6 +109,20 @@ public final class ArPocActivity extends Activity {
         FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(-1, -2);
         barParams.gravity = Gravity.BOTTOM;
         root.addView(bar, barParams);
+
+        // Companion speech bubble, shown above the control bar for a few seconds.
+        bubble = new TextView(this);
+        bubble.setTextColor(0xff10221c);
+        bubble.setTextSize(17);
+        bubble.setGravity(Gravity.CENTER);
+        bubble.setPadding(36, 24, 36, 24);
+        bubble.setBackgroundColor(0xfaf2ffd9);
+        bubble.setVisibility(View.GONE);
+        FrameLayout.LayoutParams bubbleParams = new FrameLayout.LayoutParams(-2, -2);
+        bubbleParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        bubbleParams.bottomMargin = 150;
+        root.addView(bubble, bubbleParams);
+
         setContentView(root);
 
         arView.setOnTouchListener((view, event) -> {
@@ -136,6 +152,14 @@ public final class ArPocActivity extends Activity {
             @Override public void onPaired(String token, String worldId) {
                 prefs.edit().putString("token", token).putString("worldId", worldId).apply();
             }
+
+            @Override public void onCompanionState(String state) {
+                arView.setCompanionState(state);
+            }
+
+            @Override public void onCompanionSay(String text) {
+                showCompanionBubble(text);
+            }
         });
 
         String preset = getIntent().getStringExtra("code");
@@ -151,8 +175,21 @@ public final class ArPocActivity extends Activity {
         renderStatus();
     }
 
-    private void connectToHost() {
-        String code = codeField.getText().toString().trim();
+    private void showCompanionBubble(String text) {
+        if (text == null || text.isEmpty()) return;
+        runOnUiThread(() -> {
+            bubble.setText(text);
+            bubble.setVisibility(View.VISIBLE);
+            bubble.removeCallbacks(hideBubble);
+            bubble.postDelayed(hideBubble, 8000);
+        });
+    }
+
+    private final Runnable hideBubble = () -> {
+        if (bubble != null) bubble.setVisibility(View.GONE);
+    };
+
+    private void connectToHost() {        String code = codeField.getText().toString().trim();
         if (code.isEmpty()) {
             setHostStatus("Enter the pairing code printed by `npm run host`.");
             return;

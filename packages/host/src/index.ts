@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from "node:stream";
 import { BLOCK_IDS, WORLD_SPEC } from "@fangcun/world-schema";
 import { worldStateToObject } from "@fangcun/voxel-core";
-import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type ServerMessage } from "@fangcun/protocol";
+import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type CompanionStateName, type ServerMessage } from "@fangcun/protocol";
 import { WorldAuthority, type CompanionTickDecision } from "@fangcun/worldd";
 import { findHomeCandidates } from "@fangcun/companion-runtime";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
@@ -28,6 +28,15 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 const WORLD_SCHEMA_HASH = `sha256:${createHash("sha256").update(JSON.stringify(WORLD_SPEC)).digest("hex")}`;
 const BLOCK_CATALOG_HASH = `sha256:${createHash("sha256").update(BLOCK_IDS.join(",")).digest("hex")}`;
+
+/** Deterministic placeholder lines; a real DSH/LLM persona replaces these later. */
+const COMPANION_LINES: readonly string[] = Object.freeze([
+  "搭好啦！看看我的新家～",
+  "又垒了一块，离屋顶更近了",
+  "你放的那块刚好给我当台阶",
+  "这块地很舒服，谢谢老板",
+  "再攒点材料，我想开个窗",
+]);
 
 type Session = {
   connection: WsConnection;
@@ -263,9 +272,9 @@ export class FangcunHost {
       const parsed = validateClientIntent(intent);
       if (!parsed.ok) return send(400, { error: parsed.error });
       // The browser keeps its own sequence counter across reloads while the Host's
-      // per-client replay window resets on restart. Conflict safety comes from baseRev,
-      // so the inspector path clears replay state instead of failing on a gap.
-      this.#authority.resetClientSequence(input.clientId);
+      // per-client replay window resets on restart, so align the window instead of
+      // failing the edit. Conflict safety still comes from baseRev.
+      this.#authority.adoptClientSequence(input.clientId, input.seq);
       const decision = this.#authority.handleIntent(parsed.value);
       if (decision.ack.accepted && decision.commit) {
         if (!this.#commitAndBroadcast(decision.commit)) return send(500, { error: "commit_persist_failed" });
@@ -297,26 +306,66 @@ export class FangcunHost {
     };
   }
 
+  #broadcast(message: ServerMessage): void {
+    for (const peer of this.#sessions) {
+      if (!peer.authenticated) continue;
+      this.#send(peer, message);
+    }
+  }
+
+  #setCompanionState(state: CompanionStateName): void {
+    this.#broadcast({
+      protocolVersion: 1,
+      type: "companion_state",
+      worldId: this.#worldId,
+      companionId: this.#companion.companionId,
+      state,
+      updatedAtMs: this.#now(),
+    });
+  }
+
+  #say(text: string): void {
+    this.#broadcast({
+      protocolVersion: 1,
+      type: "companion_say",
+      worldId: this.#worldId,
+      companionId: this.#companion.companionId,
+      text,
+      expiresAtMs: this.#now() + 8000,
+    });
+  }
+
   #commitAndBroadcast(commit: CommitMessage): boolean {
     try {
       this.#store!.commit(this.#authority.snapshot, commit);
     } catch {
       return false;
     }
-    for (const peer of this.#sessions) {
-      if (!peer.authenticated) continue;
-      this.#send(peer, commit);
-      peer.lastAppliedRev = commit.rev;
-    }
+    this.#broadcast(commit);
     return true;
   }
 
   async #runTick(): Promise<{ result: CompanionTickDecision; world: unknown }> {
+    this.#setCompanionState("planning");
     const result = await this.#authority.runCompanionTick({ authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: true });
     this.#lastTick = result;
-    if (result.status === "committed" && result.commit) this.#commitAndBroadcast(result.commit);
+    if (result.status === "committed" && result.commit) {
+      this.#setCompanionState("building");
+      this.#commitAndBroadcast(result.commit);
+      this.#setCompanionState("idle");
+      this.#say(COMPANION_LINES[this.#lineIndex++ % COMPANION_LINES.length]!);
+    } else if (result.status === "home_approval_required") {
+      this.#setCompanionState("awaiting_approval");
+      this.#say("我想住这块地，可以吗？");
+    } else if (result.status === "paused") {
+      this.#setCompanionState("paused");
+    } else {
+      this.#setCompanionState("idle");
+    }
     return { result, world: worldStateToObject(this.#authority.snapshot) };
   }
+
+  #lineIndex = 0;
 
   #approveHome(candidateId: unknown): { approved: boolean; body: unknown } {
     const candidate = findHomeCandidates(this.#authority.snapshot)[0];
@@ -344,6 +393,8 @@ export class FangcunHost {
     if (approved && this.#store) {
       this.#store.saveGrant(grant);
       this.#grant = grant;
+      this.#setCompanionState("idle");
+      this.#say("这块地归我啦！");
     }
     return { approved, body: { approved, world: worldStateToObject(this.#authority.snapshot) } };
   }
@@ -399,6 +450,14 @@ export class FangcunHost {
       // Sequence numbers are scoped to one live connection.
       this.#authority.resetClientSequence(message.clientId);
       this.#send(session, this.#welcome());
+      this.#send(session, {
+        protocolVersion: 1,
+        type: "companion_state",
+        worldId: this.#worldId,
+        companionId: this.#companion.companionId,
+        state: this.#grant ? "idle" : "observing",
+        updatedAtMs: this.#now(),
+      });
       return;
     }
 

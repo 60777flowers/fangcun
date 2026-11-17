@@ -134,8 +134,10 @@ test("host pairs a client, accepts an intent over WebSocket and broadcasts the c
     try {
       first.send(JSON.stringify({ protocolVersion: 1, type: "hello", worldId: "ws-world", clientId: "tablet-1", credential: pairing.token, lastAppliedRev: 0 }));
       assert.equal((await readFirst()).type, "welcome");
+      assert.equal((await readFirst()).type, "companion_state", "hello also reports the companion state");
       second.send(JSON.stringify({ protocolVersion: 1, type: "hello", worldId: "ws-world", clientId: "inspector", credential: pairing.token, lastAppliedRev: 0 }));
       assert.equal((await readSecond()).type, "welcome");
+      assert.equal((await readSecond()).type, "companion_state", "hello also reports the companion state");
 
       first.send(JSON.stringify({
         protocolVersion: 1, type: "intent", worldId: "ws-world", clientId: "tablet-1",
