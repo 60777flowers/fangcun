@@ -262,6 +262,46 @@ export type HouseBuildPlan = Readonly<{
   centre: Coord;
 }>;
 
+/** The scripted "lazy house" demo: four 2-high corner posts + one seat = 9 blocks. */
+export const LAZY_HOUSE_BLOCK_COUNT = 9;
+
+export type LazyHousePlan = Readonly<{
+  origin: Coord;
+  bounds: Readonly<{ min: Coord; maxExclusive: Coord }>;
+  /** Corner-by-corner: bottom then top planks ×4 corners, then the centre stairs seat. */
+  operations: readonly Extract<IntentOperation, { type: "place" }>[];
+  blockCount: number;
+  seat: Coord;
+}>;
+
+/**
+ * Builds the fixed one-click "懒懒小屋" demo script on an already-validated 3x3
+ * footprint: 8 planks (four corners, two stacked each) then 1 `stairs` seat at the
+ * footprint centre. Pure; runs through the same step-by-step queue as a real plan.
+ */
+export function buildLazyHousePlan(footprint: HouseBuildPlan): LazyHousePlan {
+  const x = footprint.origin.x;
+  const y = footprint.origin.y;
+  const z = footprint.origin.z;
+  const place = (px: number, py: number, pz: number, blockId: BlockId): Extract<IntentOperation, { type: "place" }> =>
+    Object.freeze({ type: "place", at: Object.freeze({ x: px, y: py, z: pz }), blockId });
+  const operations: Array<Extract<IntentOperation, { type: "place" }>> = [];
+  const corners = [[0, 0], [2, 0], [2, 2], [0, 2]] as const;
+  for (const [dx, dz] of corners) {
+    operations.push(place(x + dx, y, z + dz, "planks"));
+    operations.push(place(x + dx, y + 1, z + dz, "planks"));
+  }
+  const seat = Object.freeze({ x: x + 1, y, z: z + 1 });
+  operations.push(place(seat.x, seat.y, seat.z, "stairs"));
+  return Object.freeze({
+    origin: footprint.origin,
+    bounds: footprint.bounds,
+    operations: Object.freeze(operations),
+    blockCount: operations.length,
+    seat,
+  });
+}
+
 /**
  * Deterministic v0 cottage script on a 3x3 footprint anchored at `origin` (defaults
  * to the grant origin). Pure and side-effect free.

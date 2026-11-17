@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { copyFileSync, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { BLOCK_IDS, WORLD_SPEC, type Coord } from "@fangcun/world-schema";
-import { worldStateToObject, type WorldState } from "@fangcun/voxel-core";
+import { createSeedWorld, worldStateToObject, type WorldState } from "@fangcun/voxel-core";
 import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type CompanionActionId, type CompanionStateName, type IntentOperation, type ServerMessage } from "@fangcun/protocol";
 import { WorldAuthority, type CompanionTickDecision } from "@fangcun/worldd";
-import { canBuildHousePlan, findHouseBuildPlan, findHomeCandidates, HOUSE_SEAT_BLOCK_ID, type HomeCandidate, type HouseBuildPlan } from "@fangcun/companion-runtime";
+import { buildLazyHousePlan, canBuildHousePlan, findHouseBuildPlan, findHomeCandidates, HOUSE_SEAT_BLOCK_ID, LAZY_HOUSE_BLOCK_COUNT, type HomeCandidate, type HouseBuildPlan } from "@fangcun/companion-runtime";
 import { isGrantActive, validateHomePlotGrant, type CompanionInstance, type HomePlotGrant } from "@fangcun/companion-schema";
 import { HostStore } from "./persistence.ts";
 import {
@@ -44,6 +45,8 @@ import {
   COMPANION_HOUSE_REJECTED_LINE,
   COMPANION_HOUSE_START_LINE,
   COMPANION_HOUSE_STOPPED_LINE,
+  COMPANION_LAZY_HOUSE_DONE_LINE,
+  COMPANION_LAZY_HOUSE_LINE,
   COMPANION_SAY_MAX_TEXT_LENGTH,
   composeCompanionReply,
   idleLine,
@@ -133,6 +136,15 @@ type BuildQueueState = {
   expectedRev: number;
   /** Cancels the scheduled next step (setTimeout clear, or a no-op for a manual scheduler). */
   timer: (() => void) | null;
+  /** Which flow produced this queue (the PC/DSH panel uses this to show "演示运行中"). */
+  kind: "house" | "lazy-house";
+  /** Optional line spoken exactly once after N committed blocks (lazy-house says it after the 8 posts). */
+  midLine: Readonly<{ afterBlocks: number; text: string }> | null;
+  /** Optional closing line / action (house: done + sit; lazy-house: short line + sit). */
+  finishLine: string | null;
+  finishAction: CompanionActionId | null;
+  /** House places its seat after the plan; lazy-house already has the stairs as its 9th op. */
+  placeSeatAfter: boolean;
 };
 
 type BuildSummary = Readonly<{
@@ -144,7 +156,12 @@ type BuildSummary = Readonly<{
   lastError: string | null;
   seatPlaced: boolean;
   seatError: string | null;
+  /** "lazy-house" while the scripted one-click demo runs (or last ran); null for normal builds. */
+  demo: "lazy-house" | null;
 }>;
+
+/** In-memory marker of the currently running one-click demo (exposed in GET state.demo). */
+type DemoRun = Readonly<{ kind: "lazy-house"; startedAtMs: number }>;
 
 /** Demo-only record of the one-time startup grant migration (in memory for this process). */
 type GrantMigration = Readonly<{
@@ -225,7 +242,7 @@ export class FangcunHost {
   /** Active block-by-block build queue; at most one at a time. */
   #buildQueue: BuildQueueState | null = null;
   #lastBuild: BuildSummary = Object.freeze({
-    inProgress: false, completedBlocks: 0, totalBlocks: 0, intervalMs: 0, lastError: null, seatPlaced: false, seatError: null,
+    inProgress: false, completedBlocks: 0, totalBlocks: 0, intervalMs: 0, lastError: null, seatPlaced: false, seatError: null, demo: null,
   });
   /** Self-driven proposal bookkeeping (in memory; documented as non-persistent). */
   #lastHouseProposalAttemptAtMs: number | null = null;
@@ -234,6 +251,8 @@ export class FangcunHost {
   #demoRelocateGrant: boolean;
   /** The one startup migration this process performed, if any (demo-only visibility). */
   #grantMigration: GrantMigration | null = null;
+  /** Active one-click scripted demo (lazy-house / real-house); null when idle. */
+  #demoRun: DemoRun | null = null;
   #buildIntervalMs: number;
   #buildStepScheduler: (run: () => void, delayMs: number) => () => void;
   #buildIdleWaiters: Array<(summary: BuildSummary) => void> = [];
@@ -573,6 +592,26 @@ export class FangcunHost {
       return send(outcome.status, outcome.body);
     }
 
+    // One-click demo triggers (loopback inspector surface; the DSH panel proxies them as
+    // /api/host/demo/*). No body or an empty JSON object `{}` is accepted.
+    if (request.method === "POST" && (path === "/api/core/demo/lazy-house" || path === "/api/core/demo/real-house" || path === "/api/core/demo/reset-world")) {
+      const contentType = request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase();
+      if (contentType === "application/json") {
+        const body = await this.#readJson(request);
+        if (!body.ok) return send(body.status, { error: body.error });
+        const value = body.value;
+        if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length !== 0) {
+          return send(400, { error: "invalid_demo_request" });
+        }
+      }
+      const outcome = path === "/api/core/demo/lazy-house"
+        ? this.#startLazyHouseDemo()
+        : path === "/api/core/demo/real-house"
+          ? this.#startRealHouseDemo()
+          : this.#resetWorldDemo();
+      return send(outcome.status, outcome.body);
+    }
+
     if (request.method === "GET" && path === "/api/core/chat") {
       const requested = url.searchParams.get("companionId");
       const companionId = requested ?? this.#companion.companionId;
@@ -718,6 +757,8 @@ export class FangcunHost {
       houseProposal: this.#currentHouseProposal(),
       /** Demo-only: one startup grant migration, when FANGCUN_DEMO_RELOCATE_GRANT=1 ran it. */
       grantMigration: this.#grantMigration,
+      /** Demo panel: which scripted demo is running right now (cleared on finish/stop/reset). */
+      demo: Object.freeze({ run: this.#demoRun }),
       build: this.#buildInfo(),
     };
   }
@@ -1288,6 +1329,7 @@ export class FangcunHost {
       lastError: null,
       seatPlaced: false,
       seatError: null,
+      demo: queue.kind === "house" ? null : queue.kind,
     });
   }
 
@@ -1392,22 +1434,175 @@ export class FangcunHost {
     return { status: 200, body: { approved: true, proposalId, planBlockCount: plan.blockCount } };
   }
 
-  /** Starts the one-block-per-interval queue; the HTTP response returns immediately. */
+  /** Starts the one-block-per-interval house queue; the HTTP response returns immediately. */
   #startBuildQueue(plan: HouseBuildPlan, proposalId: string): void {
+    this.#startScriptedBuild({
+      kind: "house",
+      proposalId,
+      ops: plan.operations,
+      seat: plan.seat,
+      placeSeatAfter: true,
+      midLine: null,
+      finishLine: COMPANION_HOUSE_DONE_LINE,
+      finishAction: "sit",
+    });
+  }
+
+  /**
+   * One-click scripted "懒懒小屋" demo: 8 corner-post planks then 1 stairs seat at the
+   * footprint centre, driven through the SAME paced single-block queue as a real plan.
+   * 409s mirror the normal flow: build_in_progress / proposal_pending / grant_missing /
+   * no_safe_plan / plot_not_clear.
+   */
+  #startLazyHouseDemo(): { status: number; body: unknown } {
+    if (this.#buildQueue) return { status: 409, body: { error: "build_in_progress" } };
+    if (this.#currentHouseProposal()) return { status: 409, body: { error: "proposal_pending" } };
+    const grant = this.#activeGrant();
+    if (!grant) return { status: 409, body: { error: "grant_missing" } };
+    if (!grant.allowedBlockIds.includes("planks") || !grant.allowedBlockIds.includes(HOUSE_SEAT_BLOCK_ID)) {
+      return { status: 409, body: { error: "no_safe_plan" } };
+    }
+    const footprint = findHouseBuildPlan(this.#authority.snapshot, grant);
+    if (!footprint) return { status: 409, body: { error: "plot_not_clear" } };
+    const lazyPlan = buildLazyHousePlan(footprint);
+    this.#startScriptedBuild({
+      kind: "lazy-house",
+      proposalId: "demo:lazy-house",
+      ops: lazyPlan.operations,
+      seat: lazyPlan.seat,
+      placeSeatAfter: false, // the stairs block is already the 9th op of the script
+      midLine: { afterBlocks: LAZY_HOUSE_BLOCK_COUNT - 1, text: COMPANION_LAZY_HOUSE_LINE },
+      finishLine: COMPANION_LAZY_HOUSE_DONE_LINE,
+      finishAction: "sit",
+    });
+    this.#demoRun = Object.freeze({ kind: "lazy-house", startedAtMs: this.#now() });
+    return {
+      status: 200,
+      body: Object.freeze({
+        ok: true,
+        demo: "lazy-house",
+        planBlockCount: lazyPlan.blockCount,
+        bounds: lazyPlan.bounds,
+        intervalMs: this.#buildIntervalMs,
+      }),
+    };
+  }
+
+  /**
+   * One-click "认真盖房" demo: behaves exactly like a normal `POST /house/propose` — the
+   * grant-wide 3x3 scan picks the footprint, the proposal frame/state/say are broadcast and
+   * `houseProposal` is exposed. It does NOT auto-approve: the build starts only from the
+   * normal owner decision path (`POST /house/decide {approve:true}`), either from the
+   * tablet's 好呀 button or from the DSH panel's approve control.
+   */
+  #startRealHouseDemo(): { status: number; body: unknown } {
+    if (this.#buildQueue) return { status: 409, body: { error: "build_in_progress" } };
+    const outcome = this.#proposeHouse();
+    if (outcome.status !== 200) return outcome;
+    const proposal = (outcome.body as { proposal: PendingHouseProposal }).proposal;
+    return {
+      status: 200,
+      body: Object.freeze({
+        ok: true,
+        demo: "real-house",
+        proposalId: proposal.proposalId,
+        planBlockCount: proposal.planBlockCount,
+        bounds: proposal.bounds,
+        expiresAtMs: proposal.expiresAtMs,
+        intervalMs: this.#buildIntervalMs,
+      }),
+    };
+  }
+
+  /**
+   * Demo reset: back up the store, then restore the pristine seed island exactly like
+   * scripts/reset-world.mjs (world rev 0 + 196 seed blocks, DELETE FROM commits) while
+   * keeping pets/inventories/grant/flags. The revision goes BACKWARDS, so every open
+   * WebSocket session is closed with 1012 (service restart) and clients reconnect and
+   * re-hello at rev 0 instead of keeping a stale replica. Refused while a build runs and
+   * for an in-memory store (there is no file to back up).
+   */
+  #resetWorldDemo(): { status: number; body: unknown } {
+    if (this.#buildQueue) return { status: 409, body: { error: "build_in_progress" } };
+    const store = this.#store;
+    if (!store) return { status: 503, body: { error: "store_unavailable" } };
+    if (this.#dbPath === ":memory:") return { status: 409, body: { error: "reset_unavailable_in_memory" } };
+    let backupPath: string;
+    try {
+      backupPath = this.#backupStore();
+    } catch {
+      return { status: 500, body: { error: "backup_failed" } };
+    }
+    const blockCount = store.resetWorldToSeed(this.#worldId);
+    if (!this.#authority.resetWorld(createSeedWorld(this.#worldId))) {
+      return { status: 500, body: { error: "reset_failed" } };
+    }
+    this.#clearHouseProposal();
+    this.#lastBuild = Object.freeze({
+      inProgress: false, completedBlocks: 0, totalBlocks: 0, intervalMs: this.#buildIntervalMs,
+      lastError: null, seatPlaced: false, seatError: null, demo: null,
+    });
+    this.#demoRun = null;
+    this.#lastHouseProposalAttemptAtMs = null;
+    this.#houseProposalCooldownUntilMs = 0;
+    this.#lastTick = null;
+    this.#setCompanionState("idle");
+    // Revision went backwards: close every session so tablets re-hello against rev 0.
+    const sessions = [...this.#sessions];
+    this.#sessions.clear();
+    for (const session of sessions) session.connection.close(1012);
+    return {
+      status: 200,
+      body: Object.freeze({ reset: true, rev: 0, blockCount, backupPath }),
+    };
+  }
+
+  /** Copies world.sqlite (+ WAL/SHM) next to the store after a WAL checkpoint. */
+  #backupStore(): string {
+    const store = this.#store;
+    if (!store) throw new Error("store unavailable");
+    store.checkpoint();
+    const stamp = new Date(this.#now()).toISOString().replace(/[:.]/g, "-");
+    let backupPath = `${this.#dbPath}.bak-${stamp}`;
+    for (let suffix = 2; existsSync(backupPath); suffix += 1) backupPath = `${this.#dbPath}.bak-${stamp}-${suffix}`;
+    copyFileSync(this.#dbPath, backupPath);
+    for (const walSuffix of ["-wal", "-shm"]) {
+      const source = `${this.#dbPath}${walSuffix}`;
+      if (existsSync(source)) copyFileSync(source, `${backupPath}${walSuffix}`);
+    }
+    return backupPath;
+  }
+
+  /** Shared scripted build: same per-step validation/commit path for house and demo. */
+  #startScriptedBuild(options: Readonly<{
+    kind: BuildQueueState["kind"];
+    proposalId: string;
+    ops: readonly Extract<IntentOperation, { type: "place" }>[];
+    seat: Coord;
+    placeSeatAfter: boolean;
+    midLine: BuildQueueState["midLine"];
+    finishLine: string | null;
+    finishAction: CompanionActionId | null;
+  }>): void {
     const grant = this.#grant;
     if (!grant) return;
     this.#buildQueue = {
       companionId: this.#companion.companionId,
-      proposalId,
+      proposalId: options.proposalId,
       plotId: grant.plotId,
       grantId: grant.grantId,
       grantRev: grant.grantRev,
-      ops: plan.operations,
-      seat: plan.seat,
+      ops: options.ops,
+      seat: options.seat,
       index: 0,
       completedBlocks: 0,
       expectedRev: this.#authority.snapshot.rev,
       timer: null,
+      kind: options.kind,
+      midLine: options.midLine ? Object.freeze({ ...options.midLine }) : null,
+      finishLine: options.finishLine,
+      finishAction: options.finishAction,
+      placeSeatAfter: options.placeSeatAfter,
     };
     this.#setCompanionState("building");
     this.#say(COMPANION_HOUSE_START_LINE);
@@ -1466,6 +1661,8 @@ export class FangcunHost {
     queue.index += 1;
     queue.completedBlocks += 1;
     queue.expectedRev = decision.world.rev;
+    // Scripted demo: speak the exact line between the 8 corner posts and the seat.
+    if (queue.midLine && queue.completedBlocks === queue.midLine.afterBlocks) this.#say(queue.midLine.text);
     this.#scheduleBuildStep(this.#buildIntervalMs);
   }
 
@@ -1482,39 +1679,44 @@ export class FangcunHost {
       lastError: reason,
       seatPlaced: false,
       seatError: null,
+      demo: queue.kind === "house" ? null : queue.kind,
     });
+    this.#demoRun = null;
     this.#settleBuildIdle();
     this.#setCompanionState("idle");
     this.#say(COMPANION_HOUSE_STOPPED_LINE);
   }
 
   /**
-   * Queue finished: try one last seat placement (best effort), announce the sit
-   * expression, and leave the companion idle at rest.
+   * Queue finished. House flow: try one last seat placement, then idle + done line + sit.
+   * Scripted lazy-house flow: the stairs is already the 9th committed op, then a short
+   * line + `companion_action sit` (reusing the existing expression signal) + idle.
    */
   #finishBuild(queue: BuildQueueState): void {
     this.#dropBuildQueue();
     let seatPlaced = false;
     let seatError: string | null = null;
     const grant = this.#grant;
-    if (grant && !grant.revokedAt && this.#authority.snapshot.rev === queue.expectedRev) {
-      const seatDecision = this.#authority.commitHomeStep({
-        plotId: queue.plotId,
-        companionId: queue.companionId,
-        grantRev: queue.grantRev,
-        baseRev: queue.expectedRev,
-        operation: Object.freeze({ type: "place", at: queue.seat, blockId: HOUSE_SEAT_BLOCK_ID }),
-      }, { authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: this.#trackingReady() });
-      if (seatDecision.accepted && seatDecision.commit) {
-        if (this.#commitAndBroadcast(seatDecision.commit)) seatPlaced = true;
-        else seatError = "commit_persist_failed";
+    if (queue.placeSeatAfter) {
+      if (grant && !grant.revokedAt && this.#authority.snapshot.rev === queue.expectedRev) {
+        const seatDecision = this.#authority.commitHomeStep({
+          plotId: queue.plotId,
+          companionId: queue.companionId,
+          grantRev: queue.grantRev,
+          baseRev: queue.expectedRev,
+          operation: Object.freeze({ type: "place", at: queue.seat, blockId: HOUSE_SEAT_BLOCK_ID }),
+        }, { authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: this.#trackingReady() });
+        if (seatDecision.accepted && seatDecision.commit) {
+          if (this.#commitAndBroadcast(seatDecision.commit)) seatPlaced = true;
+          else seatError = "commit_persist_failed";
+        } else {
+          seatError = seatDecision.reason ?? "seat_rejected";
+        }
+      } else if (!grant || grant.revokedAt) {
+        seatError = "grant_revoked";
       } else {
-        seatError = seatDecision.reason ?? "seat_rejected";
+        seatError = "stale_revision";
       }
-    } else if (!grant || grant.revokedAt) {
-      seatError = "grant_revoked";
-    } else {
-      seatError = "stale_revision";
     }
     this.#lastBuild = Object.freeze({
       inProgress: false,
@@ -1524,14 +1726,23 @@ export class FangcunHost {
       lastError: null,
       seatPlaced,
       seatError,
+      demo: queue.kind === "house" ? null : queue.kind,
     });
+    this.#demoRun = null;
     this.#settleBuildIdle();
     // Do not immediately ask to build another house right after finishing one.
     this.#houseProposalCooldownUntilMs = this.#now() + HOUSE_PROPOSAL_POST_BUILD_COOLDOWN_MS;
-    this.#setCompanionState("idle");
-    this.#say(COMPANION_HOUSE_DONE_LINE);
-    // Reuse the existing companion_action "sit" signal; no new expression frame.
-    this.#broadcastCompanionAction("sit");
+    if (queue.kind === "lazy-house") {
+      // Demo order: closing line → sit expression → idle.
+      if (queue.finishLine) this.#say(queue.finishLine);
+      if (queue.finishAction) this.#broadcastCompanionAction(queue.finishAction);
+      this.#setCompanionState("idle");
+    } else {
+      this.#setCompanionState("idle");
+      if (queue.finishLine) this.#say(queue.finishLine);
+      // Reuse the existing companion_action "sit" signal; no new expression frame.
+      if (queue.finishAction) this.#broadcastCompanionAction(queue.finishAction);
+    }
     const primary = this.#findCompanion(this.#companion.companionId);
     if (primary && primary.activeAction !== "sit") {
       const nextProfiles = this.#replaceIn(primary.companionId, Object.freeze({ ...primary, activeAction: "sit" as const }));

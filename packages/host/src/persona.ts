@@ -78,6 +78,9 @@ export const COMPANION_HOUSE_REJECTED_LINE = "好吧，那我再等等～";
 export const COMPANION_HOUSE_START_LINE = "开工啦！一块一块慢慢来～";
 export const COMPANION_HOUSE_DONE_LINE = "房子盖好啦，我坐这儿陪你～💤";
 export const COMPANION_HOUSE_STOPPED_LINE = "这里好像放不下了，我先停一下。";
+/** Scripted "懒懒小屋" demo lines (the first is the exact line required by the demo spec). */
+export const COMPANION_LAZY_HOUSE_LINE = "房子盖好了，我先坐下休息会";
+export const COMPANION_LAZY_HOUSE_DONE_LINE = "呼——真舒服";
 
 /** FNV-1a display hash: stable across runs and cheap enough for a chat turn. */
 function stableIndex(seed: string, length: number): number {

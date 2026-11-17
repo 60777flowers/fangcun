@@ -43,6 +43,11 @@ const ISLAND_URL = 'http://127.0.0.1:4173/?mode=host'
 /** Local client asset target for an imported companion model (never committed). */
 const MODEL_TARGET_SUBDIR = 'apps/android-ar-poc/app/src/main/assets/models/companion'
 const MODEL_MAX_BYTES = 64 * 1024 * 1024
+/** Pet-settings bounds shared with the Host's validators. */
+const PET_NAME_MAX_LENGTH = 24
+const PET_PERSONALITY_MAX_LENGTH = 60
+const PET_SCALE_MIN = 0.5
+const PET_SCALE_MAX = 3
 // Host decodes the data URL and caps the image at 64 KiB; allow the base64
 // envelope (~87 KiB) plus headroom and let the Host's own validation speak.
 const AVATAR_IMAGE_MAX_CHARS = 200_000
@@ -275,6 +280,10 @@ class FangcunHostService {
     ])
 
     const state = stateResult.ok ? stateResult.payload : null
+    // The console reads revision/block count from this same snapshot: apply the
+    // state payload's world so a reset (or any external change) is visible
+    // immediately instead of waiting for the next full refresh.
+    if (state?.world) this.#applyWorld(state.world)
     const ownerUserId = typeof state?.ownerUserId === 'string' ? state.ownerUserId : null
     const pet = petResult.ok ? petResult.payload : null
     const companionsAvailable = companionsResult.ok
@@ -382,7 +391,13 @@ class FangcunHostService {
             personaId: typeof pet.personaId === 'string' ? pet.personaId : null,
             scale: typeof pet.scale === 'number' ? pet.scale : null,
             activeAction: typeof pet.activeAction === 'string' ? pet.activeAction : null,
-            actions: Array.isArray(pet.actions) ? pet.actions : [],
+            companionId: typeof pet.companionId === 'string' ? pet.companionId : null,
+            actions: Array.isArray(pet.actions)
+              ? pet.actions.filter((action) => action && typeof action.id === 'string').map((action) => ({
+                  id: action.id,
+                  displayName: typeof action.displayName === 'string' ? action.displayName : action.id,
+                }))
+              : [],
           }
         : null,
       companions: companions.map((companion) => ({
@@ -391,6 +406,16 @@ class FangcunHostService {
       })),
       inventory,
       selectedCompanionId: effectiveSelected,
+      // Live companion/build state the console tab renders (house proposal waits
+      // for the owner's decision; the build summary drives the demo progress).
+      live: {
+        companionState: typeof state?.companionState === 'string' ? state.companionState : null,
+        houseProposal: normalizeHouseProposal(state?.houseProposal),
+        build: normalizeBuild(state?.build),
+      },
+      primaryCompanionId: typeof pet?.companionId === 'string' && pet.companionId
+        ? pet.companionId
+        : (typeof state?.companion?.companionId === 'string' ? state.companion.companionId : null),
       transcript: {
         available: transcript.available,
         companionId: transcript.companionId ?? effectiveSelected,
@@ -521,6 +546,185 @@ class FangcunHostService {
       needsRebuild: true,
       command: MODEL_REBUILD_COMMAND,
     }
+  }
+
+  /**
+   * Save the selected companion's pet settings. Name/personality travel on the
+   * companion PATCH (they belong to the profile); scale/action travel on the pet
+   * PATCH (the pet row is primary-companion scoped). Local bounds mirror the
+   * Host's validators so the panel reports the same codes without a round trip.
+   */
+  async updatePetSettings({ companionId, name, personality, scale, action } = {}) {
+    if (typeof companionId !== 'string' || !COMPANION_ID_PATTERN.test(companionId)) {
+      throw new FangcunError('invalid_companion', 'companionId is invalid')
+    }
+    const companionPatch = {}
+    if (name !== undefined) {
+      const trimmed = typeof name === 'string' ? name.trim() : ''
+      if (trimmed.length < 1 || trimmed.length > PET_NAME_MAX_LENGTH) {
+        throw new FangcunError('invalid_pet_name', `name must be 1..${PET_NAME_MAX_LENGTH} characters`)
+      }
+      companionPatch.name = trimmed
+    }
+    if (personality !== undefined) {
+      const trimmed = typeof personality === 'string' ? personality.trim() : ''
+      if (trimmed.length < 1 || trimmed.length > PET_PERSONALITY_MAX_LENGTH) {
+        throw new FangcunError('invalid_pet_personality', `personality must be 1..${PET_PERSONALITY_MAX_LENGTH} characters`)
+      }
+      companionPatch.personality = trimmed
+    }
+    const petPatch = {}
+    if (scale !== undefined) {
+      const value = typeof scale === 'number' ? scale : Number(scale)
+      if (!Number.isFinite(value) || value < PET_SCALE_MIN || value > PET_SCALE_MAX) {
+        throw new FangcunError('invalid_pet_scale', `scale must be between ${PET_SCALE_MIN} and ${PET_SCALE_MAX}`)
+      }
+      petPatch.scale = value
+    }
+    if (action !== undefined) {
+      if (typeof action !== 'string' || !action) {
+        throw new FangcunError('unknown_pet_action', 'action id is required')
+      }
+      petPatch.action = action
+    }
+    if (Object.keys(companionPatch).length === 0 && Object.keys(petPatch).length === 0) {
+      throw new FangcunError('invalid_pet_request', 'nothing to save')
+    }
+    await this.#ensureRunning()
+    const result = {}
+    if (Object.keys(companionPatch).length > 0) {
+      const response = await this.#hostPatch(`/api/core/companions/${encodeURIComponent(companionId)}`, companionPatch)
+      if (!response.ok) {
+        const code = typeof response.error === 'string' && response.error ? response.error : 'companion_patch_failed'
+        const status = response.status >= 400 && response.status < 500 ? response.status : 409
+        throw new FangcunError(code, `companion update refused: ${code}`, status)
+      }
+      result.companion = response.payload ?? null
+    }
+    if (Object.keys(petPatch).length > 0) {
+      const response = await this.#hostPatch('/api/core/pet', petPatch)
+      if (!response.ok) {
+        const code = typeof response.error === 'string' && response.error ? response.error : 'pet_patch_failed'
+        const status = response.status >= 400 && response.status < 500 ? response.status : 409
+        throw new FangcunError(code, `pet update refused: ${code}`, status)
+      }
+      result.pet = response.payload ?? null
+    }
+    this.#socialCache.at = 0
+    return result
+  }
+
+  /**
+   * Start one of the scripted demos. Both endpoints are being added by the
+   * pet-config work: a generic 404 means "not enabled yet" and is reported as
+   * `demo_unavailable` so the panel can say so instead of failing. A refusal
+   * (`build_in_progress`, `grant_missing`, …) keeps the Host's code and status.
+   */
+  async runDemo(flow) {
+    if (flow !== 'lazy-house' && flow !== 'real-house') {
+      throw new FangcunError('invalid_demo', 'unknown demo flow')
+    }
+    await this.#ensureRunning()
+    if (this.#status !== 'running') {
+      throw new FangcunError('host_not_running', this.#healthError ?? 'Fangcun Host is not reachable', 503)
+    }
+    const result = await this.#hostPost(`/api/core/demo/${flow}`, {})
+    if (result.ok) {
+      this.#socialCache.at = 0
+      const payload = result.payload && typeof result.payload === 'object' ? result.payload : {}
+      const state = typeof payload.state === 'string'
+        ? payload.state
+        : (typeof payload.status === 'string' ? payload.status : 'started')
+      const proposalId = typeof payload.proposalId === 'string' ? payload.proposalId : null
+      return {
+        flow,
+        state: flow === 'real-house' && proposalId !== null && state === 'started' ? 'awaiting' : state,
+        jobId: typeof payload.jobId === 'string' ? payload.jobId : null,
+        proposalId,
+        planBlockCount: typeof payload.planBlockCount === 'number' ? payload.planBlockCount : null,
+        message: typeof payload.message === 'string' ? payload.message : null,
+        raw: payload,
+      }
+    }
+    const code = typeof result.error === 'string' && result.error ? result.error : 'demo_failed'
+    if (result.status === 404 && code === 'not_found') {
+      throw new FangcunError('demo_unavailable', `Host does not expose /api/core/demo/${flow} yet`, 503)
+    }
+    const status = result.status >= 400 && result.status < 500 ? result.status : 502
+    throw new FangcunError(code, `${flow} demo refused: ${code}`, status)
+  }
+
+  /**
+   * Reset the world to the seed snapshot through the demo endpoint. This is the
+   * only destructive action the panel exposes, and it is always confirmed twice
+   * in the UI. The Host closes its WebSocket sessions on reset (tablets reconnect
+   * automatically); the returned counts come from a fresh read after the reset.
+   */
+  async resetWorld() {
+    await this.#ensureRunning()
+    if (this.#status !== 'running') {
+      throw new FangcunError('host_not_running', this.#healthError ?? 'Fangcun Host is not reachable', 503)
+    }
+    const result = await this.#hostPost('/api/core/demo/reset-world', {})
+    if (!result.ok) {
+      const code = typeof result.error === 'string' && result.error ? result.error : 'reset_failed'
+      if (result.status === 404 && code === 'not_found') {
+        throw new FangcunError('demo_unavailable', 'Host does not expose /api/core/demo/reset-world yet', 503)
+      }
+      const status = result.status >= 400 && result.status < 500 ? result.status : 502
+      throw new FangcunError(code, `world reset refused: ${code}`, status)
+    }
+    this.#socialCache.at = 0
+    this.#lastFullRefreshAt = 0
+    // A fresh read is authoritative about the post-reset revision/block count.
+    const state = await this.#hostGet('/api/core/state').catch(() => null)
+    const world = state?.ok ? state.payload?.world : null
+    const blocks = Array.isArray(world?.blocks) ? world.blocks : []
+    const blockCount = blocks.reduce((count, block) => (block === null || block === undefined ? count : count + 1), 0)
+    const rev = typeof world?.rev === 'number'
+      ? world.rev
+      : (typeof result.payload?.rev === 'number' ? result.payload.rev : null)
+    if (typeof rev === 'number') this.#revision = rev
+    if (world) this.#blockCount = blockCount
+    return {
+      rev,
+      blockCount: world ? blockCount : null,
+      worldId: typeof world?.worldId === 'string' ? world.worldId : null,
+      raw: result.payload ?? null,
+    }
+  }
+
+  /**
+   * Answer the companion's pending house proposal — the same decision the tablet
+   * sends. Whichever surface answers first wins; the other sees
+   * `proposal_not_found` / `proposal_expired`, which the panel reports as handled.
+   */
+  async decideHouse(proposalId, approve) {
+    if (typeof proposalId !== 'string' || !proposalId) {
+      throw new FangcunError('invalid_house_decision', 'proposalId is required')
+    }
+    if (typeof approve !== 'boolean') {
+      throw new FangcunError('invalid_house_decision', 'approve must be a boolean')
+    }
+    await this.#ensureRunning()
+    if (this.#status !== 'running') {
+      throw new FangcunError('host_not_running', this.#healthError ?? 'Fangcun Host is not reachable', 503)
+    }
+    const result = await this.#hostPost('/api/core/house/decide', { proposalId, approve })
+    if (result.ok) {
+      this.#socialCache.at = 0
+      return {
+        approved: result.payload?.approved === true,
+        proposalId,
+        planBlockCount: typeof result.payload?.planBlockCount === 'number' ? result.payload.planBlockCount : null,
+      }
+    }
+    const code = typeof result.error === 'string' && result.error ? result.error : 'house_decision_failed'
+    if (result.status === 404 && code === 'not_found') {
+      throw new FangcunError('house_unavailable', 'Host does not expose /api/core/house/decide yet', 503)
+    }
+    const status = result.status >= 400 && result.status < 500 ? result.status : 409
+    throw new FangcunError(code, `house decision refused: ${code}`, status)
   }
 
   /** Preflight the island console so the panel can decide before framing it. */
@@ -950,9 +1154,33 @@ class FangcunHostService {
   }
 }
 
+/** A companion-highlighted build area waiting for the owner's decision. */
+function normalizeHouseProposal(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  return {
+    proposalId: typeof raw.proposalId === 'string' ? raw.proposalId : null,
+    companionId: typeof raw.companionId === 'string' ? raw.companionId : null,
+    planBlockCount: typeof raw.planBlockCount === 'number' ? raw.planBlockCount : null,
+    expiresAtMs: typeof raw.expiresAtMs === 'number' ? raw.expiresAtMs : null,
+  }
+}
+
+/** The Host's in-memory build queue summary. */
+function normalizeBuild(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  return {
+    inProgress: raw.inProgress === true,
+    completedBlocks: typeof raw.completedBlocks === 'number' ? raw.completedBlocks : 0,
+    totalBlocks: typeof raw.totalBlocks === 'number' ? raw.totalBlocks : 0,
+    intervalMs: typeof raw.intervalMs === 'number' ? raw.intervalMs : 0,
+    lastError: typeof raw.lastError === 'string' ? raw.lastError : null,
+    seatPlaced: raw.seatPlaced === true,
+  }
+}
+
 /**
- * One chat row in the wire shape the Client renders. The Host may send extra
- * fields; only these three cross the panel.
+ * One companion chat row in the wire shape the Client renders. The Host may send
+ * extra fields; only these three cross the panel.
  */
 function normalizeMessage(raw) {
   if (!raw || typeof raw !== 'object' || typeof raw.text !== 'string') return null
@@ -1088,6 +1316,43 @@ function createRoutes(service) {
       const body = await readJsonBody(request)
       const result = await service.setAvatar(body.companionId, body.avatarImage)
       return json({ ok: true, companionId: result.companionId, companion: result.companion })
+    }),
+    route(`${API_PREFIX}/pet`, ['POST'], async (request) => {
+      const body = await readJsonBody(request)
+      const result = await service.updatePetSettings({
+        companionId: body.companionId,
+        name: body.name,
+        personality: body.personality,
+        scale: body.scale,
+        action: body.action,
+      })
+      return json({ ok: true, ...result })
+    }),
+    route(`${API_PREFIX}/house/decide`, ['POST'], async (request) => {
+      const body = await readJsonBody(request)
+      const result = await service.decideHouse(body.proposalId, body.approve)
+      return json({ ok: true, approved: result.approved, proposalId: result.proposalId, planBlockCount: result.planBlockCount })
+    }),
+    route(`${API_PREFIX}/demo/lazy-house`, ['POST'], async () => {
+      const result = await service.runDemo('lazy-house')
+      return json({ ok: true, flow: result.flow, state: result.state, jobId: result.jobId, message: result.message, demo: result.raw })
+    }),
+    route(`${API_PREFIX}/demo/real-house`, ['POST'], async () => {
+      const result = await service.runDemo('real-house')
+      return json({
+        ok: true,
+        flow: result.flow,
+        state: result.state,
+        jobId: result.jobId,
+        proposalId: result.proposalId,
+        planBlockCount: result.planBlockCount,
+        message: result.message,
+        demo: result.raw,
+      })
+    }),
+    route(`${API_PREFIX}/demo/reset-world`, ['POST'], async () => {
+      const result = await service.resetWorld()
+      return json({ ok: true, rev: result.rev, blockCount: result.blockCount, worldId: result.worldId, reset: result.raw })
     }),
     route(`${API_PREFIX}/model`, ['POST'], async (request) => {
       const params = new URL(request.url).searchParams

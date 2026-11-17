@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { applyTransaction, createSeedWorld, getBlock } from "@fangcun/voxel-core";
 import { COMPANION_ACTION_IDS, validateCompanionActionMessage, validateCompanionBuildProposalMessage } from "@fangcun/protocol";
-import { HOUSE_PLAN_BLOCK_COUNT } from "@fangcun/companion-runtime";
+import { HOUSE_PLAN_BLOCK_COUNT, LAZY_HOUSE_BLOCK_COUNT } from "@fangcun/companion-runtime";
 import { coordToIndex } from "@fangcun/world-schema";
 import { FangcunHost } from "../../../packages/host/src/index.ts";
 import { addItemToCompanion } from "../../../packages/host/src/items.ts";
@@ -1091,6 +1091,7 @@ type BuildSummaryBody = Readonly<{
   lastError: string | null;
   seatPlaced: boolean;
   seatError: string | null;
+  demo: "lazy-house" | null;
 }>;
 type GrantMigrationBody = Readonly<{
   at: number;
@@ -1105,6 +1106,7 @@ type HouseStateBody = Readonly<{
   companionState: string;
   houseProposal: PendingProposalBody | null;
   grantMigration: GrantMigrationBody | null;
+  demo: Readonly<{ run: Readonly<{ kind: "lazy-house"; startedAtMs: number }> | null }>;
   build: BuildSummaryBody;
 }>;
 type CompanionDetailBody = Readonly<{ companionId: string; houseProposal: PendingProposalBody | null }>;
@@ -1517,6 +1519,7 @@ test("an approved house builds one block per commit in floor→walls→roof orde
     if (validatedFrame.ok) {
       assert.equal(validatedFrame.value.proposalId, proposal.proposalId);
       assert.equal(validatedFrame.value.blockCount, HOUSE_PLAN_BLOCK_COUNT);
+      assert.equal(validatedFrame.value.blockCount, 24, "the tablet card must receive blockCount 24, not 0");
       assert.deepEqual(validatedFrame.value.bounds, proposal.bounds);
     }
     const awaiting = await paired.read();
@@ -1943,5 +1946,418 @@ test("self-driven proposing is skipped during a build and waits out the post-bui
     assert.ok(after.houseProposalCooldownUntilMs > 0, "the post-build cooldown was armed");
   } finally {
     await host.stop();
+  }
+});
+
+
+// ------------------------------------------------------------------------------------
+// One-click scripted "lazy house" demo (9 blocks, same paced queue as a real build)
+// ------------------------------------------------------------------------------------
+
+test("lazy-house demo commits the exact 9-block script and finishes sitting", async () => {
+  const pendingSteps: Array<() => void> = [];
+  const host = new FangcunHost({
+    worldId: "lazy-house-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0,
+    buildStepScheduler: (run) => { pendingSteps.push(run); return () => undefined; },
+  });
+  const address = await host.start();
+  let socket: WebSocket | undefined;
+  try {
+    await grantHome(address);
+    const startRev = host.revision;
+    const paired = await pairTablet(host, address);
+    socket = paired.socket;
+    const started = await coreJson<{ ok: boolean; demo: string; planBlockCount: number; bounds: HomeBounds }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(started.status, 200);
+    assert.equal(started.body.ok, true);
+    assert.equal(started.body.demo, "lazy-house");
+    assert.equal(started.body.planBlockCount, LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(started.body.planBlockCount, 9);
+    assert.equal(started.body.bounds.maxExclusive.x - started.body.bounds.min.x, 3);
+    assert.equal(started.body.bounds.maxExclusive.y - started.body.bounds.min.y, 3);
+    assert.equal(started.body.bounds.maxExclusive.z - started.body.bounds.min.z, 3);
+
+    // Pump the scripted queue: 9 block steps + 1 completion step.
+    let pumped = 0;
+    while (pendingSteps.length > 0 && pumped < 50) { pendingSteps.shift()!(); pumped += 1; }
+    assert.equal(pumped, LAZY_HOUSE_BLOCK_COUNT + 1);
+    const summary = await withTimeout(host.waitForBuildIdle(), 2000, "lazy-house completion");
+    assert.equal(summary.demo, "lazy-house");
+    assert.equal(summary.completedBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(summary.totalBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(summary.lastError, null);
+    assert.equal(summary.seatPlaced, false, "the stairs seat is the 9th scripted op, not an extra placement");
+
+    const frames: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < 15; index += 1) frames.push(await paired.read());
+    const building = frames[0]!;
+    assert.equal(building.type, "companion_state");
+    assert.equal(building.state, "building");
+    assert.equal(frames[1]!.type, "companion_say");
+    const planCommits = frames.slice(2, 10) as unknown as Array<{ rev: number; actor: string; operations: PlaceOpBody[] }>;
+    for (const [index, frame] of frames.slice(2, 10).entries()) assert.equal(frame.type, "commit", `frame ${index} is a build commit`);
+    const midSay = frames[10]!;
+    assert.equal(midSay.type, "companion_say");
+    assert.equal(midSay.text, "房子盖好了，我先坐下休息会", "the exact scripted line fires between the 8th block and the seat");
+    assert.equal(frames[11]!.type, "commit");
+    const seatCommit = frames[11] as unknown as { rev: number; operations: PlaceOpBody[] };
+    assert.equal(seatCommit.operations.length, 1);
+    assert.equal(seatCommit.operations[0]!.blockId, "stairs");
+    assert.deepEqual(seatCommit.operations[0]!.at, { x: started.body.bounds.min.x + 1, y: started.body.bounds.min.y, z: started.body.bounds.min.z + 1 });
+    const finishSay = frames[12]!;
+    assert.equal(finishSay.type, "companion_say");
+    assert.match(String(finishSay.text), /真舒服/);
+    const sit = frames[13]!;
+    assert.equal(sit.type, "companion_action");
+    assert.equal(sit.actionId, "sit");
+    const idle = frames[14]!;
+    assert.equal(idle.type, "companion_state");
+    assert.equal(idle.state, "idle");
+
+    assert.equal(planCommits.length, 8, "exactly eight corner-post commits before the seat");
+    const corners = [[0, 0], [2, 0], [2, 2], [0, 2]] as const;
+    const expectedOps: Array<{ type: "place"; at: { x: number; y: number; z: number }; blockId: string }> = [];
+    for (const [dx, dz] of corners) {
+      expectedOps.push({ type: "place", at: { x: started.body.bounds.min.x + dx, y: started.body.bounds.min.y, z: started.body.bounds.min.z + dz }, blockId: "planks" });
+      expectedOps.push({ type: "place", at: { x: started.body.bounds.min.x + dx, y: started.body.bounds.min.y + 1, z: started.body.bounds.min.z + dz }, blockId: "planks" });
+    }
+    planCommits.forEach((commit, index) => {
+      assert.equal(commit.actor, "ai");
+      assert.equal(commit.operations.length, 1, `commit ${index} has exactly one operation`);
+      assert.equal(commit.rev, startRev + index + 1);
+      assert.deepEqual(commit.operations[0], expectedOps[index], `commit ${index} follows corner-by-corner bottom/top order`);
+    });
+    assert.equal(seatCommit.rev, startRev + LAZY_HOUSE_BLOCK_COUNT);
+
+    const finalState = await hostState(address);
+    assert.equal(finalState.build.inProgress, false);
+    assert.equal(finalState.build.demo, "lazy-house");
+    assert.equal(finalState.build.completedBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(finalState.build.totalBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(finalState.build.lastError, null);
+    assert.equal(finalState.world.rev, startRev + LAZY_HOUSE_BLOCK_COUNT);
+    const b = started.body.bounds.min;
+    assert.equal(blockInState(finalState, { x: b.x, y: b.y, z: b.z }), "planks", "first corner bottom");
+    assert.equal(blockInState(finalState, { x: b.x, y: b.y + 1, z: b.z }), "planks", "first corner top");
+    assert.equal(blockInState(finalState, { x: b.x + 2, y: b.y + 1, z: b.z + 2 }), "planks", "opposite corner top");
+    assert.equal(blockInState(finalState, { x: b.x + 1, y: b.y, z: b.z + 1 }), "stairs", "centre stairs seat");
+  } finally {
+    socket?.close();
+    await host.stop();
+  }
+});
+
+test("lazy-house demo refuses without a grant, with a pending proposal, or while busy", async () => {
+  const host = new FangcunHost({ worldId: "lazy-house-refusal-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 25 });
+  const address = await host.start();
+  try {
+    const noGrant = await coreJson<{ error: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(noGrant.status, 409);
+    assert.equal(noGrant.body.error, "grant_missing");
+
+    await grantHome(address);
+    const proposal = await proposeHouse(address);
+    const pending = await coreJson<{ error: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(pending.status, 409);
+    assert.equal(pending.body.error, "proposal_pending");
+    await decideHouse(address, proposal.proposalId, false);
+
+    const started = await coreJson<{ demo: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(started.status, 200);
+    await waitForState(address, (state) => state.build.inProgress && state.build.demo === "lazy-house" && state.build.completedBlocks >= 1, "a running lazy-house demo");
+    const busy = await coreJson<{ error: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(busy.status, 409);
+    assert.equal(busy.body.error, "build_in_progress");
+    const invalidBody = await coreJson<{ error: string }>(address, "/demo/lazy-house", { nope: true }, "POST");
+    assert.equal(invalidBody.status, 400);
+    assert.equal(invalidBody.body.error, "invalid_demo_request");
+    const done = await withTimeout(host.waitForBuildIdle(), 15000, "paced lazy-house completion");
+    assert.equal(done.completedBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    assert.equal(done.demo, "lazy-house");
+    assert.equal(done.seatPlaced, false);
+  } finally {
+    await host.stop();
+  }
+});
+
+test("lazy-house demo stops honestly when a step is rejected", async () => {
+  const host = new FangcunHost({ worldId: "lazy-house-stop-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 25 });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const started = await coreJson<{ demo: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(started.status, 200);
+    await waitForState(address, (state) => state.build.inProgress && state.build.completedBlocks >= 2, "a running lazy-house demo");
+    // Player edit races the queue on purpose: the next step must stop with stale_revision.
+    let accepted = false;
+    let seq = 0;
+    let revBeforeEdit = host.revision;
+    while (!accepted && seq < 20) {
+      seq += 1;
+      revBeforeEdit = host.revision;
+      const edit = await coreJson<{ decision: { ack: { accepted: boolean; reason?: string } } }>(address, "/intent", {
+        clientId: "lazy-house-editor",
+        seq,
+        baseRev: revBeforeEdit,
+        operation: { type: "place", at: { x: 6, y: 1, z: 6 }, blockId: "stone" },
+      });
+      accepted = edit.body.decision.ack.accepted;
+      if (!accepted) assert.equal(edit.body.decision.ack.reason, "stale_revision", "only a racing demo step may reject the edit");
+      else await delay(2);
+    }
+    assert.equal(accepted, true);
+    const stopped = await waitForState(address, (state) => !state.build.inProgress && state.build.lastError !== null, "lazy-house stale stop");
+    assert.equal(stopped.build.lastError, "stale_revision");
+    assert.equal(stopped.build.demo, "lazy-house");
+    assert.ok(stopped.build.completedBlocks < LAZY_HOUSE_BLOCK_COUNT);
+    const summary = await withTimeout(host.waitForBuildIdle(), 5000, "lazy-house stop signal");
+    assert.equal(summary.lastError, "stale_revision");
+    assert.equal(host.revision, revBeforeEdit + 1, "no blocks are committed after the stop");
+  } finally {
+    await host.stop();
+  }
+});
+
+
+// ------------------------------------------------------------------------------------
+// "认真盖房" real-house demo: normal propose (NO auto-approve) then normal decide → build
+// ------------------------------------------------------------------------------------
+
+test("real-house demo only proposes; the normal approval then builds the 24-block plan and stairs seat", async () => {
+  const pendingSteps: Array<() => void> = [];
+  const host = new FangcunHost({
+    worldId: "real-house-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0,
+    buildStepScheduler: (run) => { pendingSteps.push(run); return () => undefined; },
+  });
+  const address = await host.start();
+  let socket: WebSocket | undefined;
+  try {
+    const grantBounds = await grantHome(address);
+    const startRev = host.revision;
+    let paired = await pairTablet(host, address);
+    socket = paired.socket;
+    const started = await coreJson<{ ok: boolean; demo: string; proposalId: string; planBlockCount: number; bounds: HomeBounds; expiresAtMs: number }>(address, "/demo/real-house", {}, "POST");
+    assert.equal(started.status, 200);
+    assert.equal(started.body.ok, true);
+    assert.equal(started.body.demo, "real-house");
+    assert.equal(started.body.planBlockCount, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(started.body.planBlockCount, 24);
+    // The broadcast bounds are the actual plan footprint (3x3x3 half-open), NOT the padded grant AABB.
+    const footprint = started.body.bounds;
+    assert.equal(footprint.maxExclusive.x - footprint.min.x, 3);
+    assert.equal(footprint.maxExclusive.y - footprint.min.y, 3);
+    assert.equal(footprint.maxExclusive.z - footprint.min.z, 3);
+    assert.notDeepEqual(footprint, grantBounds, "the highlight is the plan footprint, not the padded plot AABB");
+    assert.ok(started.body.expiresAtMs - Date.now() > 100000, "the proposal TTL is long enough to see it (~120 s)");
+
+    const proposalFrame = await paired.read();
+    assert.equal(proposalFrame.type, "companion_build_proposal");
+    const validated = validateCompanionBuildProposalMessage(proposalFrame);
+    assert.equal(validated.ok, true);
+    if (validated.ok) {
+      assert.equal(validated.value.blockCount, 24, "the proposal frame carries the real blockCount 24, never 0");
+      assert.deepEqual(validated.value.bounds, footprint, "frame bounds equal the plan footprint");
+      assert.equal(validated.value.proposalId, started.body.proposalId);
+    }
+    assert.equal((await paired.read()).type, "companion_state");
+    assert.equal((await paired.read()).type, "companion_say");
+    // No build may start before the owner's decision.
+    assert.equal(host.revision, startRev, "real-house only asks; nothing is committed yet");
+    const pendingState = await hostState(address);
+    assert.ok(pendingState.houseProposal);
+    assert.deepEqual(pendingState.houseProposal!.bounds, footprint, "state exposes the same bounds for the tablet highlight");
+    assert.equal(pendingState.houseProposal!.planBlockCount, 24);
+
+    // Reconnect: a fresh client must restore the exact same highlight from state.
+    socket.close();
+    paired = await pairTablet(host, address);
+    socket = paired.socket;
+    const reconnectedState = await hostState(address);
+    assert.deepEqual(reconnectedState.houseProposal!.bounds, footprint, "state survives a reconnect with the same bounds");
+    assert.equal(reconnectedState.houseProposal!.planBlockCount, 24);
+    assert.equal(reconnectedState.houseProposal!.proposalId, started.body.proposalId);
+
+    // The normal owner decision path starts the identical 24-block queue and separate seat.
+    const decided = await decideHouse(address, started.body.proposalId, true);
+    assert.equal(decided.status, 200);
+    assert.equal(decided.body.approved, true);
+    assert.equal((await paired.read()).type, "companion_state"); // building
+    assert.equal((await paired.read()).type, "companion_say"); // start line
+    let pumped = 0;
+    while (pendingSteps.length > 0 && pumped < 100) { pendingSteps.shift()!(); pumped += 1; }
+    assert.equal(pumped, HOUSE_PLAN_BLOCK_COUNT + 1);
+    const summary = await withTimeout(host.waitForBuildIdle(), 2000, "approved real-house build completion");
+    assert.equal(summary.completedBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(summary.totalBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(summary.seatPlaced, true, "the separate stairs seat is placed after the plan");
+    assert.equal(summary.lastError, null);
+
+    const frames: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < 28; index += 1) frames.push(await paired.read());
+    const planCommits = frames.slice(0, 24) as unknown as Array<{ rev: number; actor: string; operations: PlaceOpBody[] }>;
+    for (const [index, frame] of frames.slice(0, 24).entries()) assert.equal(frame.type, "commit", `frame ${index} is a plan commit`);
+    planCommits.forEach((commit, index) => {
+      assert.equal(commit.actor, "ai");
+      assert.equal(commit.operations.length, 1);
+      assert.equal(commit.rev, startRev + index + 1);
+    });
+    const seatCommit = frames[24] as unknown as { rev: number; operations: PlaceOpBody[] };
+    assert.equal(seatCommit.rev, startRev + 25);
+    assert.equal(seatCommit.operations.length, 1);
+    assert.equal(seatCommit.operations[0]!.blockId, "stairs");
+    assert.deepEqual(seatCommit.operations[0]!.at, { x: footprint.min.x + 1, y: footprint.min.y + 1, z: footprint.min.z + 1 });
+    assert.equal(frames[25]!.type, "companion_state");
+    assert.equal(frames[25]!.state, "idle");
+    assert.equal(frames[26]!.type, "companion_say");
+    assert.match(String(frames[26]!.text), /房子盖好啦/);
+    assert.equal(frames[27]!.type, "companion_action");
+    assert.equal(frames[27]!.actionId, "sit");
+
+    const finalState = await hostState(address);
+    assert.equal(finalState.world.rev, startRev + HOUSE_PLAN_BLOCK_COUNT + 1);
+    assert.equal(finalState.build.inProgress, false);
+    assert.equal(finalState.build.completedBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(finalState.companionState, "idle");
+    assert.equal(blockInState(finalState, { x: footprint.min.x + 1, y: footprint.min.y + 1, z: footprint.min.z + 1 }), "stairs");
+  } finally {
+    socket?.close();
+    await host.stop();
+  }
+});
+
+test("real-house demo refuses without a grant/while busy and proposes the same footprint each time", async () => {
+  const host = new FangcunHost({ worldId: "real-house-refusal-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 30 });
+  const address = await host.start();
+  try {
+    const noGrant = await coreJson<{ error: string }>(address, "/demo/real-house", {}, "POST");
+    assert.equal(noGrant.status, 409);
+    assert.equal(noGrant.body.error, "grant_missing");
+    await grantHome(address);
+
+    const first = await coreJson<{ proposalId: string; planBlockCount: number; bounds: HomeBounds }>(address, "/demo/real-house", {}, "POST");
+    assert.equal(first.status, 200);
+    assert.equal(first.body.planBlockCount, HOUSE_PLAN_BLOCK_COUNT);
+    await decideHouse(address, first.body.proposalId, false); // reject stays world-neutral
+    assert.equal(host.revision, 0, "a rejected proposal never mutates the world");
+
+    const second = await coreJson<{ proposalId: string; planBlockCount: number; bounds: HomeBounds }>(address, "/demo/real-house", {}, "POST");
+    assert.equal(second.status, 200);
+    assert.deepEqual(second.body.bounds, first.body.bounds, "the scan is deterministic: same footprint on each call");
+    assert.equal(second.body.planBlockCount, 24);
+    assert.notEqual(second.body.proposalId, first.body.proposalId, "each ask is a fresh proposal id");
+    await decideHouse(address, second.body.proposalId, false);
+
+    const lazy = await coreJson<{ demo: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(lazy.status, 200);
+    const busy = await coreJson<{ error: string }>(address, "/demo/real-house", {}, "POST");
+    assert.equal(busy.status, 409);
+    assert.equal(busy.body.error, "build_in_progress");
+    const done = await withTimeout(host.waitForBuildIdle(), 15000, "lazy demo ends before real-house retry");
+    assert.equal(done.demo, "lazy-house");
+  } finally {
+    await host.stop();
+  }
+});
+// ------------------------------------------------------------------------------------
+// Demo reset: pristine seed island, keep pets/inventories/grant, close stale replicas
+// ------------------------------------------------------------------------------------
+
+test("demo reset restores the seed island, keeps pets/grant and closes sessions with 1012", async () => {
+  const db = tempDb();
+  const host = new FangcunHost({ worldId: "demo-reset-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0, dbPath: db.path });
+  const address = await host.start();
+  let socket: WebSocket | undefined;
+  try {
+    await grantHome(address);
+    const proposed = await coreJson<{ proposalId: string }>(address, "/demo/real-house", {}, "POST");
+    assert.equal(proposed.status, 200);
+    const approved = await decideHouse(address, proposed.body.proposalId, true);
+    assert.equal(approved.status, 200);
+    const done = await withTimeout(host.waitForBuildIdle(), 20000, "real-house build before reset");
+    assert.equal(done.completedBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(host.revision, HOUSE_PLAN_BLOCK_COUNT + 1);
+    const petBefore = await coreJson<unknown>(address, "/pet");
+    const inventoryBefore = await coreJson<unknown>(address, "/inventory");
+
+    const code = host.issuePairingCode();
+    const pairResponse = await fetch(`http://${address.host}:${address.port}/api/pair`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code.code, clientId: "reset-tablet-1" }),
+    });
+    const pairing = (await pairResponse.json()) as { token: string };
+    socket = await openSocket(`ws://${address.host}:${address.port}/api/ws`);
+    const read = socketReader(socket);
+    socket.send(JSON.stringify({ protocolVersion: 1, type: "hello", worldId: host.worldId, clientId: "reset-tablet-1", credential: pairing.token, lastAppliedRev: host.revision }));
+    assert.equal((await read()).type, "welcome");
+    assert.equal((await read()).type, "companion_state");
+    const closed = new Promise<number>((resolve) => { socket!.addEventListener("close", (event) => resolve(event.code)); });
+    const reset = await coreJson<{ reset: boolean; rev: number; blockCount: number; backupPath: string }>(address, "/demo/reset-world", {}, "POST");
+    assert.equal(reset.status, 200);
+    assert.equal(reset.body.reset, true);
+    assert.equal(reset.body.rev, 0);
+    assert.equal(reset.body.blockCount, 196);
+    assert.match(reset.body.backupPath, /world\.sqlite\.bak-/);
+    assert.equal(existsSync(reset.body.backupPath), true, "the store file was backed up before resetting");
+    assert.equal(await withTimeout(closed, 5000, "1012 socket close after reset"), 1012, "stale replicas are closed with 1012");
+
+    const after = await hostState(address);
+    assert.equal(after.world.rev, 0);
+    assert.equal(after.world.blocks.filter((block) => block !== null).length, 196);
+    assert.equal(after.homeGrantActive, true, "the plot grant is kept");
+    assert.equal(after.demo.run, null);
+    assert.equal(after.build.inProgress, false);
+    assert.equal(after.companionState, "idle");
+    assert.deepEqual((await coreJson<unknown>(address, "/pet")).body, petBefore.body, "pet settings survive the reset");
+    assert.deepEqual((await coreJson<unknown>(address, "/inventory")).body, inventoryBefore.body, "inventory survives the reset");
+    const raw = new DatabaseSync(db.path);
+    const commitCount = raw.prepare("SELECT COUNT(*) AS count FROM commits").get() as { count: number };
+    const worldRow = raw.prepare("SELECT rev FROM world LIMIT 1").get() as { rev: number };
+    raw.close();
+    assert.equal(commitCount.count, 0, "the commit log is cleared");
+    assert.equal(worldRow.rev, 0);
+
+    // Idempotent: a second reset succeeds and produces a fresh backup.
+    const again = await coreJson<{ reset: boolean; rev: number; blockCount: number; backupPath: string }>(address, "/demo/reset-world", {}, "POST");
+    assert.equal(again.status, 200);
+    assert.equal(again.body.rev, 0);
+    assert.equal(again.body.blockCount, 196);
+    assert.notEqual(again.body.backupPath, reset.body.backupPath);
+    assert.equal(existsSync(again.body.backupPath), true);
+  } finally {
+    socket?.close();
+    await host.stop();
+    db.cleanup();
+  }
+});
+
+test("demo reset is refused while a build is running and for an in-memory store", async () => {
+  const db = tempDb();
+  const host = new FangcunHost({ worldId: "demo-reset-busy-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 60, dbPath: db.path });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const lazy = await coreJson<{ demo: string }>(address, "/demo/lazy-house", {}, "POST");
+    assert.equal(lazy.status, 200);
+    const refused = await coreJson<{ error: string }>(address, "/demo/reset-world", {}, "POST");
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error, "build_in_progress");
+    const done = await withTimeout(host.waitForBuildIdle(), 20000, "lazy demo before allowed reset");
+    assert.equal(done.completedBlocks, LAZY_HOUSE_BLOCK_COUNT);
+    const reset = await coreJson<{ reset: boolean; rev: number; blockCount: number }>(address, "/demo/reset-world", {}, "POST");
+    assert.equal(reset.status, 200);
+    assert.equal(reset.body.rev, 0);
+  } finally {
+    await host.stop();
+    db.cleanup();
+  }
+
+  const memoryHost = new FangcunHost({ worldId: "demo-reset-memory-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, dbPath: ":memory:" });
+  const memoryAddress = await memoryHost.start();
+  try {
+    const refused = await coreJson<{ error: string }>(memoryAddress, "/demo/reset-world", {}, "POST");
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error, "reset_unavailable_in_memory");
+  } finally {
+    await memoryHost.stop();
   }
 });

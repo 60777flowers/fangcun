@@ -22,6 +22,8 @@ test("companion_build_proposal validates and round-trips through the server fram
   assert.equal(validated.ok, true);
   if (!validated.ok) return;
   assert.deepEqual(validated.value, proposal);
+  assert.equal(validated.value.blockCount, 24, "the proposal frame carries a non-zero block count");
+  assert.equal(validated.value.bounds.maxExclusive.x - validated.value.bounds.min.x, 3);
   assert.equal(validateServerMessage(proposal).ok, true, "companion_build_proposal is a server message");
   const encoded = encodeServerMessageFrame(proposal);
   assert.equal(encoded.ok, true);

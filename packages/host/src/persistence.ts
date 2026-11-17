@@ -293,6 +293,30 @@ export class HostStore {
     this.#writeMeta("demoGrantMigrated", "1");
   }
 
+  /**
+   * Demo reset: restores the pristine seed island (rev 0) and clears the commit log while
+   * keeping meta (pets/inventories/flags) and the grant table, exactly like
+   * scripts/reset-world.mjs. Returns the number of seeded (non-empty) blocks.
+   */
+  resetWorldToSeed(worldId: string): number {
+    const seed = createSeedWorld(worldId);
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#writeWorld(seed);
+      this.#db.prepare("DELETE FROM commits").run();
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+    return seed.blocks.filter((block) => block !== null).length;
+  }
+
+  /** Flushes the WAL so a file copy of world.sqlite is a consistent backup. */
+  checkpoint(): void {
+    this.#db.exec("PRAGMA wal_checkpoint(FULL)");
+  }
+
   #readMeta(key: string): string | null {
     const row = this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value?: string } | undefined;
     return row?.value ?? null;

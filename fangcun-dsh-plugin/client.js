@@ -208,6 +208,70 @@ window.__ModuleLoader__.load({
       'action.expand': '展开',
       'tab.chat': '对话',
       'tab.island': '岛屿控制台',
+      'tab.console': '控制台',
+      'console.status': '运行状态',
+      'console.pet': '宠物设置',
+      'console.demo': '演示',
+      'console.companionState': '伙伴状态',
+      'console.houseProposal': '等待主人同意盖房',
+      'console.housePlan': '计划盖 {count} 个方块',
+      'house.approve': '同意盖房',
+      'house.reject': '拒绝',
+      'house.approved': '已同意，开始建造。',
+      'house.rejected': '已拒绝这次盖房。',
+      'house.alreadyHandled': '该提议已被处理（可能已在平板上同意或已过期）。',
+      'house.failed': '处理失败：{code}',
+      'house.unavailable': '盖房决策接口尚未启用。',
+      'console.build': '建造进度',
+      'console.building': '建造中 {done}/{total}',
+      'console.built': '已建造 {done}/{total}',
+      'console.buildError': '建造出错：{error}',
+      'console.noBuild': '当前没有建造任务。',
+      'pet.name': '名字',
+      'pet.personality': '性格',
+      'pet.scale': '大小',
+      'pet.actions': '动作',
+      'pet.save': '保存',
+      'pet.saved': '已保存。',
+      'pet.actionDone': '已切换到「{action}」。',
+      'pet.readonly': '别人的桌宠，不能修改设置。',
+      'pet.notPrimary': '这个伙伴不是主桌宠，大小和动作只对主桌宠生效。',
+      'pet.err.name': '名字需要 1–24 个字符。',
+      'pet.err.personality': '性格需要 1–60 个字符。',
+      'pet.err.scale': '大小需要在 0.5–3 之间。',
+      'pet.err.action': '这个动作不可用。',
+      'pet.err.notOwner': '别人的桌宠，不能修改设置。',
+      'pet.err.generic': '保存失败：{code}',
+      'demo.button': '演示：懒懒小屋',
+      'demo.real.button': '演示：认真盖房',
+      'demo.real.note': '创建盖房提议并在面板里等待你同意；同意后按 24 方块的节奏建造（含台阶座位）。',
+      'demo.lazy.button': '演示：懒懒小屋',
+      'demo.lazy.note': '盖 9 个方块的小屋；完成后伙伴会说「房子盖好了，我先坐下休息会」。',
+      'demo.reset.button': '重置世界',
+      'demo.reset.note': '清空所有方块回到初始世界（会断开平板连接，平板会自动重连）。',
+      'demo.reset.confirm': '确认重置？会清空所有方块',
+      'demo.reset.accept': '确认重置',
+      'demo.reset.cancel': '取消',
+      'demo.reset.running': '正在重置…',
+      'demo.reset.done': '已重置：rev {rev} · {count} 方块',
+      'demo.reset.unavailable': '重置接口尚未启用。',
+      'demo.reset.refused': '重置被拒绝：{reason}',
+      'demo.err.buildInProgress': '建造进行中，不能启动新演示。',
+      'demo.err.grantMissing': '还没有家园授权（grant_missing），请先批准家园选址。',
+      'demo.err.generic': '演示失败：{code}',
+      'demo.note': '演示会让伙伴自己选地、提议并盖一间小屋；需要主人同意时会显示在上方。',
+      'demo.idle': '还没有开始演示。',
+      'demo.starting': '正在启动演示…',
+      'demo.started': '演示已启动。',
+      'demo.running': '演示进行中：懒懒小屋建造中。',
+      'demo.awaiting': '等待主人同意盖房，同意后会继续建造。',
+      'demo.done': '演示完成。',
+      'demo.refused': '演示被拒绝：{reason}',
+      'demo.unavailable': '该演示尚未启用（Host 还没有 /api/core/demo/lazy-house）。',
+      'demo.disabled': '建造进行中，暂时不能再启动演示。',
+      'island.openTab': '在新标签页打开',
+      'island.copyUrl': '复制地址',
+      'island.copied': '已复制',
       'list.title': '伙伴',
       'list.empty': '还没有伙伴。',
       'list.legacy': '多伙伴接口暂不可用，当前显示本机桌宠；Host 更新后会自动出现。',
@@ -331,6 +395,70 @@ window.__ModuleLoader__.load({
       'action.expand': 'Expand',
       'tab.chat': 'Chat',
       'tab.island': 'Island console',
+      'tab.console': 'Console',
+      'console.status': 'Runtime status',
+      'console.pet': 'Pet settings',
+      'console.demo': 'Demo',
+      'console.companionState': 'Companion state',
+      'console.houseProposal': 'Waiting for the owner to approve the house',
+      'console.housePlan': 'planning {count} blocks',
+      'house.approve': 'Approve house',
+      'house.reject': 'Reject',
+      'house.approved': 'Approved — building starts.',
+      'house.rejected': 'Rejected this house.',
+      'house.alreadyHandled': 'That proposal was already handled (approved on the tablet or expired).',
+      'house.failed': 'Could not decide: {code}',
+      'house.unavailable': 'The house decision endpoint is not enabled yet.',
+      'console.build': 'Build progress',
+      'console.building': 'building {done}/{total}',
+      'console.built': 'built {done}/{total}',
+      'console.buildError': 'Build failed: {error}',
+      'console.noBuild': 'No build job right now.',
+      'pet.name': 'Name',
+      'pet.personality': 'Personality',
+      'pet.scale': 'Scale',
+      'pet.actions': 'Actions',
+      'pet.save': 'Save',
+      'pet.saved': 'Saved.',
+      'pet.actionDone': 'Switched to “{action}”.',
+      'pet.readonly': "Someone else's pet — settings are read-only.",
+      'pet.notPrimary': 'This companion is not the primary pet; scale and actions apply to the primary pet only.',
+      'pet.err.name': 'The name must be 1–24 characters.',
+      'pet.err.personality': 'The personality must be 1–60 characters.',
+      'pet.err.scale': 'The scale must be between 0.5 and 3.',
+      'pet.err.action': 'That action is not available.',
+      'pet.err.notOwner': "Someone else's pet — settings are read-only.",
+      'pet.err.generic': 'Save failed: {code}',
+      'demo.button': 'Demo: lazy house',
+      'demo.real.button': 'Demo: real house',
+      'demo.real.note': 'Creates a house proposal and waits for your approval in the panel; approving starts the paced 24-block build (stairs seat included).',
+      'demo.lazy.button': 'Demo: lazy house',
+      'demo.lazy.note': 'Builds a 9-block house; afterwards the companion says “房子盖好了，我先坐下休息会”.',
+      'demo.reset.button': 'Reset world',
+      'demo.reset.note': 'Clears every block back to the seed world (the tablet connection drops and reconnects automatically).',
+      'demo.reset.confirm': 'Reset for real? All blocks will be cleared',
+      'demo.reset.accept': 'Confirm reset',
+      'demo.reset.cancel': 'Cancel',
+      'demo.reset.running': 'Resetting…',
+      'demo.reset.done': 'Reset done: rev {rev} · {count} blocks',
+      'demo.reset.unavailable': 'The reset endpoint is not enabled yet.',
+      'demo.reset.refused': 'Reset refused: {reason}',
+      'demo.err.buildInProgress': 'A build is running; the demo cannot be started right now.',
+      'demo.err.grantMissing': 'No home grant yet (grant_missing); approve a home plot first.',
+      'demo.err.generic': 'Demo failed: {code}',
+      'demo.note': 'The demo lets the companion pick a plot, propose it and build a small house; an owner approval appears above when needed.',
+      'demo.idle': 'The demo has not started yet.',
+      'demo.starting': 'Starting the demo…',
+      'demo.started': 'Demo started.',
+      'demo.running': 'Demo running: the lazy house is being built.',
+      'demo.awaiting': 'Waiting for the owner to approve the house; building continues afterwards.',
+      'demo.done': 'Demo finished.',
+      'demo.refused': 'Demo refused: {reason}',
+      'demo.unavailable': 'This demo is not enabled yet (the Host has no /api/core/demo/lazy-house).',
+      'demo.disabled': 'A build is running; the demo cannot be started right now.',
+      'island.openTab': 'Open in a new tab',
+      'island.copyUrl': 'Copy URL',
+      'island.copied': 'Copied',
       'list.title': 'Companions',
       'list.empty': 'No companions yet.',
       'list.legacy': 'The multi-companion API is not available yet, showing the local pet. It appears automatically once the Host ships it.',
@@ -565,6 +693,38 @@ window.__ModuleLoader__.load({
       '.fc-model-file{font-size:10.5px;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere}',
       '.fc-model-meta{font-size:10.5px;line-height:1.5;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}',
       '.fc-hidden-file{display:none}',
+      '.fc-console{flex:1 1 auto;min-height:0;overflow:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px}',
+      '.fc-console-card{border:0.5px solid var(--dsw-alias-border-l3);border-radius:10px;background:var(--dsw-alias-bg-base);padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0}',
+      '.fc-console-head{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.fc-console-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary);white-space:nowrap}',
+      '.fc-console-row{display:flex;align-items:baseline;gap:8px;font-size:11.5px;min-width:0}',
+      '.fc-console-row .fc-label{min-width:72px}',
+      '.fc-form-row{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.fc-form-label{flex:0 0 auto;min-width:56px;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}',
+      '.fc-form-input{flex:1 1 auto;min-width:0;height:28px;border-radius:7px;border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);padding:0 8px;font-size:12px;font-family:inherit;outline:none}',
+      '.fc-form-input:focus{border-color:var(--dsw-alias-brand-primary)}',
+      '.fc-form-input[disabled]{opacity:.55}',
+      '.fc-range{flex:1 1 auto;min-width:0;accent-color:var(--dsw-alias-brand-primary)}',
+      '.fc-range-value{flex:0 0 auto;font-size:11px;color:var(--dsw-alias-label-secondary);min-width:32px;text-align:right}',
+      '.fc-actions-grid{display:flex;flex-wrap:wrap;gap:6px}',
+      '.fc-action-btn{border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-elevated-fill);color:var(--dsw-alias-label-primary);border-radius:999px;padding:3px 11px;font-size:11.5px;cursor:pointer;font-family:inherit}',
+      '.fc-action-btn:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover)}',
+      '.fc-action-btn[data-active="true"]{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-fill-l1);color:var(--dsw-alias-brand-primary);font-weight:600}',
+      '.fc-action-btn[disabled]{opacity:.45;cursor:default}',
+      '.fc-progress{height:8px;border-radius:999px;background:var(--dsw-alias-fill-l1);overflow:hidden;border:0.5px solid var(--dsw-alias-border-l3)}',
+      '.fc-progress-bar{height:100%;background:var(--dsw-alias-state-success-primary);border-radius:999px;transition:width .25s}',
+      '.fc-console-hint{font-size:10.5px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
+      '.fc-island-links{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:0.5px solid var(--dsw-alias-border-l3);font-size:11px;color:var(--dsw-alias-label-tertiary);min-width:0;overflow:hidden}',
+      '.fc-island-link{color:var(--dsw-alias-link);text-decoration:none;font-size:11px;white-space:nowrap}',
+      '.fc-island-link:hover{text-decoration:underline}',
+      '.fc-demo-row{display:flex;flex-direction:column;gap:4px;padding-top:2px}',
+      '.fc-demo-row + .fc-demo-row{border-top:0.5px solid var(--dsw-alias-border-l3);padding-top:8px;margin-top:2px}',
+      '.fc-btn[data-variant="danger"]{background:var(--dsw-alias-state-error-primary);border-color:transparent;color:var(--dsw-alias-label-primary-foreground)}',
+      '.fc-btn[data-variant="danger"]:hover:not([disabled]){filter:brightness(1.06)}',
+      '.fc-btn[data-variant="danger-outline"]{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);background:transparent}',
+      '.fc-btn[data-variant="danger-outline"]:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover-danger)}',
+      '.fc-confirm{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px;border-radius:8px;border:0.5px solid var(--dsw-alias-state-error-primary);background:var(--dsw-alias-bg-base)}',
+      '.fc-confirm-text{font-size:11.5px;font-weight:600;color:var(--dsw-alias-state-error-primary);min-width:0}',
       '@media (max-width:1100px){.fc-body{grid-template-columns:230px minmax(0,1fr);grid-template-areas:"list chat" "list profile";grid-template-rows:minmax(0,1fr) auto}.fc-rightcol{max-height:340px}.fc-collapse{display:inline-flex}.fc-profile-body[data-collapsed="true"]{display:none}}',
       '@media (max-width:800px){.fc-body{grid-template-columns:minmax(0,1fr);grid-template-areas:"chat" "profile";grid-template-rows:minmax(0,1fr) auto}.fc-list{display:none}.fc-conv-select{display:inline-block}}',
     ].join('')
@@ -767,7 +927,8 @@ window.__ModuleLoader__.load({
       // Hook order (also documented for the structural test): social, host,
       // selectedId, draft, busy, error, notice, unread, warehouseSelected,
       // slotFeedback, tab, island, islandFailed, islandFrameLoaded, profileOpen,
-      // copied, dragItemId, dropSlot, model.
+      // copied, dragItemId, dropSlot, model, petDraft, petBusy, petFeedback,
+      // demo, copiedIsland, resetState, houseFeedback.
       const [social, setSocial] = useState(null)
       const [host, setHost] = useState(null)
       const [selectedId, setSelectedId] = useState(null)
@@ -796,6 +957,13 @@ window.__ModuleLoader__.load({
         install: null,
         avatarPreview: null,
       })
+      const [petDraft, setPetDraft] = useState({ companionId: null, name: '', personality: '', scale: 1, dirty: false })
+      const [petBusy, setPetBusy] = useState(null)
+      const [petFeedback, setPetFeedback] = useState(null)
+      const [demo, setDemo] = useState(null)
+      const [copiedIsland, setCopiedIsland] = useState(false)
+      const [resetState, setResetState] = useState(null)
+      const [houseFeedback, setHouseFeedback] = useState(null)
 
       const mountedRef = useRef(true)
       const selectedRef = useRef(null)
@@ -806,6 +974,7 @@ window.__ModuleLoader__.load({
       const previewBlobRef = useRef(null)
       const previewUrlRef = useRef(null)
       const dragRef = useRef(null)
+      const resetTimerRef = useRef(null)
 
       const useActivePanelId = typeof usePanelInfo === 'function' ? usePanelInfo : fallbackPanelInfo
       const activePanelId = useActivePanelId((info) => info.activePanelId)
@@ -904,6 +1073,311 @@ window.__ModuleLoader__.load({
       }, [actions, selected])
       const canChat = status === 'running' && busy === null && transcript?.available === true && selected !== null
       const canGive = selectedIsMine && busy === null
+
+      // ---------------------------------------------------- console + pet form
+      const pet = social?.pet ?? null
+      const primaryCompanionId = social?.primaryCompanionId ?? pet?.companionId ?? null
+      const isPrimary = selected !== null && primaryCompanionId !== null && selected.companionId === primaryCompanionId
+      const live = social?.live ?? null
+      const build = live?.build ?? null
+      const houseProposal = live?.houseProposal ?? null
+      const activeActionId = isPrimary
+        ? (pet?.activeAction ?? selected?.activeAction ?? null)
+        : (selected?.activeAction ?? null)
+
+      // Keep the form in sync with the Host until the user edits a field; a
+      // failed save drops `dirty` so this effect reverts to the Host values.
+      useEffect(() => {
+        if (!selected) return
+        setPetDraft((current) => {
+          if (current.companionId === selected.companionId && current.dirty) return current
+          const sameCompanion = current.companionId === selected.companionId
+          return {
+            companionId: selected.companionId,
+            name: selected.name ?? '',
+            personality: selected.personality ?? '',
+            scale: isPrimary && typeof pet?.scale === 'number'
+              ? pet.scale
+              : (sameCompanion && typeof current.scale === 'number' ? current.scale : 1),
+            dirty: false,
+          }
+        })
+      }, [selected, isPrimary, pet?.scale])
+
+      const setDraftField = useCallback((field, value) => {
+        setPetDraft((current) => ({ ...current, [field]: value, dirty: true }))
+      }, [])
+
+      const petLookup = useCallback((id) => {
+        const row = actions.find((action) => action.id === id)
+        return row?.displayName ?? id
+      }, [actions])
+
+      const onSavePet = useCallback(async () => {
+        if (!selected || !selected.isMine || petBusy !== null) return
+        const name = String(petDraft.name ?? '').trim()
+        const personality = String(petDraft.personality ?? '').trim()
+        if (name.length < 1 || name.length > 24) { setPetFeedback({ kind: 'error', text: t('pet.err.name') }); return }
+        if (personality.length < 1 || personality.length > 60) { setPetFeedback({ kind: 'error', text: t('pet.err.personality') }); return }
+        let scale
+        if (isPrimary) {
+          scale = Number(petDraft.scale)
+          if (!Number.isFinite(scale) || scale < 0.5 || scale > 3) { setPetFeedback({ kind: 'error', text: t('pet.err.scale') }); return }
+        }
+        setPetBusy('save')
+        setPetFeedback(null)
+        try {
+          await callApi('/pet', {
+            method: 'POST',
+            body: JSON.stringify({
+              companionId: selected.companionId,
+              name,
+              personality,
+              ...(isPrimary ? { scale } : {}),
+            }),
+          })
+          if (!mountedRef.current) return
+          setPetDraft((current) => ({ ...current, dirty: false }))
+          setPetFeedback({ kind: 'ok', text: t('pet.saved') })
+          await loadSocial(true)
+        } catch (failure) {
+          if (!mountedRef.current) return
+          const code = failure?.code ?? 'unknown'
+          const mapped = {
+            invalid_pet_name: t('pet.err.name'),
+            invalid_companion_name: t('pet.err.name'),
+            invalid_pet_personality: t('pet.err.personality'),
+            invalid_companion_personality: t('pet.err.personality'),
+            invalid_pet_scale: t('pet.err.scale'),
+            invalid_pet_action: t('pet.err.action'),
+            unknown_pet_action: t('pet.err.action'),
+            not_owner: t('pet.err.notOwner'),
+          }[code]
+          setPetFeedback({ kind: 'error', text: mapped ?? t('pet.err.generic', { code }) })
+          // Revert the fields to the Host's values (also re-synced by the effect).
+          setPetDraft({
+            companionId: selected.companionId,
+            name: selected.name ?? '',
+            personality: selected.personality ?? '',
+            scale: isPrimary && typeof pet?.scale === 'number' ? pet.scale : 1,
+            dirty: false,
+          })
+          await loadSocial(true)
+        } finally {
+          if (mountedRef.current) setPetBusy(null)
+        }
+      }, [isPrimary, loadSocial, pet?.scale, petBusy, petDraft, selected, t])
+
+      const onAction = useCallback(async (actionId) => {
+        if (!selected || !selected.isMine || petBusy !== null || busy !== null) return
+        if (!isPrimary) {
+          setPetFeedback({ kind: 'error', text: t('pet.notPrimary') })
+          return
+        }
+        setPetBusy('action')
+        setPetFeedback(null)
+        try {
+          await callApi('/pet', {
+            method: 'POST',
+            body: JSON.stringify({ companionId: selected.companionId, action: actionId }),
+          })
+          if (!mountedRef.current) return
+          setPetFeedback({ kind: 'ok', text: t('pet.actionDone', { action: petLookup(actionId) }) })
+          await loadSocial(true)
+        } catch (failure) {
+          if (!mountedRef.current) return
+          const code = failure?.code ?? 'unknown'
+          const mapped = code === 'not_owner'
+            ? t('pet.err.notOwner')
+            : (code === 'unknown_pet_action' || code === 'invalid_pet_action' ? t('pet.err.action') : null)
+          setPetFeedback({ kind: 'error', text: mapped ?? t('pet.err.generic', { code }) })
+        } finally {
+          if (mountedRef.current) setPetBusy(null)
+        }
+      }, [busy, isPrimary, loadSocial, petBusy, petLookup, selected, t])
+
+      const demoRefusalText = useCallback((failure) => {
+        const code = failure?.code ?? 'unknown'
+        if (code === 'demo_unavailable') return t('demo.unavailable')
+        if (code === 'build_in_progress') return t('demo.err.buildInProgress')
+        if (code === 'grant_missing') return t('demo.err.grantMissing')
+        if (typeof failure?.status === 'number' && failure.status >= 400 && failure.status < 500) {
+          return t('demo.refused', { reason: failure?.message ?? code })
+        }
+        return t('demo.err.generic', { code })
+      }, [t])
+
+      const onDemo = useCallback(async (flow) => {
+        if (!selectedIsMine || busy !== null || petBusy !== null) return
+        if (build?.inProgress === true) {
+          setDemo({ flow, state: 'disabled', atMs: Date.now() })
+          return
+        }
+        setDemo({ flow, state: 'starting', atMs: Date.now() })
+        try {
+          const payload = await callApi(`/demo/${flow}`, { method: 'POST', body: '{}' })
+          if (!mountedRef.current) return
+          setDemo({
+            flow,
+            state: typeof payload.state === 'string'
+              ? payload.state
+              : (flow === 'real-house' && payload.proposalId ? 'awaiting' : 'started'),
+            jobId: payload.jobId ?? null,
+            message: payload.message ?? null,
+            atMs: Date.now(),
+          })
+          await loadSocial(true)
+        } catch (failure) {
+          if (!mountedRef.current) return
+          setDemo({
+            flow,
+            state: failure?.code === 'demo_unavailable' ? 'unavailable' : 'refused',
+            message: demoRefusalText(failure),
+            atMs: Date.now(),
+          })
+        }
+      }, [build?.inProgress, busy, demoRefusalText, loadSocial, petBusy, selectedIsMine])
+
+      /** Per-flow view: the active flow follows the live build summary. */
+      const demoViewFor = useCallback((flow) => {
+        if (!demo || demo.flow !== flow) return { state: 'idle' }
+        if (demo.state === 'unavailable') return { state: 'unavailable', message: demo.message }
+        if (demo.state === 'refused') return { state: 'refused', message: demo.message }
+        if (demo.state === 'disabled') return { state: 'disabled' }
+        if (build?.inProgress === true) {
+          return { state: 'running', completed: build.completedBlocks, total: build.totalBlocks }
+        }
+        if (demo.state === 'starting') return { state: 'starting' }
+        if (demo.state === 'awaiting') return { state: 'awaiting' }
+        if (build && build.totalBlocks > 0 && build.completedBlocks >= build.totalBlocks) {
+          return { state: 'done', completed: build.completedBlocks, total: build.totalBlocks }
+        }
+        if (build && build.completedBlocks > 0) {
+          return { state: 'running', completed: build.completedBlocks, total: build.totalBlocks }
+        }
+        if (houseProposal) return { state: 'awaiting' }
+        if (demo.state === 'done') return { state: 'done' }
+        return { state: 'started', message: demo.message }
+      }, [build, demo, houseProposal])
+
+      const demoStatusText = useCallback((view) => {
+        if (view.state === 'idle') return t('demo.idle')
+        if (view.state === 'starting') return t('demo.starting')
+        if (view.state === 'running') {
+          return t('demo.running') + (view.total > 0 ? ` ${t('console.building', { done: view.completed, total: view.total })}` : '')
+        }
+        if (view.state === 'awaiting') return t('demo.awaiting')
+        if (view.state === 'done') return t('demo.done')
+        if (view.state === 'refused') return view.message ?? t('demo.refused', { reason: '' })
+        if (view.state === 'unavailable') return t('demo.unavailable')
+        if (view.state === 'disabled') return t('demo.disabled')
+        return t('demo.started')
+      }, [t])
+
+      const onResetWorld = useCallback(async () => {
+        if (busy !== null || petBusy !== null) return
+        if (build?.inProgress === true) {
+          setResetState({ stage: 'refused', message: t('demo.err.buildInProgress') })
+          return
+        }
+        if (!resetState || resetState.stage !== 'confirm') {
+          // First click never triggers the reset; it only asks for confirmation.
+          setResetState({ stage: 'confirm' })
+          return
+        }
+        setResetState({ stage: 'running' })
+        try {
+          const payload = await callApi('/demo/reset-world', { method: 'POST', body: '{}' })
+          if (!mountedRef.current) return
+          setResetState({
+            stage: 'done',
+            rev: typeof payload.rev === 'number' ? payload.rev : null,
+            blockCount: typeof payload.blockCount === 'number' ? payload.blockCount : null,
+          })
+          setDemo(null)
+          await loadSocial(true)
+        } catch (failure) {
+          if (!mountedRef.current) return
+          if (failure?.code === 'demo_unavailable') {
+            setResetState({ stage: 'unavailable', message: t('demo.reset.unavailable') })
+          } else if (failure?.code === 'build_in_progress') {
+            setResetState({ stage: 'refused', message: t('demo.err.buildInProgress') })
+          } else {
+            setResetState({
+              stage: 'refused',
+              message: t('demo.reset.refused', { reason: failure?.message ?? failure?.code ?? 'refused' }),
+            })
+          }
+          await loadSocial(true)
+        }
+      }, [build?.inProgress, busy, loadSocial, petBusy, resetState, t])
+
+      const onCancelReset = useCallback(() => {
+        setResetState(null)
+      }, [])
+
+      /** Approve or reject the pending house proposal from the PC panel. */
+      const onDecideHouse = useCallback(async (approve) => {
+        const proposalId = houseProposal?.proposalId
+        if (!proposalId || petBusy !== null || busy !== null) return
+        setPetBusy('decide')
+        setHouseFeedback(null)
+        try {
+          await callApi('/house/decide', {
+            method: 'POST',
+            body: JSON.stringify({ proposalId, approve }),
+          })
+          if (!mountedRef.current) return
+          setHouseFeedback({ kind: 'ok', text: approve ? t('house.approved') : t('house.rejected') })
+          if (!approve) setDemo(null)
+          await loadSocial(true)
+        } catch (failure) {
+          if (!mountedRef.current) return
+          const code = failure?.code
+          if (code === 'proposal_not_found' || code === 'proposal_expired') {
+            setHouseFeedback({ kind: 'hint', text: t('house.alreadyHandled') })
+            if (!approve) setDemo(null)
+            await loadSocial(true)
+          } else if (code === 'house_unavailable') {
+            setHouseFeedback({ kind: 'error', text: t('house.unavailable') })
+          } else if (code === 'grant_missing') {
+            setHouseFeedback({ kind: 'error', text: t('demo.err.grantMissing') })
+          } else {
+            setHouseFeedback({ kind: 'error', text: t('house.failed', { code: code ?? 'unknown' }) })
+          }
+        } finally {
+          if (mountedRef.current) setPetBusy(null)
+        }
+      }, [busy, houseProposal?.proposalId, loadSocial, petBusy, t])
+
+      // The two-step confirmation reverts on its own after ~5 s.
+      useEffect(() => {
+        if (resetTimerRef.current) {
+          clearTimeout(resetTimerRef.current)
+          resetTimerRef.current = null
+        }
+        if (resetState?.stage !== 'confirm') return undefined
+        resetTimerRef.current = setTimeout(() => {
+          resetTimerRef.current = null
+          if (mountedRef.current) setResetState((current) => (current?.stage === 'confirm' ? null : current))
+        }, 5000)
+        return () => {
+          if (resetTimerRef.current) {
+            clearTimeout(resetTimerRef.current)
+            resetTimerRef.current = null
+          }
+        }
+      }, [resetState?.stage])
+
+      const onCopyIslandUrl = useCallback(async () => {
+        try {
+          if (navigator?.clipboard?.writeText) {
+            await navigator.clipboard.writeText('http://127.0.0.1:4173/?mode=host')
+            setCopiedIsland(true)
+            setTimeout(() => { if (mountedRef.current) setCopiedIsland(false) }, 1500)
+          }
+        } catch { /* clipboard is best-effort */ }
+      }, [])
 
       const run = useCallback(async (kind, task) => {
         setBusy(kind)
@@ -1571,27 +2045,253 @@ window.__ModuleLoader__.load({
             }, busy === 'send' ? '…' : t('action.send'))))
       }
 
+      const renderConsolePane = () => {
+        const companionStateText = live?.companionState
+          ? stateLabel(t, live.companionState)
+          : (selected?.state ? stateLabel(t, selected.state) : '–')
+        const completed = build?.completedBlocks ?? 0
+        const total = build?.totalBlocks ?? 0
+        const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 0
+        const demoBusy = petBusy !== null || busy !== null
+        const demoBlockedByBuild = build?.inProgress === true
+        const editable = selectedIsMine
+        return h('div', { className: 'fc-console' },
+          h('section', { className: 'fc-console-card' },
+            h('div', { className: 'fc-console-head' },
+              h('span', { className: 'fc-console-title' }, t('console.status')),
+              h('span', { className: 'fc-spacer' }),
+              h('span', { className: 'fc-tag' }, statusLabel(t, status))),
+            h('div', { className: 'fc-console-row' },
+              h('span', { className: 'fc-label' }, t('revision')),
+              h('span', { className: 'fc-value' }, String(revisionText))),
+            h('div', { className: 'fc-console-row' },
+              h('span', { className: 'fc-label' }, t('blocks')),
+              h('span', { className: 'fc-value' }, String(blockText))),
+            h('div', { className: 'fc-console-row' },
+              h('span', { className: 'fc-label' }, t('console.companionState')),
+              h('span', { className: 'fc-value' }, companionStateText)),
+            houseProposal
+              ? h('div', { className: 'fc-house-ask', style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+                h('div', { className: 'fc-confirm-text', style: { color: 'var(--dsw-alias-state-warn-label)' } },
+                  t('console.houseProposal') +
+                  (typeof houseProposal.planBlockCount === 'number'
+                    ? ` · ${t('console.housePlan', { count: houseProposal.planBlockCount })}`
+                    : '')),
+                h('div', { className: 'fc-form-row' },
+                  h('button', {
+                    type: 'button',
+                    className: 'fc-btn',
+                    'data-variant': 'primary',
+                    'data-size': 'sm',
+                    disabled: petBusy !== null || busy !== null,
+                    onClick: () => onDecideHouse(true),
+                  }, petBusy === 'decide' ? '…' : t('house.approve')),
+                  h('button', {
+                    type: 'button',
+                    className: 'fc-btn',
+                    'data-variant': 'danger-outline',
+                    'data-size': 'sm',
+                    disabled: petBusy !== null || busy !== null,
+                    onClick: () => onDecideHouse(false),
+                  }, t('house.reject'))),
+                houseFeedback
+                  ? h('div', { className: 'fc-inline', 'data-kind': houseFeedback.kind }, houseFeedback.text)
+                  : null)
+              : (houseFeedback
+                ? h('div', { className: 'fc-inline', 'data-kind': houseFeedback.kind }, houseFeedback.text)
+                : null),
+            build && (build.inProgress || build.totalBlocks > 0)
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px' } },
+                h('div', { className: 'fc-console-row' },
+                  h('span', { className: 'fc-label' }, t('console.build')),
+                  h('span', { className: 'fc-value' },
+                    build.inProgress
+                      ? t('console.building', { done: completed, total })
+                      : t('console.built', { done: completed, total }))),
+                h('div', { className: 'fc-progress', role: 'progressbar', 'aria-valuenow': String(percent), 'aria-valuemin': '0', 'aria-valuemax': '100' },
+                  h('div', { className: 'fc-progress-bar', style: { width: `${percent}%` } })),
+                build.lastError ? h('div', { className: 'fc-inline', 'data-kind': 'error' }, t('console.buildError', { error: build.lastError })) : null)
+              : h('div', { className: 'fc-console-hint' }, t('console.noBuild'))),
+          h('section', { className: 'fc-console-card' },
+            h('div', { className: 'fc-console-head' },
+              h('span', { className: 'fc-console-title' }, t('console.pet')),
+              h('span', { className: 'fc-spacer' }),
+              editable ? null : h('span', { className: 'fc-tag' }, t('pet.readonly'))),
+            editable ? null : h('div', { className: 'fc-console-hint' }, t('pet.readonly')),
+            h('div', { className: 'fc-form-row' },
+              h('span', { className: 'fc-form-label' }, t('pet.name')),
+              h('input', {
+                className: 'fc-form-input',
+                type: 'text',
+                maxLength: 24,
+                value: petDraft.name ?? '',
+                disabled: !editable || petBusy !== null,
+                onChange: (event) => setDraftField('name', event.target.value),
+                'aria-label': t('pet.name'),
+              })),
+            h('div', { className: 'fc-form-row' },
+              h('span', { className: 'fc-form-label' }, t('pet.personality')),
+              h('input', {
+                className: 'fc-form-input',
+                type: 'text',
+                maxLength: 60,
+                value: petDraft.personality ?? '',
+                disabled: !editable || petBusy !== null,
+                onChange: (event) => setDraftField('personality', event.target.value),
+                'aria-label': t('pet.personality'),
+              })),
+            isPrimary
+              ? h('div', { className: 'fc-form-row' },
+                h('span', { className: 'fc-form-label' }, t('pet.scale')),
+                h('input', {
+                  className: 'fc-range',
+                  type: 'range',
+                  min: 0.5,
+                  max: 3,
+                  step: 0.1,
+                  value: typeof petDraft.scale === 'number' ? petDraft.scale : 1,
+                  disabled: !editable || petBusy !== null,
+                  onChange: (event) => setDraftField('scale', Number(event.target.value)),
+                  'aria-label': t('pet.scale'),
+                }),
+                h('span', { className: 'fc-range-value' }, Number(petDraft.scale ?? 1).toFixed(1)))
+              : h('div', { className: 'fc-console-hint' }, t('pet.notPrimary')),
+            isPrimary
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+                h('span', { className: 'fc-form-label', style: { minWidth: 0 } }, t('pet.actions')),
+                h('div', { className: 'fc-actions-grid' },
+                  actions.map((action) => h('button', {
+                    key: action.id,
+                    type: 'button',
+                    className: 'fc-action-btn',
+                    'data-active': activeActionId === action.id ? 'true' : 'false',
+                    disabled: !editable || petBusy !== null || busy !== null,
+                    onClick: () => onAction(action.id),
+                  }, action.displayName))))
+              : null,
+            h('div', { className: 'fc-form-row' },
+              h('span', { className: 'fc-spacer' }),
+              h('button', {
+                type: 'button',
+                className: 'fc-btn',
+                'data-variant': 'primary',
+                'data-size': 'sm',
+                disabled: !editable || petBusy !== null || busy !== null,
+                onClick: onSavePet,
+              }, petBusy === 'save' ? '…' : t('pet.save'))),
+            petFeedback
+              ? h('div', { className: 'fc-inline', 'data-kind': petFeedback.kind }, petFeedback.text)
+              : null),
+          h('section', { className: 'fc-console-card' },
+            h('div', { className: 'fc-console-head' },
+              h('span', { className: 'fc-console-title' }, t('console.demo'))),
+            (() => {
+              const renderDemoRow = (flow) => {
+                const view = demoViewFor(flow)
+                const kind = view.state === 'refused' || view.state === 'unavailable'
+                  ? 'error'
+                  : (view.state === 'done' ? 'ok' : 'hint')
+                const titleKey = flow === 'real-house' ? 'demo.real.button' : 'demo.lazy.button'
+                const noteKey = flow === 'real-house' ? 'demo.real.note' : 'demo.lazy.note'
+                return h('div', { className: 'fc-demo-row' },
+                  h('div', { className: 'fc-form-row' },
+                    h('button', {
+                      type: 'button',
+                      className: 'fc-btn',
+                      'data-variant': 'primary',
+                      'data-size': 'sm',
+                      disabled: !editable || demoBusy || demoBlockedByBuild,
+                      onClick: () => onDemo(flow),
+                      title: demoBlockedByBuild ? t('demo.disabled') : t(titleKey),
+                    }, t(titleKey))),
+                  h('div', { className: 'fc-console-hint' }, t(noteKey)),
+                  h('div', { className: 'fc-inline', 'data-kind': kind }, demoStatusText(view)))
+              }
+              const resetStage = resetState?.stage ?? 'idle'
+              const resetBusy = resetStage === 'running'
+              const resetDone = resetStage === 'done'
+              const resetError = resetStage === 'refused' || resetStage === 'unavailable'
+              const resetStatusText = resetDone
+                ? t('demo.reset.done', { rev: resetState?.rev ?? '?', count: resetState?.blockCount ?? '?' })
+                : (resetError
+                  ? (resetState?.message ?? t('demo.reset.refused', { reason: '' }))
+                  : (resetBusy ? t('demo.reset.running') : null))
+              return [
+                renderDemoRow('real-house'),
+                renderDemoRow('lazy-house'),
+                h('div', { className: 'fc-demo-row' },
+                  resetStage === 'confirm'
+                    ? h('div', { className: 'fc-confirm' },
+                      h('span', { className: 'fc-confirm-text' }, t('demo.reset.confirm')),
+                      h('button', {
+                        type: 'button',
+                        className: 'fc-btn',
+                        'data-variant': 'danger',
+                        'data-size': 'sm',
+                        onClick: onResetWorld,
+                      }, t('demo.reset.accept')),
+                      h('button', {
+                        type: 'button',
+                        className: 'fc-btn',
+                        'data-size': 'sm',
+                        onClick: onCancelReset,
+                      }, t('demo.reset.cancel')))
+                    : h('button', {
+                      type: 'button',
+                      className: 'fc-btn',
+                      'data-variant': 'danger-outline',
+                      'data-size': 'sm',
+                      disabled: demoBusy || demoBlockedByBuild || resetBusy,
+                      onClick: onResetWorld,
+                      title: demoBlockedByBuild ? t('demo.disabled') : t('demo.reset.button'),
+                    }, resetBusy ? t('demo.reset.running') : t('demo.reset.button')),
+                  h('div', { className: 'fc-console-hint' }, t('demo.reset.note')),
+                  resetStatusText
+                    ? h('div', {
+                      className: 'fc-inline',
+                      'data-kind': resetDone ? 'ok' : (resetError ? 'error' : 'hint'),
+                    }, resetStatusText)
+                    : null)
+              ]
+            })()))
+      }
+
       const renderIslandPane = () => {
+        const islandLinks = h('div', { className: 'fc-island-links' },
+          h('a', {
+            className: 'fc-island-link',
+            href: islandUrl,
+            target: '_blank',
+            rel: 'noreferrer noopener',
+          }, t('island.openTab')),
+          h('span', null, '·'),
+          h('button', {
+            type: 'button',
+            className: 'fc-btn',
+            'data-size': 'sm',
+            onClick: onCopyIslandUrl,
+            title: islandUrl,
+          }, t('island.copyUrl')),
+          copiedIsland ? h('span', null, t('island.copied')) : null,
+          h('span', { className: 'fc-spacer' }),
+          h('span', { className: 'fc-offscreen-url', style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 } }, islandUrl))
+        let content
         if (island === null) {
-          return h('div', { className: 'fc-island' },
-            h('div', { className: 'fc-warnbox' }, h('div', null, t('island.loading'))))
-        }
-        if (showIslandFrame) {
-          return h('div', { className: 'fc-island' },
-            h('iframe', {
-              className: 'fc-frame',
-              src: islandUrl,
-              title: t('island.title'),
-              onLoad: onFrameLoad,
-              onError: onFrameError,
-              referrerPolicy: 'no-referrer',
-              'data-fangcun-island': true,
-            }))
-        }
-        const reasons = Array.isArray(island.reasons) ? island.reasons.filter(Boolean) : []
-        const title = islandFailed && island.embeddable === true ? t('island.timeout') : t('island.blocked')
-        return h('div', { className: 'fc-island' },
-          h('div', { className: 'fc-warnbox', style: { margin: 'auto', padding: '18px' } },
+          content = h('div', { className: 'fc-warnbox' }, h('div', null, t('island.loading')))
+        } else if (showIslandFrame) {
+          content = h('iframe', {
+            className: 'fc-frame',
+            src: islandUrl,
+            title: t('island.title'),
+            onLoad: onFrameLoad,
+            onError: onFrameError,
+            referrerPolicy: 'no-referrer',
+            'data-fangcun-island': true,
+          })
+        } else {
+          const reasons = Array.isArray(island.reasons) ? island.reasons.filter(Boolean) : []
+          const title = islandFailed && island.embeddable === true ? t('island.timeout') : t('island.blocked')
+          content = h('div', { className: 'fc-warnbox', style: { margin: 'auto', padding: '18px' } },
             h('div', { style: { fontSize: '13px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' } }, title),
             h('a', { className: 'fc-linkbtn', href: islandUrl, target: '_blank', rel: 'noreferrer noopener' },
               t('island.open')),
@@ -1611,7 +2311,9 @@ window.__ModuleLoader__.load({
               className: 'fc-btn',
               'data-size': 'sm',
               onClick: () => { setIsland(null); setIslandFailed(false); setIslandFrameLoaded(false) },
-            }, t('island.retry'))))
+            }, t('island.retry')))
+        }
+        return h('div', { className: 'fc-island' }, content, islandLinks)
       }
 
       return h('section', {
@@ -1692,8 +2394,16 @@ window.__ModuleLoader__.load({
                 className: 'fc-tab',
                 'data-active': tab === 'island' ? 'true' : 'false',
                 onClick: () => setTab('island'),
-              }, t('tab.island')))),
-          tab === 'chat' ? renderChatPane() : renderIslandPane()),
+              }, t('tab.island')),
+              h('button', {
+                type: 'button',
+                className: 'fc-tab',
+                'data-active': tab === 'console' ? 'true' : 'false',
+                onClick: () => setTab('console'),
+              }, t('tab.console')))),
+          tab === 'chat'
+            ? renderChatPane()
+            : (tab === 'island' ? renderIslandPane() : renderConsolePane())),
         h('div', { className: 'fc-rightcol' },
           h('aside', { className: 'fc-card fc-profile' },
             h('div', { className: 'fc-card-head' },

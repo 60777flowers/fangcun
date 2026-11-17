@@ -83,6 +83,25 @@ export class WorldAuthority {
 
   get snapshot(): WorldState { return this.#world; }
 
+  /**
+   * Demo reset path: replaces the authoritative world with a pristine snapshot (rev 0).
+   * World-dependent bookkeeping (plan hashes, daily budgets, rate limits, cached client
+   * decisions) is dropped; companion registrations, grants and owners are kept because
+   * the Host store keeps pets/inventories/grant across a demo reset. The Host closes
+   * connected sessions afterwards (rev goes backwards), so clients re-hello at rev 0.
+   */
+  resetWorld(world: WorldState): boolean {
+    if (!world || typeof world !== "object" || world.worldId !== this.#world.worldId || !Array.isArray(world.blocks)) return false;
+    this.#world = Object.freeze({ ...world, blocks: Object.freeze([...world.blocks]) });
+    this.#homePlans.clear();
+    this.#homeBlocksUsed.clear();
+    this.#lastHomeCommitAt.clear();
+    this.#committedTransactions.clear();
+    this.#decisions.clear();
+    this.#lastSeq.clear();
+    return true;
+  }
+
 
   registerCompanion(instance: CompanionInstance): boolean {
     const parsed = validateCompanionInstance(instance);
