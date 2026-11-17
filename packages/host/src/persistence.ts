@@ -11,6 +11,7 @@ import {
 import {
   parseStoredUserInventory,
   userInventoryDocument,
+  WAREHOUSE_SEED_VERSION,
   type UserInventoryEntry,
 } from "./items.ts";
 import {
@@ -208,9 +209,10 @@ export class HostStore {
 
   /**
    * Multi-companion social state lives in the generic `meta` table so the companion
-   * row schema (shared with the world authority) stays stable. The three keys are
+   * row schema (shared with the world authority) stays stable. The four keys are
    * written in one SQLite transaction by {@link saveSocialState}: a transfer must never
-   * persist a decremented inventory without its companion item (or vice versa).
+   * persist a decremented inventory without its companion item (or vice versa), and the
+   * demo warehouse seed revision is committed with the inventory it describes.
    */
   saveSocialState(
     companions: readonly CompanionProfile[],
@@ -222,6 +224,7 @@ export class HostStore {
       this.#writeMeta("companionProfiles", JSON.stringify(companionProfilesDocument(companions)));
       this.#writeMeta("userInventory", JSON.stringify(userInventoryDocument(inventory)));
       this.#writeMeta("petScale", JSON.stringify(petScaleDocument(petScale)));
+      this.#writeMeta("warehouseSeedVersion", String(WAREHOUSE_SEED_VERSION));
       this.#db.exec("COMMIT");
     } catch (error) {
       this.#db.exec("ROLLBACK");
@@ -242,6 +245,18 @@ export class HostStore {
   loadPetScale(): number | null {
     const raw = this.#readMeta("petScale");
     return raw === null ? null : parseStoredPetScale(parseJsonMeta(raw, "pet scale"));
+  }
+
+  /**
+   * Demo warehouse seed revision. `null` means the store was written before this
+   * bookkeeping existed, i.e. the single-item v0 seed (revision 1).
+   */
+  loadWarehouseSeedVersion(): number | null {
+    const raw = this.#readMeta("warehouseSeedVersion");
+    if (raw === null) return null;
+    const version = Number(raw);
+    if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("corrupt stored warehouse seed version");
+    return version;
   }
 
   /**

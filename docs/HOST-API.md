@@ -179,22 +179,24 @@ PC 检视页默认**只读**，允许查看、暂停/恢复 companion 和 undo�
 
 **多宠物 / 好友 / 背包（2026-11 社交模型，v0）**
 
-- 数据是 companion 档案列表（v0 seed 2 条，模型允许 N 条，防御上限 64）：`{companionId, name, ownerUserId, personaId, personality(1–60 字符), avatarModelId, state, activeAction, items:[itemId]}`；`isMine` 在读取时由 `ownerUserId === Host owner` 派生，**永不落库**。`state` 是运行时展示字段，Host 重启时主宠物重置为 `idle`。
+- 数据是 companion 档案列表（v0 seed 2 条，模型允许 N 条，防御上限 64）：`{companionId, name, ownerUserId, personaId, personality(1–60 字符), avatarModelId, avatarImage(data URL 或 null), state, activeAction, items:[itemId]}`；`isMine` 在读取时由 `ownerUserId === Host owner` 派生，**永不落库**。`state` 是运行时展示字段，Host 重启时主宠物重置为 `idle`。
 - seed：`fish-1`（owner = 本地用户，主桌宠）与 `fish-friend-1`（owner = `friend-demo`，personality 例如“慢热，喜欢收集石头”）。**`friend-demo` 是本地演示 fixture，不是真实远端用户；不做联网、账号或好友发现，也不存在远端同步路径。**
 - 好友宠物只读：写操作返回 `403 not_owner`，且没有任何针对非本人宠物的变更端点。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/core/companions` | `{companions:[...]}`，每一项含派生的 `isMine` |
-| GET | `/api/core/companions/{id}` | 单个档案（含 `items`）或 `404 companion_not_found`；`items` 即“悬停预览好友宠物背包”的只读数据 |
-| PATCH | `/api/core/companions/{id}` | 仅 `isMine:true` 可写；body 任意 `{name?, personality?, personaId?}` 子集，未知字段拒绝；好友宠物 `403 not_owner` |
+| GET | `/api/core/companions` | `{companions:[...]}`，每一项含派生的 `isMine` 与 `avatarImage` |
+| GET | `/api/core/companions/{id}` | 单个档案（含 `items`、`avatarImage`）或 `404 companion_not_found`；`items` 即“悬停预览好友宠物背包”的只读数据 |
+| PATCH | `/api/core/companions/{id}` | 仅 `isMine:true` 可写；body 任意 `{name?, personality?, personaId?, avatarImage?}` 子集，未知字段拒绝；好友宠物 `403 not_owner` |
 | GET | `/api/core/items` | 只读 item catalog：`{items:[{itemId, displayName, description, icon}]}` |
 | GET | `/api/core/inventory` | 本地用户背包 `{items:[{itemId, count}]}`；只列 `count>0`，按 catalog 顺序 |
 | POST | `/api/core/inventory/give` | 严格 body `{companionId, itemId}`；把 1 件物品从用户背包转进**本人**宠物背包 |
 
-item 规则（v0）：catalog 是冻结常量、恰好 1 件 `v0-iron-basin`（displayName `v0体验版小铁盆`，icon `basin`）；新增物品 = 在 catalog 加一条。用户新档 seed `1× v0-iron-basin`。`maxCompanionItems = 2`（常量、可扩展）；v0 宠物背包**不允许重复 itemId**（一个槽 = 一种物品）。`POST /inventory/give` 拒绝矩阵：非法 body/未知字段 `400 invalid_give_request`、未知 item `400 unknown_item`、未知宠物 `404 companion_not_found`、非本人宠物 `403 not_owner`、用户没有该物品 `409 item_not_owned`、宠物背包已满 `409 companion_inventory_full`、物品已在宠物背包 `409 item_already_held`。成功返回 `{companion, inventory:{items}}`。v0 **没有**把物品从宠物收回给用户的端点。
+item 规则（v0）：catalog 是冻结常量，共 3 件且顺序稳定 —— `v0-iron-basin`（`v0体验版小铁盆`，icon `basin`）在首位，随后是 `v0-wood-cup`（`v0体验版小木杯`，icon `cup`）与 `v0-stone-bell`（`v0体验版小石铃`，icon `bell`）；新增物品 = 在 catalog 加一条。**演示种子数据**：新用户背包 seed `1×` 每件（方便直接把物品拖给桌宠）；旧版单物品仓库在升级后一次性补发“当时不存在的”两件新物品，已花掉的物品（例如已经在宠物背包里的铁盆）不会被重新发放。`maxCompanionItems = 2`（常量、可扩展）；v0 宠物背包**不允许重复 itemId**（一个槽 = 一种物品）。`POST /inventory/give` 拒绝矩阵：非法 body/未知字段 `400 invalid_give_request`、未知 item `400 unknown_item`、未知宠物 `404 companion_not_found`、非本人宠物 `403 not_owner`、用户没有该物品 `409 item_not_owned`、宠物背包已满 `409 companion_inventory_full`、物品已在宠物背包 `409 item_already_held`。成功返回 `{companion, inventory:{items}}`。v0 **没有**把物品从宠物收回给用户的端点。
 
-持久化：`meta['companionProfiles']`、`meta['userInventory']`、`meta['petScale']` 在同一次 `BEGIN IMMEDIATE` 事务原子写入（不会出现“扣了用户背包但宠物没收到”），Host 重启后保留；读取对存档 fail closed。转移成功后广播一条 `companion_state`（复用既有帧、state 不变）作为打开面板的轻量刷新信号。
+**avatarImage 规则**：可选，`null` 或内联 data URL，仅允许 `data:image/png;base64,` / `data:image/jpeg;base64,` 前缀；base64 字符集与 padding 严格校验，解码后 ≤ **64 KiB**。拒绝任意 URL/其他 MIME/非法 base64 → `400 invalid_avatar`；解码超限 → `413 avatar_too_large`；`null` 表示清除。只有 `isMine` 宠物可写（好友 `403 not_owner`），图片字节不进日志也不回显。为容纳该字段，`PATCH /api/core/companions/{id}` 的路由请求体上限为 96 KiB（其余 `/api/core/*` 端点仍为 8 KiB）。*已知限制：当前浏览器代理 `scripts/serve-simulator.mjs` 对 POST body 仍是 8 KiB，故经 `/api/host/*` 上传 >~6 KiB 的头像需先提高代理上限；直接打 Host 的 `/api/core/*` 不受此限制。*
+
+持久化：`meta['companionProfiles']`、`meta['userInventory']`、`meta['petScale']`、`meta['warehouseSeedVersion']` 在同一次 `BEGIN IMMEDIATE` 事务原子写入（不会出现“扣了用户背包但宠物没收到”，也不会重复补发演示物品），Host 重启后保留；读取对存档 fail closed。转移成功后广播一条 `companion_state`（复用既有帧、state 不变）作为打开面板的轻量刷新信号。
 
 聊天按宠物隔离：`GET /api/core/chat?companionId=...` → `{messages, companionId}`；`POST /api/core/chat {companionId?, text}` → `{reply, state, companionId}`。省略 `companionId` 时仍指向主 companion（`fish-1`），旧 UI/测试行为不变；未知 `companionId` → `404 companion_not_found`；聊天仅内存保存（每宠物 30 条），不持久化。
 
@@ -403,7 +405,8 @@ CREATE TABLE meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ); -- schemaVersion, worldId, createdAt, worldSchemaHash, blockCatalogHash,
-   -- companionProfiles, userInventory, petScale（旧版 petProfile 仅迁移时读）
+   -- companionProfiles, userInventory, petScale, warehouseSeedVersion
+   --（旧版 petProfile 仅迁移时读）
 
 CREATE TABLE world (
   id TEXT PRIMARY KEY,

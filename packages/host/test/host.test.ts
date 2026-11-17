@@ -512,6 +512,7 @@ type CompanionViewBody = Readonly<{
   personaId: string;
   personality: string;
   avatarModelId: string;
+  avatarImage: string | null;
   state: string;
   activeAction: string;
   items: string[];
@@ -540,10 +541,12 @@ test("companions list seeds the owner pet and one local demo friend with derived
     assert.deepEqual(primary.items, []);
     assert.ok(primary.personality.length >= 1 && primary.personality.length <= 60, "personality is a short Chinese string");
     assert.ok(primary.avatarModelId.length > 0);
+    assert.equal(primary.avatarImage, null, "the seeded companion has no avatar image");
     assert.equal(friend.companionId, "fish-friend-1");
     assert.equal(friend.ownerUserId, "friend-demo");
     assert.equal(friend.isMine, false, "the demo friend is a local fixture, not the owner");
     assert.equal(friend.personality, "慢热，喜欢收集石头");
+    assert.equal(friend.avatarImage, null);
     assert.deepEqual(friend.items, []);
 
     const single = await coreJson<CompanionViewBody>(address, "/companions/fish-friend-1");
@@ -695,7 +698,7 @@ test("per-companion chat broadcasts companion_say with that companion id", async
   }
 });
 
-test("inventory gives the seeded basin to an owned companion and survives a restart", async () => {
+test("inventory seeds three demo items, gives them to an owned companion and rejects a full bag", async () => {
   const db = tempDb();
   try {
     const first = new FangcunHost({ worldId: "social-inventory-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
@@ -703,12 +706,23 @@ test("inventory gives the seeded basin to an owned companion and survives a rest
     try {
       const catalog = await coreJson<{ items: Array<{ itemId: string; displayName: string; description: string; icon: string }> }>(address, "/items");
       assert.equal(catalog.status, 200);
-      assert.deepEqual(catalog.body.items.map((item) => item.itemId), ["v0-iron-basin"]);
+      assert.deepEqual(
+        catalog.body.items.map((item) => item.itemId),
+        ["v0-iron-basin", "v0-wood-cup", "v0-stone-bell"],
+        "the basin stays first and the two drag-and-drop demo items follow",
+      );
       assert.equal(catalog.body.items[0]!.displayName, "v0体验版小铁盆");
-      assert.equal(catalog.body.items[0]!.icon, "basin");
-      assert.ok(catalog.body.items[0]!.description.length > 0);
+      assert.equal(catalog.body.items[1]!.displayName, "v0体验版小木杯");
+      assert.equal(catalog.body.items[2]!.displayName, "v0体验版小石铃");
+      assert.deepEqual(catalog.body.items.map((item) => item.icon), ["basin", "cup", "bell"]);
+      for (const item of catalog.body.items) assert.ok(item.description.length > 0);
 
-      assert.deepEqual((await coreJson<InventoryBody>(address, "/inventory")).body.items, [{ itemId: "v0-iron-basin", count: 1 }]);
+      // Fresh demo seed: 1x each of the three items, in catalog order.
+      assert.deepEqual((await coreJson<InventoryBody>(address, "/inventory")).body.items, [
+        { itemId: "v0-iron-basin", count: 1 },
+        { itemId: "v0-wood-cup", count: 1 },
+        { itemId: "v0-stone-bell", count: 1 },
+      ]);
 
       const rejects: Array<{ body: unknown; status: number; error: string }> = [
         { body: { companionId: "fish-friend-1", itemId: "v0-iron-basin" }, status: 403, error: "not_owner" },
@@ -723,21 +737,41 @@ test("inventory gives the seeded basin to an owned companion and survives a rest
         assert.equal(response.status, status, `${JSON.stringify(body)} must be rejected with ${status}`);
         assert.equal(response.body.error, error);
       }
-      assert.deepEqual((await coreJson<InventoryBody>(address, "/inventory")).body.items, [{ itemId: "v0-iron-basin", count: 1 }], "rejections never spend the item");
+      assert.equal((await coreJson<InventoryBody>(address, "/inventory")).body.items.length, 3, "rejections never spend an item");
 
-      const given = await coreJson<{ companion: CompanionViewBody; inventory: InventoryBody }>(address, "/inventory/give", {
+      // Happy path: fill both slots with two different items.
+      const firstGive = await coreJson<{ companion: CompanionViewBody; inventory: InventoryBody }>(address, "/inventory/give", {
         companionId: "fish-1",
         itemId: "v0-iron-basin",
       });
-      assert.equal(given.status, 200);
-      assert.deepEqual(given.body.companion.items, ["v0-iron-basin"]);
-      assert.deepEqual(given.body.inventory.items, []);
-      assert.deepEqual((await coreJson<InventoryBody>(address, "/inventory")).body.items, [], "the user stack is decremented");
-      assert.deepEqual((await coreJson<CompanionViewBody>(address, "/companions/fish-1")).body.items, ["v0-iron-basin"]);
+      assert.equal(firstGive.status, 200);
+      assert.deepEqual(firstGive.body.companion.items, ["v0-iron-basin"]);
+      const secondGive = await coreJson<{ companion: CompanionViewBody; inventory: InventoryBody }>(address, "/inventory/give", {
+        companionId: "fish-1",
+        itemId: "v0-wood-cup",
+      });
+      assert.equal(secondGive.status, 200);
+      assert.deepEqual(secondGive.body.companion.items, ["v0-iron-basin", "v0-wood-cup"]);
+      assert.deepEqual(secondGive.body.inventory.items, [{ itemId: "v0-stone-bell", count: 1 }]);
+      assert.deepEqual(
+        (await coreJson<InventoryBody>(address, "/inventory")).body.items,
+        [{ itemId: "v0-stone-bell", count: 1 }],
+        "each transfer decrements exactly one stack",
+      );
+
+      // Third give: the bag has two different items, so it is genuinely full now.
+      const full = await coreJson<{ error: string }>(address, "/inventory/give", { companionId: "fish-1", itemId: "v0-stone-bell" });
+      assert.equal(full.status, 409);
+      assert.equal(full.body.error, "companion_inventory_full", "two different items fill the v0 bag");
+      assert.deepEqual(
+        (await coreJson<InventoryBody>(address, "/inventory")).body.items,
+        [{ itemId: "v0-stone-bell", count: 1 }],
+        "a full-bag rejection does not spend the item",
+      );
 
       const noItem = await coreJson<{ error: string }>(address, "/inventory/give", { companionId: "fish-1", itemId: "v0-iron-basin" });
       assert.equal(noItem.status, 409);
-      assert.equal(noItem.body.error, "item_not_owned");
+      assert.equal(noItem.body.error, "item_not_owned", "the basin already left the warehouse");
     } finally {
       await first.stop();
     }
@@ -746,8 +780,12 @@ test("inventory gives the seeded basin to an owned companion and survives a rest
     const secondAddress = await second.start();
     try {
       const restored = await coreJson<CompanionViewBody>(secondAddress, "/companions/fish-1");
-      assert.deepEqual(restored.body.items, ["v0-iron-basin"], "the companion bag survives a Host restart");
-      assert.deepEqual((await coreJson<InventoryBody>(secondAddress, "/inventory")).body.items, [], "the transferred-away stack stays gone after restart");
+      assert.deepEqual(restored.body.items, ["v0-iron-basin", "v0-wood-cup"], "the companion bag survives a Host restart");
+      assert.deepEqual(
+        (await coreJson<InventoryBody>(secondAddress, "/inventory")).body.items,
+        [{ itemId: "v0-stone-bell", count: 1 }],
+        "the transferred-away stacks stay gone after restart",
+      );
     } finally {
       await second.stop();
     }
@@ -757,15 +795,136 @@ test("inventory gives the seeded basin to an owned companion and survives a rest
 });
 
 test("companion item rules enforce the two-slot cap and the v0 no-duplicates decision", () => {
-  const full = addItemToCompanion(["v0-iron-basin", "v0-iron-basin"], "v0-iron-basin");
+  const full = addItemToCompanion(["v0-iron-basin", "v0-wood-cup"], "v0-stone-bell");
   assert.equal(full.ok, false);
-  if (!full.ok) assert.equal(full.error, "companion_inventory_full", "a full bag rejects the transfer before any slot rules");
+  if (!full.ok) assert.equal(full.error, "companion_inventory_full", "two distinct items fill the v0 bag");
   const duplicate = addItemToCompanion(["v0-iron-basin"], "v0-iron-basin");
   assert.equal(duplicate.ok, false);
   if (!duplicate.ok) assert.equal(duplicate.error, "item_already_held", "v0 keeps companion bags duplicate-free");
   const added = addItemToCompanion([], "v0-iron-basin");
   assert.equal(added.ok, true);
   if (added.ok) assert.deepEqual(added.items, ["v0-iron-basin"]);
+});
+
+test("a fresh warehouse seeds all three demo items and a legacy warehouse is topped up once", async () => {
+  const db = tempDb();
+  try {
+    // Simulate a store written by the previous build: empty warehouse (basin spent on a
+    // companion), no seed-version key, and profiles without the avatarImage field.
+    const first = new FangcunHost({ worldId: "warehouse-upgrade-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    await first.start();
+    await first.stop();
+    const raw = new DatabaseSync(db.path);
+    const profileRow = raw.prepare("SELECT value FROM meta WHERE key = 'companionProfiles'").get() as { value: string };
+    const document = JSON.parse(profileRow.value) as { schemaVersion: number; companions: Array<Record<string, unknown>> };
+    for (const profile of document.companions) delete profile.avatarImage;
+    raw.prepare("UPDATE meta SET value = ? WHERE key = 'companionProfiles'").run(JSON.stringify(document));
+    raw.prepare("UPDATE meta SET value = ? WHERE key = 'userInventory'").run(JSON.stringify({ schemaVersion: 1, items: [] }));
+    raw.prepare("DELETE FROM meta WHERE key = 'warehouseSeedVersion'").run();
+    raw.close();
+
+    const second = new FangcunHost({ worldId: "warehouse-upgrade-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const address = await second.start();
+    try {
+      assert.deepEqual(
+        (await coreJson<InventoryBody>(address, "/inventory")).body.items,
+        [{ itemId: "v0-wood-cup", count: 1 }, { itemId: "v0-stone-bell", count: 1 }],
+        "the upgrade grants only the new demo items; the spent basin is not re-granted",
+      );
+      const companions = await coreJson<{ companions: CompanionViewBody[] }>(address, "/companions");
+      assert.equal(companions.body.companions[0]!.avatarImage, null, "profiles stored without avatarImage read as null");
+    } finally {
+      await second.stop();
+    }
+
+    // The top-up is one-time: a third start must not grant the demo items again.
+    const third = new FangcunHost({ worldId: "warehouse-upgrade-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const thirdAddress = await third.start();
+    try {
+      assert.deepEqual(
+        (await coreJson<InventoryBody>(thirdAddress, "/inventory")).body.items,
+        [{ itemId: "v0-wood-cup", count: 1 }, { itemId: "v0-stone-bell", count: 1 }],
+        "the demo top-up is applied exactly once",
+      );
+    } finally {
+      await third.stop();
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
+const TINY_PNG_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const MAX_SIZE_JPEG_DATA_URL = `data:image/jpeg;base64,${Buffer.alloc(64 * 1024).toString("base64")}`;
+const OVERSIZE_PNG_DATA_URL = `data:image/png;base64,${Buffer.alloc(64 * 1024 + 1).toString("base64")}`;
+
+test("companion avatar images are owner-only, bounded data URLs that survive a restart", async () => {
+  const db = tempDb();
+  try {
+    const first = new FangcunHost({ worldId: "social-avatar-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const address = await first.start();
+    try {
+      const initial = await coreJson<{ companions: CompanionViewBody[] }>(address, "/companions");
+      assert.equal(initial.body.companions[0]!.avatarImage, null, "avatarImage is null by default");
+
+      const patched = await coreJson<CompanionViewBody>(address, "/companions/fish-1", { avatarImage: TINY_PNG_DATA_URL }, "PATCH");
+      assert.equal(patched.status, 200);
+      assert.equal(patched.body.avatarImage, TINY_PNG_DATA_URL);
+      assert.equal((await coreJson<CompanionViewBody>(address, "/companions/fish-1")).body.avatarImage, TINY_PNG_DATA_URL);
+
+      // Exactly 64 KiB decoded is accepted (boundary).
+      const maxSized = await coreJson<CompanionViewBody>(address, "/companions/fish-1", { avatarImage: MAX_SIZE_JPEG_DATA_URL }, "PATCH");
+      assert.equal(maxSized.status, 200);
+      assert.equal(maxSized.body.avatarImage, MAX_SIZE_JPEG_DATA_URL);
+
+      const friendPatch = await coreJson<{ error: string }>(address, "/companions/fish-friend-1", { avatarImage: TINY_PNG_DATA_URL }, "PATCH");
+      assert.equal(friendPatch.status, 403, "only owned companions accept avatar changes");
+      assert.equal(friendPatch.body.error, "not_owner");
+
+      const malformed: unknown[] = [
+        "https://evil.example/pet.png",
+        "data:image/gif;base64,AAAA",
+        "data:image/svg+xml;base64,AAAA",
+        "data:image/png;base64,%%%",
+        "data:image/png;base64,",
+        "data:image/png;base64,AAAAA",
+        42,
+      ];
+      for (const avatarImage of malformed) {
+        const response = await coreJson<{ error: string }>(address, "/companions/fish-1", { avatarImage }, "PATCH");
+        assert.equal(response.status, 400, `malformed avatar ${String(avatarImage).slice(0, 24)} must be rejected`);
+        assert.equal(response.body.error, "invalid_avatar");
+      }
+      const tooLarge = await coreJson<{ error: string }>(address, "/companions/fish-1", { avatarImage: OVERSIZE_PNG_DATA_URL }, "PATCH");
+      assert.equal(tooLarge.status, 413);
+      assert.equal(tooLarge.body.error, "avatar_too_large");
+      assert.equal(
+        (await coreJson<CompanionViewBody>(address, "/companions/fish-1")).body.avatarImage,
+        MAX_SIZE_JPEG_DATA_URL,
+        "rejected avatar patches leave the stored image untouched",
+      );
+
+      const cleared = await coreJson<CompanionViewBody>(address, "/companions/fish-1", { avatarImage: null }, "PATCH");
+      assert.equal(cleared.body.avatarImage, null, "null clears the avatar");
+      await coreJson(address, "/companions/fish-1", { avatarImage: TINY_PNG_DATA_URL }, "PATCH");
+    } finally {
+      await first.stop();
+    }
+
+    const second = new FangcunHost({ worldId: "social-avatar-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const secondAddress = await second.start();
+    try {
+      const restored = await coreJson<CompanionViewBody>(secondAddress, "/companions/fish-1");
+      assert.equal(restored.body.avatarImage, TINY_PNG_DATA_URL, "the avatar image survives a Host restart");
+      const list = await coreJson<{ companions: CompanionViewBody[] }>(secondAddress, "/companions");
+      assert.equal(list.body.companions[0]!.avatarImage, TINY_PNG_DATA_URL, "the list view also returns the avatar image");
+      assert.equal(list.body.companions[1]!.avatarImage, null);
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    db.cleanup();
+  }
 });
 
 test("inventory transfer broadcasts companion_state so open panels refresh", async () => {

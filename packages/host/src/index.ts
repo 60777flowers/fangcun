@@ -26,9 +26,12 @@ import {
 } from "./companions.ts";
 import {
   addItemToCompanion,
+  inventoryEntriesFromCounts,
   ITEM_CATALOG,
   seedUserInventory,
+  topUpDemoWarehouse,
   validateGiveRequest,
+  WAREHOUSE_SEED_VERSION,
   type UserInventoryEntry,
 } from "./items.ts";
 import {
@@ -56,6 +59,12 @@ import { WsConnection } from "./websocket.ts";
  */
 
 const MAX_HTTP_BODY_BYTES = 8 * 1024;
+/**
+ * Companion PATCH is the one route allowed to carry an inline avatar: a 64 KiB decoded
+ * payload is ~87.4 KB base64, so this route needs a larger cap while every other
+ * inspector endpoint keeps the 8 KiB limit.
+ */
+const MAX_COMPANION_PATCH_BODY_BYTES = 96 * 1024;
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_AUTONOMY_INTERVAL_MS = 20_000;
@@ -208,20 +217,26 @@ export class FangcunHost {
     }
 
     // Multi-companion social state: durable in the meta keys companionProfiles /
-    // userInventory / petScale. A store written before this model (single legacy
-    // meta['petProfile'] row) is migrated once; corrupt rows fail closed in the store.
+    // userInventory / petScale / warehouseSeedVersion. A store written before this model
+    // (single legacy meta['petProfile'] row, single-item warehouse) is migrated once;
+    // corrupt rows fail closed in the store.
     const legacyPet = store.loadLegacyPetProfile();
     const storedProfiles = store.loadCompanionProfiles();
     const storedInventory = store.loadUserInventory();
     const storedScale = store.loadPetScale();
+    const storedSeedVersion = store.loadWarehouseSeedVersion();
     const resolvedProfiles = storedProfiles ?? seedCompanionProfiles(this.#ownerUserId, {
       name: legacyPet?.name ?? DEFAULT_PET_NAME,
       personaId: legacyPet?.personaId ?? this.#companion.personaId,
       activeAction: legacyPet?.activeAction ?? "stand",
     });
-    const resolvedInventory = storedInventory ?? seedUserInventory();
+    // A legacy warehouse is topped up once with the new demo items; items already spent
+    // (e.g. a basin living in a companion bag) are never re-granted.
+    const resolvedInventory = storedInventory === null
+      ? seedUserInventory()
+      : topUpDemoWarehouse(storedInventory, storedSeedVersion);
     const resolvedScale = storedScale ?? legacyPet?.scale ?? 1;
-    if (!storedProfiles || !storedInventory || storedScale === null) {
+    if (!storedProfiles || storedInventory === null || storedScale === null || storedSeedVersion !== WAREHOUSE_SEED_VERSION) {
       store.saveSocialState(resolvedProfiles, resolvedInventory, resolvedScale);
     }
     this.#companionProfiles = resolvedProfiles;
@@ -474,10 +489,13 @@ export class FangcunHost {
       if (request.method === "GET") return send(200, this.#view(profile));
       if (request.method !== "PATCH") return send(405, { error: "method_not_allowed" });
       if (profile.ownerUserId !== this.#ownerUserId) return send(403, { error: "not_owner" });
-      const body = await this.#readJson(request);
+      const body = await this.#readJson(request, MAX_COMPANION_PATCH_BODY_BYTES);
       if (!body.ok) return send(body.status, { error: body.error });
       const parsed = validateCompanionPatch(body.value);
-      if (!parsed.ok) return send(400, { error: parsed.error });
+      if (!parsed.ok) {
+        // Avatar size is a payload problem (413); every other invalid field is a 400.
+        return send(parsed.error === "avatar_too_large" ? 413 : 400, { error: parsed.error });
+      }
       const outcome = this.#updateCompanionProfile(profile, parsed.value);
       if (!outcome.ok) return send(outcome.status, { error: outcome.error });
       return send(200, outcome.view);
@@ -553,10 +571,7 @@ export class FangcunHost {
 
   /** Owned stacks only, in catalog order; a zero count disappears from the view. */
   #userInventoryEntries(): readonly UserInventoryEntry[] {
-    return Object.freeze(ITEM_CATALOG.flatMap((item) => {
-      const count = this.#userItems.get(item.itemId) ?? 0;
-      return count > 0 ? [Object.freeze({ itemId: item.itemId, count })] : [];
-    }));
+    return inventoryEntriesFromCounts(this.#userItems);
   }
 
   /** Persists companions + inventory + scale in one transaction; memory is applied after success. */
@@ -636,11 +651,14 @@ export class FangcunHost {
       name: patch.name ?? profile.name,
       personality: patch.personality ?? profile.personality,
       personaId: patch.personaId ?? profile.personaId,
+      avatarImage: patch.avatarImage !== undefined ? patch.avatarImage : profile.avatarImage,
     });
     const nextProfiles = this.#replaceIn(profile.companionId, nextProfile);
     if (!this.#saveSocial(nextProfiles)) return { ok: false, status: 500, error: "companion_persist_failed" };
     this.#companionProfiles = nextProfiles;
-    if (patch.name !== undefined || patch.personaId !== undefined) this.#setCompanionState(this.#companionState);
+    if (patch.name !== undefined || patch.personaId !== undefined || patch.avatarImage !== undefined) {
+      this.#setCompanionState(this.#companionState);
+    }
     return { ok: true, view: this.#view(nextProfile) };
   }
 
@@ -676,10 +694,7 @@ export class FangcunHost {
   }
 
   #inventoryEntries(items: ReadonlyMap<string, number>): readonly UserInventoryEntry[] {
-    return Object.freeze(ITEM_CATALOG.flatMap((item) => {
-      const count = items.get(item.itemId) ?? 0;
-      return count > 0 ? [Object.freeze({ itemId: item.itemId, count })] : [];
-    }));
+    return inventoryEntriesFromCounts(items);
   }
 
   /**
@@ -1029,7 +1044,10 @@ export class FangcunHost {
     };
   }
 
-  async #readJson(request: IncomingMessage): Promise<{ ok: true; value: unknown } | { ok: false; status: number; error: string }> {
+  async #readJson(
+    request: IncomingMessage,
+    maxBytes: number = MAX_HTTP_BODY_BYTES,
+  ): Promise<{ ok: true; value: unknown } | { ok: false; status: number; error: string }> {
     const contentType = request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase();
     if (contentType !== "application/json") return { ok: false, status: 415, error: "content_type_required" };
     const chunks: Buffer[] = [];
@@ -1037,7 +1055,7 @@ export class FangcunHost {
     for await (const chunk of request) {
       const buffer = chunk as Buffer;
       bytes += buffer.length;
-      if (bytes > MAX_HTTP_BODY_BYTES) return { ok: false, status: 413, error: "payload_too_large" };
+      if (bytes > maxBytes) return { ok: false, status: 413, error: "payload_too_large" };
       chunks.push(buffer);
     }
     try {

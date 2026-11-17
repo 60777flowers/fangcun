@@ -12,21 +12,45 @@ import type { ValidationResult } from "@fangcun/protocol";
 export const MAX_COMPANION_ITEMS = 2;
 /** Defensive upper bound for a persisted user stack; keeps corrupt rows fail-closed. */
 export const MAX_USER_ITEM_COUNT = 1_000_000;
-export const SEED_USER_ITEM_ID = "v0-iron-basin";
+
+/**
+ * Demo warehouse seed revision. Version 1 was the single-basin v0 seed; version 2 is
+ * the 3-item drag-and-drop demo. A store written by an older revision is topped up
+ * once, so upgrading never re-grants items the user already spent.
+ */
+export const WAREHOUSE_SEED_VERSION = 2;
+
+export const V0_IRON_BASIN_ITEM_ID = "v0-iron-basin";
+export const V0_WOOD_CUP_ITEM_ID = "v0-wood-cup";
+export const V0_STONE_BELL_ITEM_ID = "v0-stone-bell";
 
 export type ItemDefinition = Readonly<{
   itemId: string;
   displayName: string;
   description: string;
+  /** Stable icon key the PC/DSH UI maps to its own SVG; never a URL. */
   icon: string;
 }>;
 
+/** Kept in a stable order: v0-iron-basin first, then the drag-and-drop demo items. */
 export const ITEM_CATALOG: readonly ItemDefinition[] = Object.freeze([
   Object.freeze({
-    itemId: SEED_USER_ITEM_ID,
+    itemId: V0_IRON_BASIN_ITEM_ID,
     displayName: "v0体验版小铁盆",
     description: "第一版体验发放的小铁盆，能装水，也能当见面礼。",
     icon: "basin",
+  }),
+  Object.freeze({
+    itemId: V0_WOOD_CUP_ITEM_ID,
+    displayName: "v0体验版小木杯",
+    description: "一块整木头掏出来的小杯子，捧在手里是温的。",
+    icon: "cup",
+  }),
+  Object.freeze({
+    itemId: V0_STONE_BELL_ITEM_ID,
+    displayName: "v0体验版小石铃",
+    description: "从岛边捡来的小石头磨成的铃铛，摇起来声音很轻。",
+    icon: "bell",
   }),
 ]);
 
@@ -45,9 +69,41 @@ export function itemDefinition(itemId: string): ItemDefinition | null {
 /** One owned stack in the host user's inventory (`itemId` is always a catalog id). */
 export type UserInventoryEntry = Readonly<{ itemId: string; count: number }>;
 
-/** Every fresh user starts with one basin; "every user" is v0's single local user. */
+/** Builds catalog-ordered inventory entries from a count map; zero counts disappear. */
+export function inventoryEntriesFromCounts(counts: ReadonlyMap<string, number>): readonly UserInventoryEntry[] {
+  return Object.freeze(ITEM_CATALOG.flatMap((item) => {
+    const count = counts.get(item.itemId) ?? 0;
+    return count > 0 ? [Object.freeze({ itemId: item.itemId, count })] : [];
+  }));
+}
+
+/**
+ * Fresh demo seed: 1× each catalog item so the drag-and-drop flow is demoable
+ * immediately. "Every user" is v0's single local user.
+ */
 export function seedUserInventory(): readonly UserInventoryEntry[] {
-  return Object.freeze([Object.freeze({ itemId: SEED_USER_ITEM_ID, count: 1 })]);
+  return Object.freeze(ITEM_CATALOG.map((item) => Object.freeze({ itemId: item.itemId, count: 1 })));
+}
+
+/**
+ * One-time demo top-up when upgrading a warehouse written by an older seed revision.
+ * Only adds the items introduced after that revision; it never re-grants an item the
+ * user already spent (e.g. a basin already given to a companion).
+ */
+export function topUpDemoWarehouse(
+  entries: readonly UserInventoryEntry[],
+  storedSeedVersion: number | null,
+): readonly UserInventoryEntry[] {
+  const fromVersion = storedSeedVersion ?? 1;
+  if (fromVersion >= WAREHOUSE_SEED_VERSION) return entries;
+  const counts = new Map(entries.map((entry) => [entry.itemId, entry.count] as const));
+  // Version 2 introduced the two drag-and-drop demo items; v0-iron-basin already existed.
+  if (fromVersion < 2) {
+    for (const itemId of [V0_WOOD_CUP_ITEM_ID, V0_STONE_BELL_ITEM_ID]) {
+      counts.set(itemId, (counts.get(itemId) ?? 0) + 1);
+    }
+  }
+  return inventoryEntriesFromCounts(counts);
 }
 
 export function userInventoryDocument(entries: readonly UserInventoryEntry[]): Readonly<{

@@ -32,8 +32,38 @@ export const COMPANION_PERSONA_ID_MAX_LENGTH = 64;
 export const COMPANION_PERSONALITY_MIN_LENGTH = 1;
 export const COMPANION_PERSONALITY_MAX_LENGTH = 60;
 export const AVATAR_MODEL_ID_MAX_LENGTH = 160;
+/** Cap for the decoded companion avatar image (base64 payload), independent of the prefix. */
+export const AVATAR_IMAGE_MAX_DECODED_BYTES = 64 * 1024;
 /** Defensive bound so a corrupt store cannot make the inspector render unbounded data. */
 export const MAX_COMPANIONS = 64;
+
+const AVATAR_IMAGE_PREFIXES: readonly string[] = Object.freeze([
+  "data:image/png;base64,",
+  "data:image/jpeg;base64,",
+]);
+
+/**
+ * Validates an optional companion avatar. Only inline PNG/JPEG data URLs are accepted
+ * (never arbitrary URLs); the decoded payload is capped at 64 KiB. Returns `null` for
+ * "clear the avatar". Error strings map to HTTP 400 (`invalid_avatar`) or 413
+ * (`avatar_too_large`); the bytes are never echoed in a response or logged.
+ */
+export function validateAvatarImage(value: unknown): ValidationResult<string | null> {
+  if (value === null) return { ok: true, value: null };
+  if (typeof value !== "string") return { ok: false, error: "invalid_avatar" };
+  const prefix = AVATAR_IMAGE_PREFIXES.find((candidate) => value.startsWith(candidate));
+  if (prefix === undefined) return { ok: false, error: "invalid_avatar" };
+  const payload = value.slice(prefix.length);
+  if (payload.length === 0 || payload.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(payload)) {
+    return { ok: false, error: "invalid_avatar" };
+  }
+  const padding = payload.endsWith("==") ? 2 : (payload.endsWith("=") ? 1 : 0);
+  const decodedBytes = (payload.length / 4) * 3 - padding;
+  if (decodedBytes > AVATAR_IMAGE_MAX_DECODED_BYTES) return { ok: false, error: "avatar_too_large" };
+  if (Buffer.from(payload, "base64").length !== decodedBytes) return { ok: false, error: "invalid_avatar" };
+  return { ok: true, value };
+}
+
 
 const COMPANION_STATES: readonly CompanionStateName[] = Object.freeze([
   "idle",
@@ -53,6 +83,8 @@ export type CompanionProfile = Readonly<{
   personaId: string;
   personality: string;
   avatarModelId: string;
+  /** Inline PNG/JPEG data URL (≤64 KiB decoded) or null; never an arbitrary URL. */
+  avatarImage: string | null;
   state: CompanionStateName;
   activeAction: CompanionActionId;
   /** Companion bag: distinct item ids, at most {@link MAX_COMPANION_ITEMS}. */
@@ -65,6 +97,7 @@ export type CompanionPatch = Readonly<{
   name?: string;
   personality?: string;
   personaId?: string;
+  avatarImage?: string | null;
 }>;
 
 function frozenEmptyItems(): readonly string[] {
@@ -83,6 +116,7 @@ export function seedCompanionProfiles(
       personaId: primary.personaId,
       personality: DEFAULT_PRIMARY_PERSONALITY,
       avatarModelId: DEFAULT_AVATAR_MODEL_ID,
+      avatarImage: null,
       state: "idle" as const,
       activeAction: primary.activeAction,
       items: frozenEmptyItems(),
@@ -94,6 +128,7 @@ export function seedCompanionProfiles(
       personaId: "playful-fish",
       personality: DEMO_FRIEND_PERSONALITY,
       avatarModelId: DEFAULT_AVATAR_MODEL_ID,
+      avatarImage: null,
       state: "idle" as const,
       activeAction: "stand" as const,
       items: frozenEmptyItems(),
@@ -125,9 +160,11 @@ export function validateCompanionPatch(value: unknown): ValidationResult<Compani
   if (typeof value !== "object" || value === null || Array.isArray(value)) return { ok: false, error: "invalid_companion_request" };
   const input = value as Record<string, unknown>;
   for (const key of Object.keys(input)) {
-    if (key !== "name" && key !== "personality" && key !== "personaId") return { ok: false, error: "unknown_companion_field" };
+    if (key !== "name" && key !== "personality" && key !== "personaId" && key !== "avatarImage") {
+      return { ok: false, error: "unknown_companion_field" };
+    }
   }
-  const patch: { name?: string; personality?: string; personaId?: string } = {};
+  const patch: { name?: string; personality?: string; personaId?: string; avatarImage?: string | null } = {};
   if (Object.hasOwn(input, "name")) {
     const name = typeof input.name === "string" ? input.name.trim() : "";
     if (name.length < PET_NAME_MIN_LENGTH || name.length > PET_NAME_MAX_LENGTH) return { ok: false, error: "invalid_companion_name" };
@@ -144,6 +181,11 @@ export function validateCompanionPatch(value: unknown): ValidationResult<Compani
     const personaId = typeof input.personaId === "string" ? input.personaId.trim() : "";
     if (personaId.length < 1 || personaId.length > COMPANION_PERSONA_ID_MAX_LENGTH) return { ok: false, error: "invalid_companion_persona" };
     patch.personaId = personaId;
+  }
+  if (Object.hasOwn(input, "avatarImage")) {
+    const avatarImage = validateAvatarImage(input.avatarImage);
+    if (!avatarImage.ok) return avatarImage;
+    patch.avatarImage = avatarImage.value;
   }
   return { ok: true, value: Object.freeze(patch) };
 }
@@ -176,7 +218,14 @@ export function parseStoredCompanionProfiles(value: unknown): readonly Companion
       throw new TypeError(`corrupt stored companion personality ${companionId}`);
     }
     const avatarModelId = profile.avatarModelId;
-    if (!isBoundedString(avatarModelId, 1, AVATAR_MODEL_ID_MAX_LENGTH)) throw new TypeError(`corrupt stored companion avatar ${companionId}`);
+    if (!isBoundedString(avatarModelId, 1, AVATAR_MODEL_ID_MAX_LENGTH)) throw new TypeError(`corrupt stored companion avatar model ${companionId}`);
+    // Profiles written before the avatar-image feature simply omit the field: read as null.
+    let avatarImage: string | null = null;
+    if (Object.hasOwn(profile, "avatarImage")) {
+      const parsedAvatar = validateAvatarImage(profile.avatarImage);
+      if (!parsedAvatar.ok) throw new TypeError(`corrupt stored companion avatar image ${companionId}`);
+      avatarImage = parsedAvatar.value;
+    }
     const state = profile.state;
     if (!isCompanionStateName(state)) throw new TypeError(`corrupt stored companion state ${companionId}`);
     const activeAction = profile.activeAction;
@@ -195,6 +244,7 @@ export function parseStoredCompanionProfiles(value: unknown): readonly Companion
       personaId,
       personality,
       avatarModelId,
+      avatarImage,
       state,
       activeAction,
       items: Object.freeze(items),
