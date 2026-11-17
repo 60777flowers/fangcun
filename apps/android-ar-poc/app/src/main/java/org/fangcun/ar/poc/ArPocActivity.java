@@ -164,6 +164,7 @@ public final class ArPocActivity extends Activity {
 
         String preset = getIntent().getStringExtra("code");
         if (getIntent().getBooleanExtra("preview", false)) arView.setPreviewMode(true);
+        if (getIntent().hasExtra("flipv")) arView.setFlipV(getIntent().getBooleanExtra("flipv", true));
         String savedToken = prefs.getString("token", null);
         String savedWorld = prefs.getString("worldId", null);
         if (preset != null && !preset.isEmpty()) {

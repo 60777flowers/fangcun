@@ -1,0 +1,15 @@
+# Connects the local Fangcun Host to this Harness over the MCP stdio transport, so the
+# agent can observe the shared voxel world and drive the companion (observe / claim home /
+# build tick / place / break / say). The Host must be running:
+#   node scripts/run-host.mjs   (loopback 127.0.0.1:8765)
+- insert:
+    - id: fangcun-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: fangcun
+        transport: stdio
+        command: node
+        args:
+          - 'D:/研一上/AR_MC/scripts/mcp-server.mjs'
+        cwd: 'D:/研一上/AR_MC'
+        failOnStartupError: true

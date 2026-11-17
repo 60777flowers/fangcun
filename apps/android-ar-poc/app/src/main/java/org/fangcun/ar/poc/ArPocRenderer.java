@@ -9,7 +9,6 @@ import com.google.ar.core.Camera;
 import com.google.ar.core.Frame;
 import com.google.ar.core.HitResult;
 import com.google.ar.core.Plane;
-import com.google.ar.core.Pose;
 import com.google.ar.core.Session;
 import com.google.ar.core.TrackingState;
 import com.google.ar.core.exceptions.CameraNotAvailableException;
@@ -29,8 +28,6 @@ import javax.microedition.khronos.opengles.GL10;
  */
 final class ArPocRenderer implements GLSurfaceView.Renderer {
     private static final int FLOAT_BYTES = 4;
-    /** Minimum viewing distance for the first anchor; the island is 0.48 m wide. */
-    private static final float MIN_ANCHOR_DISTANCE = 0.75f;
 
     private final ArPocActivity activity;
     private final VoxelWorld world;
@@ -66,10 +63,10 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private volatile int hintVoxelZ = Integer.MIN_VALUE;
 
     private static final float COMPANION_X = 0.10f;
-    /** Feet rest on the terrain surface: one 3 cm terrain block. */
-    private static final float COMPANION_Y = 0.03f;
+    /** Feet rest on the terrain surface: BUILD_MIN_Y voxels above the anchor plane. */
+    private static final float COMPANION_Y = VoxelWorld.BUILD_MIN_Y * VoxelWorld.VOXEL_METERS;
     private static final float COMPANION_Z = 0.06f;
-    private static final float PREVIEW_DISTANCE = 0.55f;
+    private static final float PREVIEW_DISTANCE = 1.0f;
     /** Two voxels tall, so the character reads at the same scale as the built blocks. */
     private static final float COMPANION_HEIGHT_METERS = 0.06f;
     private final float[] characterModel = new float[16];
@@ -90,6 +87,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private int vrmNormalMatrixHandle;
     private int vrmTextureHandle;
     private int vrmUseTextureHandle;
+    private int vrmFlipVHandle;
     private final float[] characterNormal = new float[9];
 
     ArPocRenderer(ArPocActivity activity, AtomicReference<float[]> pendingTap, VoxelWorld world) {
@@ -119,6 +117,19 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
      * can be inspected without a detected plane or an anchor.
      */
     void setPreviewMode(boolean enabled) { previewMode = enabled; }
+
+    /**
+     * Debug switch for the glTF-vs-GL texture V orientation. Off by default because
+     * Android's GLUtils.texImage2D already lands rows where glTF UVs expect them; flipping
+     * mirrors every texture region (the blue tail sampled skin instead).
+     */
+    void setFlipV(boolean enabled) {
+        flipV = enabled;
+        VrmModel model = vrm;
+        if (model != null) model.setFlipV(enabled);
+    }
+
+    private volatile boolean flipV;
 
     private volatile boolean previewMode;
 
@@ -159,8 +170,12 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             vrmNormalMatrixHandle = GLES20.glGetUniformLocation(vrmProgram, "u_NormalMatrix");
             vrmTextureHandle = GLES20.glGetUniformLocation(vrmProgram, "u_Tex");
             vrmUseTextureHandle = GLES20.glGetUniformLocation(vrmProgram, "u_UseTex");
+            vrmFlipVHandle = GLES20.glGetUniformLocation(vrmProgram, "u_FlipV");
             vrm = VrmModel.load(activity, COMPANION_ASSET);
-            if (vrm != null) vrm.normalise(COMPANION_HEIGHT_METERS);
+            if (vrm != null) {
+                vrm.normalise(COMPANION_HEIGHT_METERS);
+                vrm.setFlipV(flipV);
+            }
             glReady = true;
             Session current = session != null ? session : activity.currentSession();
             if (current != null) attachSessionTexture(current);
@@ -294,10 +309,10 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             planeHits++;
             Plane plane = (Plane) hit.getTrackable();
             if (plane.getTrackingState() != TrackingState.TRACKING || !plane.isPoseInPolygon(hit.getHitPose())) continue;
-            Pose hitPose = hit.getHitPose();
             Anchor newAnchor;
             try {
-                newAnchor = session.createAnchor(pushedAwayPose(frame, hitPose));
+                // The island is a thin slab now, so the tap point itself is a good spot.
+                newAnchor = hit.createAnchor();
             } catch (RuntimeException e) {
                 publishStatus("Anchor creation failed — tap again");
                 return;
@@ -305,55 +320,13 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             releaseAnchor();
             anchor = newAnchor;
             meshDirty = true;
-            publishStatus("Island anchored 0.75 m ahead");
+            publishStatus("Island anchored");
             return;
         }
         tapDiagnostic = planeHits == 0 ? "Tap missed plane — move device to map surface, retry."
             : "Plane hit outside detected surface polygon — keep moving, retry.";
         tapDiagnosticUntilMs = System.currentTimeMillis() + 2500;
         publishStatus(tapDiagnostic);
-    }
-
-    /**
-     * The island is 0.48 m wide, so anchoring at the exact tap point puts it under the
-     * device when the user taps close to themselves. Keep it on the same table plane but
-     * push it out to a comfortable viewing distance along the line of sight.
-     */
-    private Pose pushedAwayPose(Frame frame, Pose hitPose) {
-        Pose cameraPose = frame.getCamera().getPose();
-        float[] camera = cameraPose.getTranslation();
-        float[] hit = hitPose.getTranslation();
-        float dx = hit[0] - camera[0];
-        float dz = hit[2] - camera[2];
-        double horizontal = Math.hypot(dx, dz);
-        if (horizontal >= MIN_ANCHOR_DISTANCE) return hitPose;
-
-        float fx;
-        float fz;
-        if (horizontal < 1e-3) {
-            // Tap landed almost straight below the device: fall back to the camera's horizontal heading.
-            float[] matrix = new float[16];
-            cameraPose.toMatrix(matrix, 0);
-            fx = -matrix[8];
-            fz = -matrix[10];
-            double length = Math.hypot(fx, fz);
-            if (length < 1e-6) {
-                fx = 0f;
-                fz = -1f;
-            } else {
-                fx /= (float) length;
-                fz /= (float) length;
-            }
-        } else {
-            fx = (float) (dx / horizontal);
-            fz = (float) (dz / horizontal);
-        }
-        float[] translation = {
-            camera[0] + fx * MIN_ANCHOR_DISTANCE,
-            hit[1],
-            camera[2] + fz * MIN_ANCHOR_DISTANCE,
-        };
-        return new Pose(translation, hitPose.getRotationQuaternion());
     }
 
     /**
@@ -440,6 +413,8 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawCompanionModel(VrmModel model) {
+        // Preview enlarges the avatar so textures and material assignment can be inspected.
+        model.normalise(previewMode ? 0.45f : COMPANION_HEIGHT_METERS);
         double seconds = System.currentTimeMillis() / 1000.0;
         boolean busy = "building".equals(companionState) || "planning".equals(companionState);
         // Grounded by default: the avatar stands on the terrain and only hops while building.
@@ -453,7 +428,10 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         float offsetY = previewMode ? 0f : COMPANION_Y;
         float offsetZ = previewMode ? 0f : COMPANION_Z;
         Matrix.translateM(characterModel, 0, offsetX, offsetY + bob, offsetZ);
-        Matrix.rotateM(characterModel, 0, 180f + yaw, 0f, 1f, 0f);
+        // Preview turns the avatar toward the camera so textures and the silhouette can be
+        // compared against the model's own thumbnail.
+        float baseYaw = previewMode ? 0f : 180f;
+        Matrix.rotateM(characterModel, 0, baseYaw + yaw, 0f, 1f, 0f);
         Matrix.scaleM(characterModel, 0, model.scale(), model.scale(), model.scale());
         Matrix.translateM(characterModel, 0, model.offsetX(), model.offsetY(), model.offsetZ());
 
@@ -475,7 +453,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         GLES20.glUseProgram(vrmProgram);
         GLES20.glUniformMatrix4fv(vrmMvpHandle, 1, false, characterMvp, 0);
         GLES20.glUniformMatrix3fv(vrmNormalMatrixHandle, 1, false, characterNormal, 0);
-        model.draw(vrmProgram, vrmPositionHandle, vrmNormalHandle, vrmUvHandle, vrmTextureHandle, vrmUseTextureHandle);
+        model.draw(vrmProgram, vrmPositionHandle, vrmNormalHandle, vrmUvHandle, vrmTextureHandle, vrmUseTextureHandle, vrmFlipVHandle);
     }
 
     private void drawCompanion() {
@@ -569,12 +547,12 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
      * depth-sorted transparency.
      */
     private static final String VRM_VERTEX_SHADER =
-        "uniform mat4 u_Mvp; uniform mat3 u_NormalMatrix;"
+        "uniform mat4 u_Mvp; uniform mat3 u_NormalMatrix; uniform float u_FlipV;"
         + "attribute vec3 a_Position; attribute vec3 a_Normal; attribute vec2 a_Uv;"
         + "varying vec2 v_Uv; varying float v_Light;"
         + "void main(){"
         + " gl_Position=u_Mvp*vec4(a_Position,1.0);"
-        + " v_Uv=vec2(a_Uv.x, 1.0-a_Uv.y);"
+        + " v_Uv=vec2(a_Uv.x, u_FlipV > 0.5 ? 1.0-a_Uv.y : a_Uv.y);"
         + " vec3 n=normalize(u_NormalMatrix*a_Normal);"
         + " v_Light=0.62+0.38*max(dot(n, normalize(vec3(0.35,0.9,0.25))),0.0);"
         + "}";

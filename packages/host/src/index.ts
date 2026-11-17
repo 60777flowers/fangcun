@@ -5,7 +5,7 @@ import { BLOCK_IDS, WORLD_SPEC } from "@fangcun/world-schema";
 import { worldStateToObject } from "@fangcun/voxel-core";
 import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type CompanionStateName, type ServerMessage } from "@fangcun/protocol";
 import { WorldAuthority, type CompanionTickDecision } from "@fangcun/worldd";
-import { findHomeCandidates } from "@fangcun/companion-runtime";
+import { findHomeCandidates, type HomeCandidate } from "@fangcun/companion-runtime";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
 import { HostStore } from "./persistence.ts";
 import {
@@ -367,12 +367,22 @@ export class FangcunHost {
     send(404, { error: "not_found" });
   }
 
+  /**
+   * Candidates are derived from the current snapshot rather than cached from the last
+   * tick: a tick observed at an older revision would otherwise be offered to the user
+   * after the world moved, and approving it could never succeed.
+   */
+  #currentCandidate(): HomeCandidate | null {
+    if (this.#grant) return null;
+    return findHomeCandidates(this.#authority.snapshot)[0] ?? null;
+  }
+
   #coreState(): unknown {
     return {
       world: worldStateToObject(this.#authority.snapshot),
       ownerUserId: this.#ownerUserId,
       companion: this.#companion,
-      candidate: this.#lastTick?.status === "home_approval_required" ? this.#lastTick.candidate : undefined,
+      candidate: this.#currentCandidate() ?? undefined,
       homeGrantActive: this.#grant !== null,
     };
   }
@@ -552,7 +562,7 @@ export class FangcunHost {
   }
 
   #approveHome(candidateId: unknown): { approved: boolean; body: unknown } {
-    const candidate = findHomeCandidates(this.#authority.snapshot)[0];
+    const candidate = this.#currentCandidate();
     if (typeof candidateId !== "string" || !candidate || candidate.candidateId !== candidateId) {
       return { approved: false, body: { approved: false, error: "candidate_stale", world: worldStateToObject(this.#authority.snapshot) } };
     }

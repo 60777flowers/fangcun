@@ -41,6 +41,9 @@ final class ArPocView extends GLSurfaceView {
     /** Debug: draws the companion in front of the camera without needing a plane. */
     void setPreviewMode(boolean enabled) { queueEvent(() -> renderer.setPreviewMode(enabled)); }
 
+    /** Debug: flips the texture V orientation. */
+    void setFlipV(boolean enabled) { queueEvent(() -> renderer.setFlipV(enabled)); }
+
     /** Drops the island anchor so the next tap re-anchors (used by the UI button). */
     void resetAnchor() { queueEvent(() -> renderer.releaseAnchorNow()); }
 

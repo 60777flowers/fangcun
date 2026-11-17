@@ -52,6 +52,7 @@ final class VrmModel {
 
     private final List<Primitive> primitives = new ArrayList<>();
     private final float[] bounds = new float[6];
+    private volatile boolean flipV;
     private float uniformScale = 1f;
     private float offsetX;
     private float offsetY;
@@ -60,6 +61,8 @@ final class VrmModel {
     private VrmModel() { }
 
     int primitiveCount() { return primitives.size(); }
+
+    void setFlipV(boolean value) { flipV = value; }
 
     static VrmModel load(Context context, String assetPath) {
         byte[] bytes;
@@ -184,6 +187,11 @@ final class VrmModel {
                 }
 
                 int textureId = resolveTexture(gltf, materials, textures, images, bufferViews, bin, primitive.optInt("material", -1), textureCache);
+                String materialName = primitive.has("material") && materials != null
+                    ? materials.optJSONObject(primitive.optInt("material", -1)) == null ? "?" : materials.optJSONObject(primitive.optInt("material", -1)).optString("name", "?")
+                    : "(none)";
+                Log.i(TAG, "primitive mesh=" + meshIndex + " material=" + materialName + " verts=" + vertexCount
+                    + " indices=" + indexArray.length + " textureId=" + textureId);
                 model.primitives.add(new Primitive(
                     direct(positions),
                     direct(normals),
@@ -220,7 +228,9 @@ final class VrmModel {
     float offsetY() { return offsetY; }
     float offsetZ() { return offsetZ; }
 
-    void draw(int program, int positionHandle, int normalHandle, int uvHandle, int textureHandle, int useTextureHandle) {
+    void draw(int program, int positionHandle, int normalHandle, int uvHandle, int textureHandle, int useTextureHandle, int flipVHandle) {
+        // glTF UVs have their origin at the image's top-left while GL textures start bottom-left.
+        GLES20.glUniform1f(flipVHandle, flipV ? 1f : 0f);
         for (Primitive primitive : primitives) {
             if (primitive.textureId > 0) {
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
@@ -298,7 +308,11 @@ final class VrmModel {
         int longest = Math.max(probe.outWidth, probe.outHeight);
         while (longest / options.inSampleSize > MAX_TEXTURE_EDGE) options.inSampleSize *= 2;
         Bitmap bitmap = BitmapFactory.decodeByteArray(png, 0, png.length, options);
-        if (bitmap == null) return 0;
+        if (bitmap == null) {
+            Log.w(TAG, "texture decode failed: " + probe.outWidth + "x" + probe.outHeight + " sample=" + options.inSampleSize + " bytes=" + png.length);
+            return 0;
+        }
+        Log.i(TAG, "texture " + probe.outWidth + "x" + probe.outHeight + " -> " + bitmap.getWidth() + "x" + bitmap.getHeight() + " sample=" + options.inSampleSize);
         int[] ids = new int[1];
         GLES20.glGenTextures(1, ids, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0]);

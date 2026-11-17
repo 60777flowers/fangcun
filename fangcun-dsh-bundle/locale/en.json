@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Fangcun World Bridge",
+    "description": "Connects the local Fangcun Host so the agent can observe the shared voxel world, claim a home plot, run build ticks and talk through the companion."
+  }
+}
