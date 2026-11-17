@@ -174,24 +174,29 @@ final class CompanionActionRegistry {
         });
     }
 
-    /** Sleep: lie on the back, face up, with slow breathing through a tiny hips rise. */
+    /** Sleep: lie on the back (supine), face up, with slow breathing through a tiny hips rise. */
     private static CompanionAction lie() {
         return new CompanionAction("lie", "躺下", true, 10000L, 1, phase -> {
             float breathe = CompanionPoseMath.sine(0.5f, phase);
-            float pitch = debugLiePitch != null ? debugLiePitch : 88f;
+            float pitch = debugLiePitch != null ? debugLiePitch : -88f;
+            float roll = debugLieRoll != null ? debugLieRoll : 180f;
             float drop = debugLieDrop != null ? debugLieDrop : -0.90f;
             return CompanionAction.Pose.builder()
                 .bone("hips", 1f, 0f, 0f, pitch)
+                .bone("hips", 0f, 0f, 1f, roll)
                 .bone("head", 1f, 0f, 0f, 6f + 1.5f * breathe)
                 .bone("head", 0f, 0f, 1f, 5f)
                 .bone("spine", 1f, 0f, 0f, 1.5f * breathe)
+                .bone("leftUpperArm", 0f, 0f, 1f, -16f)
+                .bone("rightUpperArm", 0f, 0f, 1f, 16f)
                 .hips(0f, drop + 0.014f * breathe, 0f)
                 .build();
         });
     }
 
-    /** Debug tuning hooks for the lying pose (`--ef liePitch` / `--ef lieDrop`). */
+    /** Debug tuning hooks for the lying pose (`--ef liePitch` / `--ef lieRoll` / `--ef lieDrop`). */
     static volatile Float debugLiePitch;
+    static volatile Float debugLieRoll;
     static volatile Float debugLieDrop;
 
     /**

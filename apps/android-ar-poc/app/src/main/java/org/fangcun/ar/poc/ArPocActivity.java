@@ -175,6 +175,10 @@ public final class ArPocActivity extends Activity {
             // pop-in animations can be verified without a Host snapshot.
             world.debugSeedIsland();
             arView.markWorldDirty();
+            if (getIntent().getBooleanExtra("demoStairs", false)) {
+                // Debug: pre-place the seat block so lie/sit-on-stairs can be checked immediately.
+                if (world.debugPlace("stairs", 0, 1, 0)) arView.markWorldDirty();
+            }
             uiHandler.postDelayed(this::runDemoBuild, 10000L);
         }
 
@@ -281,6 +285,9 @@ public final class ArPocActivity extends Activity {
         if (getIntent().hasExtra("posePhase")) arView.setForcedPhase(getIntent().getFloatExtra("posePhase", -1f));
         if (getIntent().hasExtra("liePitch")) {
             CompanionActionRegistry.debugLiePitch = getIntent().getFloatExtra("liePitch", -88f);
+        }
+        if (getIntent().hasExtra("lieRoll")) {
+            CompanionActionRegistry.debugLieRoll = getIntent().getFloatExtra("lieRoll", 180f);
         }
         if (getIntent().hasExtra("lieDrop")) {
             CompanionActionRegistry.debugLieDrop = getIntent().getFloatExtra("lieDrop", -0.90f);
