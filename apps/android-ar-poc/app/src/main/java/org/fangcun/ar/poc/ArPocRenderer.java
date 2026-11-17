@@ -809,7 +809,12 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             return;
         }
         final float s = VoxelWorld.VOXEL_METERS;
-        float topY = active.maxY * s + 0.0016f;
+        // The highlight marks the plot ON the island surface: `min.y` is the first build layer,
+        // so its underside is the terrain top (min.y * voxel). The previous version used
+        // `max.y` (the roof of the proposed volume), which floated the quad ~12 cm above the
+        // island and made it disappear from the normal holding angle.
+        float groundY = active.minY * s;
+        float topY = groundY + 0.0020f;
         float edgeY = topY + 0.0008f;
         float[] fillPositions = new float[cells * 6 * 3];
         float[] fillColors = new float[cells * 6 * 4];
@@ -835,8 +840,8 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
                     fillPositions[fillCursor++] = corner[1];
                     fillPositions[fillCursor++] = corner[2];
                     fillColors[colorCursor++] = 1.0f;
-                    fillColors[colorCursor++] = 0.72f;
-                    fillColors[colorCursor++] = 0.26f;
+                    fillColors[colorCursor++] = 0.80f;
+                    fillColors[colorCursor++] = 0.30f;
                     fillColors[colorCursor++] = 1.0f;
                 }
                 // Perimeter lines per cell on the top face (four edges -> 8 vertices for GL_LINES).
@@ -874,12 +879,16 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         }
         if (proposalFillVertexCount == 0 || proposalFillPositions == null) return;
         float alpha = animationsEnabled
-            ? 0.30f + 0.12f * (float) Math.sin((now - proposalStartMs) * 0.0044f)
-            : 0.34f;
+            ? 0.55f + 0.15f * (float) Math.sin((now - proposalStartMs) * 0.0044f)
+            : 0.65f;
         GLES20.glUseProgram(program);
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0);
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        // Draw the marker with depth testing disabled: the thin +Y offset alone still lost to the
+        // grass/block depth at grazing angles, and the highlight must stay clearly visible even
+        // when blocks are already on the plot.
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST);
         GLES20.glDepthMask(false);
         // Translucent pulsing fill.
         GLES20.glUniform1f(colorAlphaHandle, alpha);
@@ -892,7 +901,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, proposalFillVertexCount);
         // Brighter edge lines.
         GLES20.glUniform1f(colorAlphaHandle, 1f);
-        GLES20.glLineWidth(2f);
+        GLES20.glLineWidth(3f);
         proposalLinePositions.position(0);
         GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, proposalLinePositions);
         proposalLineColors.position(0);
@@ -901,6 +910,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         GLES20.glDisableVertexAttribArray(positionHandle);
         GLES20.glDisableVertexAttribArray(colorHandle);
         GLES20.glDepthMask(true);
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glDisable(GLES20.GL_BLEND);
         GLES20.glUniform1f(colorAlphaHandle, 1f);
     }

@@ -62,11 +62,22 @@ final class HouseProposal {
         JSONObject max = bounds == null ? null : bounds.optJSONObject("maxExclusive");
         if (min == null || max == null) return null;
         try {
+            int minX = Math.min(min.getInt("x"), max.getInt("x"));
+            int minY = Math.min(min.getInt("y"), max.getInt("y"));
+            int minZ = Math.min(min.getInt("z"), max.getInt("z"));
+            int maxX = Math.max(min.getInt("x"), max.getInt("x"));
+            int maxY = Math.max(min.getInt("y"), max.getInt("y"));
+            int maxZ = Math.max(min.getInt("z"), max.getInt("z"));
+            // The Host frame/state carry `planBlockCount`; `blockCount` is accepted as a fallback
+            // for the agreed contract. Without this the card showed "0 块".
+            int blockCount = json.optInt("blockCount", json.optInt("planBlockCount", 0));
+            if (blockCount <= 0) {
+                blockCount = Math.max(1, (maxX - minX) * (maxY - minY) * (maxZ - minZ));
+            }
             return new HouseProposal(
                 json.optString("proposalId", json.optString("id", "")),
-                min.getInt("x"), min.getInt("y"), min.getInt("z"),
-                max.getInt("x"), max.getInt("y"), max.getInt("z"),
-                json.optInt("blockCount", 0),
+                minX, minY, minZ, maxX, maxY, maxZ,
+                blockCount,
                 json.optLong("expiresAtMs", 0L),
                 false);
         } catch (Exception error) {
