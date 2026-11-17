@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createSeedWorld } from "@fangcun/voxel-core";
+import { WORLD_SPEC } from "@fangcun/world-schema";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
 import { WorldAuthority } from "../src/index.ts";
 
@@ -64,7 +65,7 @@ test("companion tick proposes a home, waits for owner approval, then commits a s
   assert.equal(second.commit?.rev, 1);
   assert.equal(second.commit?.operations.length, 12);
   assert.equal(authority.snapshot.rev, 1);
-  assert.equal(authority.snapshot.blocks.filter(Boolean).length, 796);
+  assert.equal(authority.snapshot.blocks.filter(Boolean).length, 14 * 14 * WORLD_SPEC.terrainTopY + 12);
 
   const replay = await authority.runCompanionTick(actor, { trackingReady: true });
   assert.equal(replay.status, "rejected");

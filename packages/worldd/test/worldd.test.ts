@@ -44,7 +44,7 @@ test("authority rejects stale revisions, seq reuse and player modifications in p
   assert.equal(stale.ack.reason, "stale_revision");
   const reused = authority.handleIntent({ ...intent(2, 1, 1), operation: { type: "place", at: { x: 1, y: 4, z: 0 }, blockId: "glass" } });
   assert.equal(reused.ack.reason, "sequence_reuse_with_different_payload");
-  const below = validateClientIntent({ protocolVersion: 1, type: "intent", worldId: "test", clientId: "other", seq: 1, baseRev: 1, operation: { type: "place", at: { x: 0, y: 3, z: 0 }, blockId: "planks" } });
+  const below = validateClientIntent({ protocolVersion: 1, type: "intent", worldId: "test", clientId: "other", seq: 1, baseRev: 1, operation: { type: "place", at: { x: 0, y: 0, z: 0 }, blockId: "planks" } });
   assert.equal(below.ok, true);
   if (below.ok) assert.equal(authority.handleIntent(below.value).ack.reason, "protected_terrain");
   assert.equal(getBlock(authority.snapshot, { x: 0, y: 4, z: 0 }), "planks");

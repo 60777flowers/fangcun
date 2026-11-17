@@ -20,7 +20,7 @@
 ## 2. 坐标系与基准
 
 - 世界坐标：整数格点，`(x,y,z)` 表示该格左下近角；格占据 `[x,x+1)×[y,y+1)×[z,z+1)`。
-- 数据域：`x,z∈[-8,8)`、`y∈[0,16)`；地形 `y∈[0,4)`；建造区 `y∈[4,15]`。
+- 数据域：`x,z∈[-8,8)`、`y∈[0,16)`；地形 `y∈[0,1)`（单层）；建造区 `y∈[1,15]`。
 - `at`/`from`/`to` 均为**世界坐标**，不是 plot 局部坐标；`plotId` 只用于授权绑定与裁剪。
 - AABB 使用半开区间 `[min, maxExclusive)`；`maxExclusive` 不包含在范围内，每轴格数为 `maxExclusive-min`。例如 `min=[-1,4,-1], maxExclusive=[1,6,1]` 包含 2×2×2=8 格。原语的 `from`/`to` 仍表示包含端点的格坐标，与 AABB 边界语义不同。
 - 轴对齐：`line`/`wall`/`floor`/`stairs`/`roof_gable` 的 `from`/`to` 必须在同一平面上，且只沿一个或两个轴展开。
@@ -193,7 +193,7 @@ diffHash  = 8987f4c01307b543f156cb29a703bb7068e0fa856178db6b41140b2742d26500
 ```json
 {
   "rev": 23,
-  "world": { "size": [16,16,16], "origin": [-8,0,-8], "terrainTopY": 4 },
+  "world": { "size": [16,16,16], "origin": [-8,0,-8], "terrainTopY": 1 },
   "plot": { "grantId": "g-1", "aabb": { "min": [-3,4,-3], "maxExclusive": [3,8,3] }, "budget": { "perPlan": 24, "perDay": 120, "usedToday": 12 } },
   "nearby": { "blocks": [ { "at": [0,5,0], "block": "log" } ] },
   "companion": { "state": "idle", "currentPlanId": null },

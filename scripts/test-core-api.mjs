@@ -52,7 +52,7 @@ try {
   const initial = await json("/api/core/state");
   assert.equal(initial.response.status, 200);
   assert.equal(initial.body.world.rev, 0);
-  assert.equal(initial.body.world.blocks.filter(Boolean).length, 784);
+  assert.equal(initial.body.world.blocks.filter(Boolean).length, 196);
   assert.ok(initial.body.candidate);
 
   const badOrigin = await fetch(`${origin}/api/core/home/approve`, {

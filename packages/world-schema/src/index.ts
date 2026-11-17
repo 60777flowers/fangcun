@@ -5,7 +5,9 @@ export const WORLD_SPEC = Object.freeze({
   voxelSizeMeters: 0.03,
   maxBlocks: 4096,
   footprint: Object.freeze({ minX: -7, maxX: 7, minZ: -7, maxZ: 7 }),
-  terrainTopY: 4,
+  // One block thick: the island reads as a thin lawn slab and keeps the buildable
+  // volume large relative to its footprint.
+  terrainTopY: 1,
 });
 
 export type Coord = Readonly<{ x: number; y: number; z: number }>;

@@ -44,16 +44,16 @@ try {
   assert.equal(tileCount, 196, `simulator should render 196 selectable tiles; browser errors: ${errors.join(" | ")}`);
   const textOf = (selector) => page.$eval(selector, (element) => element.textContent.trim());
   assert.equal(await textOf("#world-rev"), "00");
-  assert.equal(await textOf("#block-count"), "784");
+  assert.equal(await textOf("#block-count"), "196");
   assert.equal((await textOf(".preview-label")).includes("DESKTOP PREVIEW"), true);
 
   await page.click('#tile-grid .tile[data-x="0"][data-z="0"]');
   await page.click("#place-button");
   assert.equal(await textOf("#world-rev"), "01");
-  assert.equal(await textOf("#block-count"), "785");
+  assert.equal(await textOf("#block-count"), "197");
   await page.click("#break-button");
   assert.equal(await textOf("#world-rev"), "02");
-  assert.equal(await textOf("#block-count"), "784");
+  assert.equal(await textOf("#block-count"), "196");
 
   await page.click("#proposal-prompt", { clickCount: 3 });
   await page.type("#proposal-prompt", "bridge");
@@ -64,7 +64,7 @@ try {
   assert.equal(await textOf("#world-rev"), "02", "proposal generation does not mutate state");
   await page.click("#confirm-proposal");
   assert.equal(await textOf("#world-rev"), "03", "explicit confirmation commits a single transaction");
-  assert.equal(await textOf("#block-count"), String(784 + proposed));
+  assert.equal(await textOf("#block-count"), String(196 + proposed));
   assert.equal(await page.$eval("#proposal-panel", (element) => element.hidden), true);
 
   await page.click(".generate-button");
@@ -81,7 +81,7 @@ try {
   const forbidden = await fetch(`${url}README.md`);
   assert.equal(forbidden.status, 404, "preview server does not expose unrelated repository files");
   assert.deepEqual(errors, [], "browser console has no page errors");
-  console.log(`Local UI smoke passed: seed 784 blocks → place/break → preview ${proposed} cells → explicit commit.`);
+  console.log(`Local UI smoke passed: seed 196 blocks → place/break → preview ${proposed} cells → explicit commit.`);
 
   const corePage = await browser.newPage();
   const coreErrors = [];

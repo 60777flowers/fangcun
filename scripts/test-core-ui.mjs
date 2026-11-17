@@ -27,23 +27,23 @@ try {
   const textOf = (selector) => page.$eval(selector, (element) => element.textContent.trim());
   await page.waitForFunction(() => document.querySelector("#core-state")?.textContent.includes("Connected"));
   assert.equal(await textOf("#world-rev"), "00");
-  assert.equal(await textOf("#block-count"), "784");
+  assert.equal(await textOf("#block-count"), "196");
   assert.equal((await textOf("#core-owner")), "simulator-owner");
 
   await page.click('#tile-grid .tile[data-x="0"][data-z="0"]');
   await page.click("#place-button");
   await page.waitForFunction(() => document.querySelector("#world-rev")?.textContent === "01");
-  assert.equal(await textOf("#block-count"), "785");
+  assert.equal(await textOf("#block-count"), "197");
   await page.click("#break-button");
   await page.waitForFunction(() => document.querySelector("#world-rev")?.textContent === "02");
-  assert.equal(await textOf("#block-count"), "784");
+  assert.equal(await textOf("#block-count"), "196");
 
   await page.click("#build-tick");
   await page.waitForFunction(() => !document.querySelector("#candidate-panel")?.hidden);
   assert.ok(await textOf("#candidate-select"));
   await page.click("#approve-candidate");
   await page.waitForFunction(() => document.querySelector("#world-rev")?.textContent === "03");
-  assert.equal(await textOf("#block-count"), "796");
+  assert.equal(await textOf("#block-count"), "208");
   assert.equal(await page.$eval("#candidate-panel", (element) => element.hidden), true);
   assert.deepEqual(errors, [], `browser errors: ${errors.join(" | ")}`);
   console.log("Shared Core UI smoke passed: server state → player place/break → owner home approval → 12-block companion commit; rev=3.");
