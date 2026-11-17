@@ -4,6 +4,8 @@
 > 当前分支：`feat/companion-extensibility`
 > 最近推送提交：`058a415`（`feat: wire safe companion home demo and Android AR POC`）
 > 本文是交接摘要；产品范围和细分验收以 [实施计划](IMPLEMENTATION-PLAN.md)、[Android 交付记录](ANDROID-DELIVERY.md) 与 ADR 为准。
+>
+> **2026-11-17 技术路线更新：**客户端已改为**原生 Kotlin + SceneView/Filament + ARCore + glTF**（见 [ADR-0003](ADR-0003-android-client-and-ar-stack.md)）；完整后续执行计划见 [TECH-ROADMAP](TECH-ROADMAP.md)，接口见 [HOST-API](HOST-API.md)/[DSL-SPEC](DSL-SPEC.md)，设备验证见 [DEVICE-TEST-PLAN](DEVICE-TEST-PLAN.md)。下文“阶段 C”已按新路线改写；历史 WebXR/WebView 假设仅保留在旧文档中，不再作为实现依据。
 
 ## 1. 项目目标
 
@@ -118,11 +120,11 @@ DSH adapter / MCP tools / persistence / WSS：尚未接通
 2. 实现最少权限 tools 和纯 mock agent end-to-end。
 3. 再让 mock loop 换成 DSH 实例；所有 commit 仍由 worldd 校验。
 
-### 阶段 C：Android 正式联机客户端
+### 阶段 C：Android 原生客户端联调
 
-1. 复用已通过的 ARCore session/anchor provider，加入 WorldSpec mapping、体素 renderer、网格点击、ghost 和 worldd WSS。
-2. 对齐 PC Host 和 Android replica 的 welcome/ack/commit/resync。
-3. 真机完成 place/break/companion commit/掉线恢复闭环；POC 的 shader 初始化与 hit-test 修复不等于这一步已完成。
+1. 新建 `apps/android-client`（Kotlin/Compose + SceneView/Filament）：ARCore 会话、体素 `MeshNode`、glTF 角色、射线选格、ghost 与 worldd WSS。POC 的 ARCore 会话/锚定经验沿用，渲染代码不复用。
+2. 对齐 PC Host、PC 检视页与 Android replica 的 welcome/ack/commit/resync；手机与 PC 必须显示同一 `rev`。
+3. 真机完成 place/break/companion commit/撤销/掉线恢复闭环；POC 的 shader 初始化与 hit-test 修复不等于这一步已完成。
 
 ### 阶段 D：持久化、安全、发行与扩展
 

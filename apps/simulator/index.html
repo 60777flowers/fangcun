@@ -26,7 +26,7 @@
       <div class="world-column">
         <div class="world-heading">
           <div>
-            <p class="eyebrow">LOCAL SANDBOX <span class="eyebrow-line"></span> WORLD 01</p>
+            <p class="eyebrow"><span id="world-mode-eyebrow">LOCAL SANDBOX</span> <span class="eyebrow-line"></span> WORLD 01</p>
             <h1 id="page-title">A little room<br>to <em>make.</em></h1>
           </div>
           <p class="world-note">A small island, an open sky.<br>Build something that belongs here.</p>
@@ -35,7 +35,7 @@
         <div class="scene-wrap">
           <div class="scene-meta" aria-hidden="true">
             <span>ISLAND / 14 × 14</span>
-            <span class="scene-meta-right">LOCAL WORLD <span class="live-dot"></span></span>
+            <span id="scene-world-mode" class="scene-meta-right">LOCAL WORLD <span class="live-dot"></span></span>
           </div>
           <canvas id="world-canvas" width="900" height="610" tabindex="0" role="group" aria-label="Isometric voxel island, 14 columns by 14 rows. Use the grid below to focus a tile, then place or break blocks."></canvas>
           <div class="scene-bottom" aria-hidden="true">
@@ -62,6 +62,23 @@
       </div>
 
       <aside class="tool-rail" aria-label="Build tools">
+        <section class="tool-section mode-section" aria-labelledby="mode-title">
+          <div class="section-heading"><span class="section-index">00</span><h2 id="mode-title">Runtime</h2><span class="heading-rule"></span></div>
+          <div class="runtime-mode" role="group" aria-label="Simulator runtime mode">
+            <button id="local-mode" class="runtime-mode-button is-active" type="button" aria-pressed="true">Local mode</button>
+            <button id="shared-mode" class="runtime-mode-button" type="button" aria-pressed="false">Shared Core Demo</button>
+          </div>
+          <p id="runtime-caption" class="runtime-caption">Local browser-only preview.</p>
+          <div id="shared-status" class="shared-status" hidden>
+            <div><span class="status-label">CORE</span><strong id="core-state">Not connected</strong></div>
+            <div><span class="status-label">OWNER</span><strong id="core-owner">—</strong></div>
+            <div><span class="status-label">COMPANION</span><strong id="companion-state">—</strong></div>
+          </div>
+          <p id="runtime-error" class="runtime-error" role="alert" hidden></p>
+          <button id="retry-core" class="retry-button" type="button" hidden>Retry connection</button>
+          <p id="demo-disclaimer" class="demo-disclaimer" hidden>Localhost demo only. No phone is connected; this is not production.</p>
+        </section>
+
         <section class="tool-section material-section" aria-labelledby="materials-title">
           <div class="section-heading"><span class="section-index">01</span><h2 id="materials-title">Material</h2><span class="heading-rule"></span></div>
           <p class="section-caption">Choose a block for your next move.</p>
@@ -96,9 +113,22 @@
           </div>
         </section>
 
+        <section id="companion-section" class="tool-section companion-section" aria-labelledby="companion-title" hidden>
+          <div class="section-heading"><span class="section-index">03</span><h2 id="companion-title">Companion build</h2><span class="heading-rule"></span></div>
+          <p id="companion-message" class="section-caption">Request a local demo build tick.</p>
+          <div id="candidate-panel" class="candidate-panel" hidden>
+            <div class="candidate-heading"><span>HOME CANDIDATE</span><strong id="candidate-count"></strong></div>
+            <label class="candidate-select-label" for="candidate-select">Plot</label>
+            <select id="candidate-select"></select>
+            <p id="candidate-description" class="candidate-description"></p>
+            <button id="approve-candidate" class="confirm-button" type="button" disabled>Approve plot</button>
+          </div>
+          <button id="build-tick" class="tick-button" type="button"><span aria-hidden="true">↻</span>Build tick</button>
+        </section>
+
         <section class="tool-section proposal-section" aria-labelledby="proposal-title">
-          <div class="section-heading"><span class="section-index">03</span><h2 id="proposal-title">AI build proposal</h2><span class="heading-rule"></span></div>
-          <p class="section-caption">Browser-generated AI-style plan. Nothing is placed until you confirm.</p>
+          <div class="section-heading"><span class="section-index">04</span><h2 id="proposal-title">Local build proposal</h2><span class="heading-rule"></span></div>
+          <p class="section-caption">Browser-generated local plan. Nothing is placed until you confirm.</p>
           <form id="proposal-form" class="proposal-form">
             <label class="sr-only" for="proposal-prompt">Describe a small build</label>
             <input id="proposal-prompt" name="prompt" type="text" maxlength="120" autocomplete="off" placeholder="A small cabin by the shore" value="A small cabin">

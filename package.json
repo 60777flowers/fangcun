@@ -17,6 +17,8 @@
     "test": "node --experimental-strip-types --test packages/ar-provider/test/*.test.ts packages/companion-schema/test/*.test.ts packages/companion-runtime/test/*.test.ts packages/world-schema/test/*.test.ts packages/protocol/test/*.test.ts packages/voxel-core/test/*.test.ts packages/worldd/test/*.test.ts",
     "simulator": "npm run build && node scripts/serve-simulator.mjs",
     "test:simulator": "node scripts/test-simulator.mjs",
+    "test:core-api": "node scripts/test-core-api.mjs",
+    "test:core-ui": "node scripts/test-core-ui.mjs",
     "demo:companion": "npm run build && node scripts/demo-companion.mjs"
   },
   "devDependencies": {

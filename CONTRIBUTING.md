@@ -1,7 +1,7 @@
 # 贡献指南 · Contributing
 
 > 仓库：**https://github.com/60777flowers/fangcun**
-> 先读 **[docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md)**（当前范围、架构建议、接口与验收），再动手。**[docs/DEV.md](docs/DEV.md) 是历史草案，禁止直接按其中的协议/尺寸实现。**
+> 先读 **[docs/ADR-0003](docs/ADR-0003-android-client-and-ar-stack.md)**（客户端/AR 技术栈决策）与 **[docs/TECH-ROADMAP](docs/TECH-ROADMAP.md)**（执行计划），再读 **[docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md)**（范围与验收）。**[docs/DEV.md](docs/DEV.md) 是历史草案，禁止直接按其中的协议/尺寸实现。**
 
 ---
 
@@ -35,7 +35,7 @@ npm run test:simulator   # Chrome 浏览器交互回归
 
 ## 3. PR 检查清单
 
-> 正式 workspace 和 CI 尚未建立。以下为**落地后的目标门槛**，不能误认为当前命令已可运行；首个工程任务是让 fresh clone 可执行 install/typecheck/test/build。
+> Node 工作区与 Linux CI 已建立（`npm ci` / `npm run typecheck` / `npm test` 可跑）；**Android 构建与 CI 尚未建立**（无 Gradle wrapper，工具链升级见 TECH-ROADMAP M0-1）。以下门槛中与 Android/协议 v2/原生客户端相关的部分仍是目标，不是当前成绩。
 
 - [ ] workspace 脚本真实存在并在干净检出中通过
 - [ ] schema/协议变更同步更新 client、worldd、DSH adapter，并通过兼容/迁移测试
@@ -56,11 +56,11 @@ npm run test:simulator   # Chrome 浏览器交互回归
 
 ## 5. 当前的第一优先级任务
 
-按 [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) 的顺序：
+按 [docs/TECH-ROADMAP.md](docs/TECH-ROADMAP.md) 的 M0/M1：
 
-1. **M0 Android AR/TLS/WSS 风险 spike**：真机验证 WebXR 桌面锚定、透明渲染和可复现 LAN 配对
-2. **M1 workspace + 共享 schema**：建立可构建/可测试骨架，统一坐标和协议
-3. **M2 体素渲染迁移**：从静态 preview 提取确定性可测试核心
+1. **M0 原生 ARCore/SceneView、LAN TLS 配对、DSH 工具面验证**：真机跑通 SceneView + glTF + 自定义网格；证书指纹固定配对；mock 工具闭环（见 [docs/DEVICE-TEST-PLAN.md](docs/DEVICE-TEST-PLAN.md)）
+2. **M1 协议 v2 + DSL + 黄金用例**：冻结 [docs/HOST-API.md](docs/HOST-API.md) 与 [docs/DSL-SPEC.md](docs/DSL-SPEC.md)，建立跨语言一致性测试
+3. **M2 Host + PC 检视页 / M3 Android 客户端核心**：契约冻结后并行
 
 正式角色制作、iOS、独立桌宠窗和真实 Minecraft 联动均不阻塞 v0。
 

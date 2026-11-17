@@ -1,13 +1,18 @@
 # Android 交付与安装路线
 
+> **2026-11-17 更新：客户端形态已改为原生 Kotlin APK（SceneView/Filament + ARCore + glTF）；本文件下方“WebXR/WebView 壳/外部 Chrome”段落仅作历史记录，已作废。以 [ADR-0003](ADR-0003-android-client-and-ar-stack.md) 与 [TECH-ROADMAP](TECH-ROADMAP.md) 为准。**
+
 ## 已确认目标
 
 - 面向广泛 Android 手机/平板；运行时探测设备能力，不按 Tab S8 型号分支。
-- 支持 ARCore 的设备优先 WebXR `immersive-ar`；缺少 ARCore/WebXR 时，尝试经打印定位标记建立桌面坐标系的相机叠加 provider。
+- v0 使用原生 ARCore 会话（SceneView `ARSceneView`）；打印标记追踪作为 v1 的兼容模式，经 CameraX + BoofCV 建立桌面坐标系。
 - 用户测试方式是下载 APK 后手动安装，不要求打开 ADB。
 - 仓库内新增 `apps/android-ar-poc` 原生 ARCore 验证工程和 debug APK。它仅验证相机背景、水平面 hit-test、单个锚定测试方块及 tracking fail-closed；不是主客户端 APK，也不包含 voxel world/网络/AI companion。
+- 产品客户端将另建 `apps/android-client`（Kotlin/Compose），不复用 POC 的渲染代码，但复用其 ARCore 会话/锚定经验。
 
-## 建议的 APK 技术决策（M0 Spike 后接受）
+## （已作废，历史记录）建议的 APK 技术决策
+
+> 以下为 2026-11-16 的“WebView/TWA 壳 + 外部 Chrome”方案，已被 [ADR-0003](ADR-0003-android-client-and-ar-stack.md) 取代。保留仅为追溯；不要按此实现。
 
 先保持主客户端为 HTTPS Web 应用，通过 PC Host 配对/局域网运行；在 WebXR 与桌面配对可复现之后，选一个轻量 Android WebView/TWA 容器作为 APK 交付壳：
 
@@ -33,13 +38,13 @@
 
 ## 真机矩阵
 
-至少验证：一台 ARCore 中档手机、一台不同厂商/屏幕尺寸的 ARCore 设备；标记模式再选一台确认不支持 ARCore 但摄像头性能合适的设备。登记 Android/System WebView/Chrome/ARCore 版本、屏幕密度、tracking/帧时间/热状态、手动安装和覆盖升级行为。Tab S8 只是首个可用平板，不是唯一目标或最低规格定义。
+至少验证：一台 ARCore 中档手机、一台不同厂商/屏幕尺寸的 ARCore 设备；v1 标记模式再选一台确认不支持 ARCore 但摄像头性能合适的设备。登记 Android/ARCore 版本、屏幕密度、tracking/帧时间/热状态、手动安装和覆盖升级行为。Tab S8 只是首个可用平板，不是唯一目标或最低规格定义。
 
 ## APK 的交付门槛
 
-- [ ] M0 WebXR ARCore 能力、LAN HTTPS/WSS 和配对风险实测完成
-- [ ] 明确 WebView/TWA/外部浏览器选择并完成 TLS/camera/XR 权限 POC
-- [ ] marker license、打印规格、跟踪 provider POC 与遮挡/丢失 fail-closed 通过
-- [ ] 安装 debug APK、手动配对、AR/marker 放置、放置/拆除 smoke 通过
+- [ ] M0 原生 ARCore/SceneView 能力、LAN HTTPS/WSS 配对、DSH 工具面实测完成（见 [DEVICE-TEST-PLAN](DEVICE-TEST-PLAN.md)）
+- [ ] 工具链升级（SDK platform 36、JDK 21、Kotlin 2.2、Gradle wrapper）与 Android CI 构建通过
+- [ ] 安装 debug APK、扫码/手动码配对、AR 放置/拆除 smoke 通过
 - [ ] 签名/升级/卸载/数据删除/权限告知说明完成
-- [ ] 至少两个不同档 Android 机型矩阵通过；发行素材与 SBOM/许可门禁通过
+- [ ] 至少两个不同档 ARCore 机型矩阵通过；v1 标记模式另测非 ARCore 设备
+- [ ] 发行素材与 SBOM/许可门禁通过

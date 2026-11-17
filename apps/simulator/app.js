@@ -1,5 +1,8 @@
 import { BLOCK_DEFS, WORLD_SPEC } from "@fangcun/world-schema";
-import { applyTransaction, countBlocks, createSeedWorld, getBlock } from "@fangcun/voxel-core";
+import { applyTransaction, assertWorldState, countBlocks, createSeedWorld, getBlock, worldStateFromObject } from "@fangcun/voxel-core";
+
+const API_BASE = "/api/core";
+const CORE_MODE = new URLSearchParams(window.location.search).get("mode") === "core";
 
 const MATERIALS = ["planks", "stone", "glass", "leaves"];
 const COLORS = {
@@ -22,6 +25,27 @@ const modeButtons = [...document.querySelectorAll(".mode-button")];
 const proposalPanel = document.querySelector("#proposal-panel");
 const toast = document.querySelector("#toast");
 const status = document.querySelector("#canvas-status");
+const localModeButton = document.querySelector("#local-mode");
+const sharedModeButton = document.querySelector("#shared-mode");
+const runtimeCaption = document.querySelector("#runtime-caption");
+const sharedStatus = document.querySelector("#shared-status");
+const coreStateLabel = document.querySelector("#core-state");
+const coreOwnerLabel = document.querySelector("#core-owner");
+const companionStateLabel = document.querySelector("#companion-state");
+const runtimeError = document.querySelector("#runtime-error");
+const retryCoreButton = document.querySelector("#retry-core");
+const demoDisclaimer = document.querySelector("#demo-disclaimer");
+const companionSection = document.querySelector("#companion-section");
+const companionMessage = document.querySelector("#companion-message");
+const candidatePanel = document.querySelector("#candidate-panel");
+const candidateSelect = document.querySelector("#candidate-select");
+const candidateDescription = document.querySelector("#candidate-description");
+const candidateCount = document.querySelector("#candidate-count");
+const approveCandidateButton = document.querySelector("#approve-candidate");
+const buildTickButton = document.querySelector("#build-tick");
+const statsNote = document.querySelector(".stats-note");
+const sceneWorldMode = document.querySelector("#scene-world-mode");
+const worldModeEyebrow = document.querySelector("#world-mode-eyebrow");
 const tileWidth = 34;
 const tileHeight = 17;
 const blockHeight = 16;
@@ -30,7 +54,17 @@ const baseY = 362;
 const halfWidth = tileWidth / 2;
 const halfHeight = tileHeight / 2;
 
-let world = createSeedWorld("local-preview");
+let localWorld = createSeedWorld("local-preview");
+let world = localWorld;
+let runtimeMode = "local";
+let coreConnected = false;
+let coreBusy = false;
+let pendingIntent = (() => {
+  try { return JSON.parse(sessionStorage.getItem("simulator-pending-intent") ?? "null"); } catch { return null; }
+})();
+let clientSeq = Number(sessionStorage.getItem("simulator-client-seq") ?? 0);
+let companion = null;
+let candidates = [];
 let selectedMaterial = "planks";
 let selectedTile = null;
 let clickMode = "select";
@@ -183,8 +217,9 @@ function targetForAction(action) {
 function updateControls() {
   const placement = targetForAction("place");
   const removal = targetForAction("break");
-  placeButton.disabled = !placement;
-  breakButton.disabled = !removal;
+  const editsEnabled = runtimeMode === "local" || (coreConnected && !coreBusy && !pendingIntent);
+  placeButton.disabled = !placement || !editsEnabled;
+  breakButton.disabled = !removal || !editsEnabled;
   const target = clickMode === "break" ? removal : placement;
   const coordLabel = document.querySelector("#target-coord");
   if (!selectedTile) coordLabel.textContent = "No tile selected";
@@ -243,8 +278,222 @@ function toastMessage(message) {
   toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2400);
 }
 
-function commitOperations(operations, successMessage) {
+function installWorld(nextWorld) {
+  if (nextWorld?.schemaVersion === WORLD_SPEC.version) return worldStateFromObject(nextWorld);
+  if (assertWorldState(nextWorld)) return nextWorld;
+  throw new Error("Core returned an invalid world snapshot.");
+}
+
+function refreshWorldView() {
+  proposal = proposal && proposal.baseRev !== world.rev ? proposal : null;
+  updateStats();
+  updateControls();
+  render();
+  syncProposalPanel();
+}
+
+function setRuntimeNotice(message = "", kind = "error") {
+  runtimeError.hidden = !message;
+  runtimeError.textContent = message;
+  runtimeError.classList.toggle("is-paused", kind === "paused");
+  retryCoreButton.hidden = runtimeMode !== "shared" || (coreConnected && !pendingIntent);
+}
+
+function setCoreBusy(busy) {
+  coreBusy = busy;
+  buildTickButton.disabled = busy || !coreConnected;
+  approveCandidateButton.disabled = busy || !coreConnected || !candidateSelect.value;
+  retryCoreButton.disabled = busy;
+  updateControls();
+}
+
+async function coreRequest(path, options = {}) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...options.headers },
+  });
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(`Core returned an unreadable response (${response.status}).`);
+  }
+  if (!response.ok) throw new Error(payload?.error ?? payload?.message ?? `Core request failed (${response.status}).`);
+  return payload;
+}
+
+function updateCompanionStatus() {
+  if (!companion) {
+    companionStateLabel.textContent = "Unavailable";
+    return;
+  }
+  const state = companion.state ?? "unknown";
+  companionStateLabel.textContent = `${state}${companion.autonomyEnabled === false ? " · autonomy off" : ""}`;
+}
+
+function setCandidates(values) {
+  candidates = values.filter((candidate) => candidate && typeof candidate.candidateId === "string");
+  candidateSelect.replaceChildren();
+  for (const [index, candidate] of candidates.entries()) {
+    const option = document.createElement("option");
+    option.value = candidate.candidateId;
+    const origin = candidate.origin;
+    option.textContent = origin ? `Plot ${index + 1} · x${origin.x}, z${origin.z}` : `Plot ${index + 1}`;
+    candidateSelect.append(option);
+  }
+  candidatePanel.hidden = candidates.length === 0;
+  candidateCount.textContent = candidates.length ? `${candidates.length} available` : "";
+  renderSelectedCandidate();
+}
+
+function renderSelectedCandidate() {
+  const candidate = candidates.find((item) => item.candidateId === candidateSelect.value) ?? candidates[0];
+  if (candidate && candidateSelect.value !== candidate.candidateId) candidateSelect.value = candidate.candidateId;
+  const bounds = candidate?.bounds;
+  candidateDescription.textContent = candidate
+    ? `Observed at revision ${candidate.observedRev}. ${bounds ? `Plot spans x ${bounds.min.x}–${bounds.maxExclusive.x - 1}, z ${bounds.min.z}–${bounds.maxExclusive.z - 1}.` : ""}`
+    : "No plot selected.";
+  approveCandidateButton.disabled = coreBusy || !coreConnected || !candidate;
+}
+
+function applyCoreWorld(nextWorld) {
+  world = installWorld(nextWorld);
+  refreshWorldView();
+}
+
+async function loadCoreState() {
+  coreStateLabel.textContent = "Connecting…";
+  coreOwnerLabel.textContent = "—";
+  coreConnected = false;
+  setRuntimeNotice("");
+  setCoreBusy(true);
+  try {
+    const payload = await coreRequest("/state");
+    applyCoreWorld(payload.world);
+    if (typeof payload.ownerUserId !== "string" || !payload.companion || typeof payload.companion !== "object") {
+      throw new Error("Core state is missing ownerUserId or companion.");
+    }
+    coreOwnerLabel.textContent = payload.ownerUserId;
+    companion = payload.companion;
+    updateCompanionStatus();
+    coreConnected = true;
+    coreStateLabel.textContent = "Connected · localhost";
+    setRuntimeNotice("");
+    setCandidates(payload.candidate ? [payload.candidate] : []);
+    if (payload.homeGrantActive === true) companionMessage.textContent = "Home plot active. Run a build tick when ready.";
+    if (pendingIntent) {
+      coreStateLabel.textContent = "Connected · pending intent";
+      retryCoreButton.hidden = false;
+      setRuntimeNotice("An intent is awaiting confirmation. Retry it to resolve the result.", "paused");
+    }
+  } catch (error) {
+    coreStateLabel.textContent = "Offline";
+    coreConnected = false;
+    setRuntimeNotice(error.message);
+  } finally {
+    setCoreBusy(false);
+  }
+}
+
+function setRuntimeMode(mode) {
+  if (mode === runtimeMode || coreBusy) return;
+  if (runtimeMode === "shared" && pendingIntent && mode === "local") {
+    toastMessage("Retry or resolve the pending shared intent before switching modes.");
+    return;
+  }
+  runtimeMode = mode;
+  const shared = mode === "shared";
+  localModeButton.classList.toggle("is-active", !shared);
+  localModeButton.setAttribute("aria-pressed", String(!shared));
+  sharedModeButton.classList.toggle("is-active", shared);
+  sharedModeButton.setAttribute("aria-pressed", String(shared));
+  sharedStatus.hidden = !shared;
+  companionSection.hidden = !shared;
+  proposalPanel.hidden = shared || !proposal;
+  document.querySelector(".proposal-section").hidden = shared;
+  demoDisclaimer.hidden = !shared;
+  runtimeCaption.textContent = shared ? "Server-authoritative edits via localhost demo API." : "Local browser-only preview.";
+  statsNote.textContent = shared ? "Localhost demo state. No phone is connected." : "Changes are local to this browser session.";
+  sceneWorldMode.innerHTML = shared ? 'SHARED CORE <span class="live-dot"></span>' : 'LOCAL WORLD <span class="live-dot"></span>';
+  worldModeEyebrow.textContent = shared ? "SHARED CORE DEMO" : "LOCAL SANDBOX";
+  if (shared) {
+    coreStateLabel.textContent = "Not connected";
+    setCandidates([]);
+    void loadCoreState();
+  } else {
+    world = localWorld;
+    companion = null;
+    coreConnected = false;
+    coreStateLabel.textContent = "Not connected";
+    companionStateLabel.textContent = "—";
+    coreOwnerLabel.textContent = "—";
+    setRuntimeNotice("");
+    refreshWorldView();
+  }
+  updateControls();
+}
+
+async function submitSharedIntent(operation, successMessage, retry = false) {
+  if (!coreConnected || coreBusy) return false;
+  if (!pendingIntent) {
+    pendingIntent = {
+      clientId: sessionStorage.getItem("simulator-client-id") || crypto.randomUUID(),
+      seq: clientSeq + 1,
+      baseRev: world.rev,
+      operation,
+    };
+    sessionStorage.setItem("simulator-client-id", pendingIntent.clientId);
+    sessionStorage.setItem("simulator-pending-intent", JSON.stringify(pendingIntent));
+  }
+  setCoreBusy(true);
+  coreStateLabel.textContent = retry ? "Retrying intent…" : "Sending intent…";
+  setRuntimeNotice("");
+  try {
+    const payload = await coreRequest("/intent", {
+      method: "POST",
+      body: JSON.stringify(pendingIntent),
+    });
+    const ack = payload.decision?.ack;
+    const resolvedSeq = pendingIntent?.seq;
+    if (!ack || !Number.isSafeInteger(ack.seq) || ack.seq !== resolvedSeq || typeof ack.accepted !== "boolean" || !payload.world) {
+      throw new Error("Core returned an incomplete or mismatched intent acknowledgement.");
+    }
+    applyCoreWorld(payload.world);
+    // Any definitive ACK consumes the submitted seq, including stale_revision.
+    clientSeq = Math.max(clientSeq, ack.seq);
+    sessionStorage.setItem("simulator-client-seq", String(clientSeq));
+    pendingIntent = null;
+    sessionStorage.removeItem("simulator-pending-intent");
+    coreConnected = true;
+    coreStateLabel.textContent = "Connected · localhost";
+    if (!ack.accepted) {
+      const reason = ack.reason ?? "intent rejected";
+      setRuntimeNotice(`Intent rejected: ${reason.replaceAll("_", " ")}.`, "paused");
+      toastMessage(`Intent rejected: ${reason.replaceAll("_", " ")}.`);
+      return false;
+    }
+    toastMessage(successMessage);
+    status.textContent = `${successMessage} Revision ${world.rev}.`;
+    return true;
+  } catch (error) {
+    coreConnected = false;
+    coreStateLabel.textContent = "Offline · intent pending";
+    setRuntimeNotice(`${error.message} The intent is retained for a safe retry.`);
+    return false;
+  } finally {
+    setCoreBusy(false);
+  }
+}
+
+async function commitOperations(operations, successMessage) {
   if (!operations.length) return false;
+  if (runtimeMode === "shared") {
+    if (operations.length !== 1) {
+      toastMessage("Shared mode accepts one player edit at a time.");
+      return false;
+    }
+    return submitSharedIntent(operations[0], successMessage);
+  }
   const result = applyTransaction(world, operations);
   if (!result.ok) {
     toastMessage(`Transaction rejected: ${result.code.replaceAll("_", " ")}.`);
@@ -252,14 +501,91 @@ function commitOperations(operations, successMessage) {
     return false;
   }
   world = result.world;
-  proposal = proposal && proposal.baseRev !== world.rev ? proposal : null;
-  updateStats();
-  updateControls();
-  render();
-  syncProposalPanel();
+  localWorld = result.world;
+  refreshWorldView();
   toastMessage(successMessage);
   status.textContent = `${successMessage} Revision ${world.rev}.`;
   return true;
+}
+
+async function retryCore() {
+  if (runtimeMode !== "shared" || coreBusy) return;
+  if (!coreConnected) {
+    await loadCoreState();
+    if (!coreConnected) return;
+  }
+  if (pendingIntent) await submitSharedIntent(pendingIntent.operation, "Shared intent confirmed.", true);
+}
+
+async function runBuildTick() {
+  if (runtimeMode !== "shared" || !coreConnected || coreBusy) return;
+  setCoreBusy(true);
+  coreStateLabel.textContent = "Build tick running…";
+  setRuntimeNotice("");
+  companionMessage.textContent = "Checking tracking and companion policy…";
+  try {
+    const payload = await coreRequest("/companion/tick", { method: "POST" });
+    if (!payload.world || !payload.result || typeof payload.result.status !== "string") throw new Error("Core returned an incomplete companion tick.");
+    applyCoreWorld(payload.world);
+    const result = payload.result;
+    if (result.candidate) setCandidates(Array.isArray(result.candidate) ? result.candidate : [result.candidate]);
+    else setCandidates([]);
+    coreConnected = true;
+    coreStateLabel.textContent = "Connected · localhost";
+    companionMessage.textContent = result.reason
+      ? `${result.status.replaceAll("_", " ")} · ${result.reason.replaceAll("_", " ")}`
+      : `${result.status.replaceAll("_", " ")} · ${Array.isArray(result.intents) ? result.intents.length : 0} intent(s)`;
+    if (result.status === "paused") {
+      setRuntimeNotice(`Companion paused: ${(result.reason ?? "tracking or autonomy unavailable").replaceAll("_", " ")}.`, "paused");
+    } else {
+      setRuntimeNotice("");
+    }
+    if (result.commit) toastMessage(`Companion build committed at revision ${world.rev}.`);
+    else if (result.status === "home_approval_required") toastMessage("Choose a candidate plot and approve it before the next build tick.");
+    else if (result.status === "committed") toastMessage("Companion build committed.");
+    updateCompanionStatus();
+  } catch (error) {
+    coreConnected = false;
+    coreStateLabel.textContent = "Offline";
+    setRuntimeNotice(error.message);
+    companionMessage.textContent = "Tick failed. Reconnect to continue.";
+  } finally {
+    setCoreBusy(false);
+    renderSelectedCandidate();
+  }
+}
+
+async function approveCandidate() {
+  if (runtimeMode !== "shared" || !coreConnected || coreBusy) return;
+  const candidate = candidates.find((item) => item.candidateId === candidateSelect.value);
+  if (!candidate) return;
+  setCoreBusy(true);
+  setRuntimeNotice("");
+  companionMessage.textContent = "Requesting owner approval…";
+  try {
+    const payload = await coreRequest("/home/approve", {
+      method: "POST",
+      body: JSON.stringify({ candidateId: candidate.candidateId }),
+    });
+    if (payload.approved !== true) {
+      companionMessage.textContent = "Approval was not granted.";
+      setRuntimeNotice("The core did not approve this candidate.", "paused");
+      return;
+    }
+    if (payload.world) applyCoreWorld(payload.world);
+    candidatePanel.hidden = true;
+    candidates = [];
+    companionMessage.textContent = "Plot approved. Running the next companion tick…";
+  } catch (error) {
+    coreConnected = false;
+    coreStateLabel.textContent = "Offline";
+    setRuntimeNotice(error.message);
+    companionMessage.textContent = "Approval failed. Reconnect to continue.";
+    return;
+  } finally {
+    setCoreBusy(false);
+  }
+  await runBuildTick();
 }
 
 function placeSelected() {
@@ -376,6 +702,7 @@ function towerPattern(material) {
 }
 
 function generateProposal(promptText) {
+  if (runtimeMode === "shared") return;
   const prompt = promptText.trim();
   if (!prompt) {
     toastMessage("Describe a small build first.");
@@ -438,7 +765,7 @@ function syncProposalPanel() {
   document.querySelector("#confirm-proposal").disabled = stale || proposal.cells.length === 0;
 }
 
-function confirmProposal() {
+async function confirmProposal() {
   if (!proposal) return;
   if (proposal.baseRev !== world.rev) {
     syncProposalPanel();
@@ -451,7 +778,7 @@ function confirmProposal() {
     at: { x: cell.x, y: cell.y, z: cell.z },
     blockId: cell.blockId,
   }));
-  const committed = commitOperations(operations, `Build confirmed: ${operations.length} blocks.`);
+  const committed = await commitOperations(operations, `Build confirmed: ${operations.length} blocks.`);
   if (committed) {
     proposal = null;
     syncProposalPanel();
@@ -472,6 +799,7 @@ for (const button of materialButtons) button.tabIndex = button.dataset.material 
 updateStats();
 updateControls();
 render();
+if (CORE_MODE) setRuntimeMode("shared");
 
 materialButtons.forEach((button, index) => {
   button.addEventListener("click", () => setMaterial(button.dataset.material));
@@ -485,6 +813,12 @@ materialButtons.forEach((button, index) => {
   });
 });
 modeButtons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.mode)));
+localModeButton.addEventListener("click", () => setRuntimeMode("local"));
+sharedModeButton.addEventListener("click", () => setRuntimeMode("shared"));
+retryCoreButton.addEventListener("click", retryCore);
+buildTickButton.addEventListener("click", runBuildTick);
+approveCandidateButton.addEventListener("click", approveCandidate);
+candidateSelect.addEventListener("change", renderSelectedCandidate);
 placeButton.addEventListener("click", placeSelected);
 breakButton.addEventListener("click", breakSelected);
 document.querySelector("#proposal-form").addEventListener("submit", (event) => {

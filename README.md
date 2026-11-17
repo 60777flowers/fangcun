@@ -27,15 +27,19 @@ git clone https://github.com/60777flowers/fangcun.git
 
 ## 当前项目状态
 
-> **产品方向已确认：**在真实物理桌面上用 Android 设备摄像头呈现 MC 风格微缩方块世界；玩家参与建设，大肥鱼 AI 在同一世界协作建设，AI 是有主动性的桌宠，可在用户授权的专属家园地块内主动建造装饰。v0 仍是单用户单 AI；人格卡/多 AI/跨用户异步串门只预留扩展接口，不做成可用功能。支持 ARCore 的设备优先用 WebXR；非 ARCore 打印标记仍待技术 spike 与设备验收。不含真实 PC Minecraft、iOS 真 AR、多人实时联机、语音。
-> **实现状态：**已搭建第一阶段共享 TypeScript 工作区、协议/体素核心和 PC 桌面沙盒；下一阶段将实现单 companion 的主动家园循环和受限 DSH adapter。尚无持久化/WAL、联网会话、HTTPS/WSS 配对、真实 Android ARCore/WebXR、原生打印标记 provider、实际 DSH/MCP 适配或正式角色资产。人格卡、多 AI、异步串门目前只有接口规划。不得把计划写成已交付能力。
+> **产品方向已确认：**在真实物理桌面上用 Android 设备摄像头呈现 MC 风格微缩方块世界；玩家参与建设，大肥鱼 AI 在同一世界协作建设，AI 是有主动性的桌宠，可在用户授权的专属家园地块内主动建造装饰。v0 仍是单用户单 AI；人格卡/多 AI/跨用户异步串门只预留扩展接口，不做成可用功能。**Android 客户端采用原生 APK（Kotlin + SceneView/Filament + ARCore + glTF），v0 只支持 ARCore；打印标记为 v1 兼容模式。** 不含真实 PC Minecraft、iOS 真 AR、多人实时联机、语音。
+> **实现状态（2026-11-17）：**已搭建 TypeScript 工作区、协议/体素核心、companion runtime 与 PC 桌面模拟器；47 项测试、typecheck、companion demo 均通过。尚无原生客户端、Host WSS/配对/SQLite、真实 DSH/MCP 接入、正式角色资产与标记模式。技术路线见 [ADR-0003](docs/ADR-0003-android-client-and-ar-stack.md)，执行计划见 [TECH-ROADMAP](docs/TECH-ROADMAP.md)，设备验证见 [DEVICE-TEST-PLAN](docs/DEVICE-TEST-PLAN.md)。不得把计划写成已交付能力。
 
 ## 现在该读哪份文件
 
 | 你想… | 读 |
 |---|---|
-| **接手实现** | **[docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md)** —— 已确认范围、单一架构/协议建议、分模块任务和可测验收 |
-| 查看独立审核结论 | [docs/REVIEW.md](docs/REVIEW.md) |
+| **先看技术路线决策** | **[docs/ADR-0003-android-client-and-ar-stack.md](docs/ADR-0003-android-client-and-ar-stack.md)** —— 原生客户端/AR/渲染/角色/网络的拍板与证据 |
+| **看后续执行计划与排期** | **[docs/TECH-ROADMAP.md](docs/TECH-ROADMAP.md)** —— 架构、M0–M8 WBS、验收、风险、合规 |
+| **看接口/协议/结构 DSL** | [docs/HOST-API.md](docs/HOST-API.md)、[docs/DSL-SPEC.md](docs/DSL-SPEC.md) |
+| **看设备验证怎么做** | [docs/DEVICE-TEST-PLAN.md](docs/DEVICE-TEST-PLAN.md) |
+| **接手实现** | [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) —— 已确认范围与验收；客户端部分以 ADR-0003 为准 |
+| 查看两轮审核结论 | [docs/REVIEW.md](docs/REVIEW.md)、[docs/REVIEW-2.md](docs/REVIEW-2.md) |
 | 看现有静态预览 | [docs/m0-final.png](docs/m0-final.png)（仅桌面静态截图；可复跑：`cd preview && npm i && node shot.mjs`） |
 | 看旧开发草案 | [docs/DEV.md](docs/DEV.md) —— 历史参考，接口和计划不作为实现真源 |
 | 看调查材料 | [REPORT.md](REPORT.md)、[PLAN.md](PLAN.md)、[reports/](reports/) |
@@ -62,8 +66,10 @@ npm run simulator
 - `packages/voxel-core`：确定性 14×14 岛、原子事务、玩家/AI 建造区规则、快照和 replica commit 应用。
 - `packages/worldd`：内存权威协调器原型，包含 `clientId + seq` 幂等、revision 检查；不包含 WAL、网络监听或身份认证。
 - `packages/companion-schema`（第二阶段草案）：versioned PersonaCard、CompanionInstance、HomePlotGrant 和只读异步 Visit contract；不包含 AI runtime、账号或联网串门。
+- `packages/companion-runtime`（原型）：确定性 home 候选、plan/TTL/预算、autonomy reducer 与 tick；尚未接 Host/WSS 与真实 DSH。
+- `packages/ar-provider`（历史/参考）：浏览器 WebXR/标记的 capability/tracking 抽象；客户端改为原生后不再作为基础。
 
-桌面模拟器已可本地运行；真实 Android AR 页面尚未宣称完成。后续 Android 交付按可手动安装 APK 规划，不依赖 ADB；先通过 capability detection 覆盖 ARCore/WebXR 与打印标记 provider，不为 Tab S8 写专用逻辑。真实设备矩阵、HTTPS/WSS 配对与 M0 录屏仍需实测。
+桌面模拟器已可本地运行；真实 Android AR 页面尚未宣称完成。产品客户端将按**原生 APK** 规划（不依赖 ADB），v0 只支持 ARCore，v1 再评估打印标记；不为 Tab S8 写专用逻辑。真实设备矩阵、TLS 配对与 M0 录屏仍需实测。
 
 ## 两条产品铁律
 

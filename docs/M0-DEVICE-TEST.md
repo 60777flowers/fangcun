@@ -1,5 +1,7 @@
 # M0 真机验证记录模板
 
+> **2026-11-17 更新：本模板早于原生客户端决策，部分字段（Tab S8 型号、Android 版本）已由 [ANDROID-DELIVERY](ANDROID-DELIVERY.md) 与 [DEVICE-TEST-PLAN](DEVICE-TEST-PLAN.md) 取代。新的可执行测试请用 [DEVICE-TEST-PLAN](DEVICE-TEST-PLAN.md)；本文件保留为历史模板。**
+
 状态：**待实测**。本文件不是设备兼容性承诺，也不替代录屏、控制台日志和原始测量。
 
 ## 已知测试设备

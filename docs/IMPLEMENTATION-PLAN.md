@@ -1,7 +1,8 @@
 # 方寸：AR 桌面微缩世界实施计划
 
-> **状态：用户确认产品范围；本文是当前实施单一真源。**
-> 产品决策确认：2026-11-16（本次会话）。技术细节若与旧文档冲突，以本文为准；旧文档中尚未验证的结论不得当作实现事实。
+> **状态：产品范围与业务语义基线。**
+> 产品决策确认：2026-11-16（本次会话）。Android 架构以 [ADR-0003](ADR-0003-android-client-and-ar-stack.md) 为准，当前执行计划以 [TECH-ROADMAP](TECH-ROADMAP.md) 为准；本文已 superseded 的 WebXR 客户端章节仅供历史追溯，其他未验证结论不得当作实现事实。
+> **2026-11-17 决策更新：**Android 客户端为原生 Kotlin + SceneView/Filament + ARCore + glTF，业务不依赖浏览器；PC Host 持有权威世界。ARCore 与打印标记均为 v0 目标；若标记阻塞核心闭环，先交 ARCore 主链并紧随补齐。接口以 [HOST-API](HOST-API.md) 与 [DSL-SPEC](DSL-SPEC.md) 为准，执行计划见 [TECH-ROADMAP](TECH-ROADMAP.md)。本文 §3 的旧 WebXR 客户端架构、§5 的 `client`/`render-voxel`/`ar-provider` 假设及旧 M0/M2 WebXR 任务均已 superseded，仅作历史追溯；世界模型、事务语义、安全边界与 Host 模块仍然有效。
 > 面向：后续产品、客户端、服务端、AI、视觉/资产与 QA 开发同事。
 
 ## 1. 已确认范围
@@ -15,14 +16,14 @@
 | 项目 | v0 决策 |
 |---|---|
 | 产品形态 | 真实桌面 AR 微缩沙盒，不是把 MC 画面投到手机 |
-| 首发平台 | Android 优先：支持 ARCore 的设备走 Chrome/WebXR 平面追踪与 anchors；不支持该能力的设备优先验证打印桌面定位标记的摄像头跟踪模式。用户已认可“非 ARCore 用打印标记尝试兼容”的方向；两种方案仍须在真实设备完成稳定性/性能验收后，才可作为正式支持项 |
+| 首发平台 | Android 原生 Kotlin APK，业务不依赖浏览器；PC Host 持有权威世界。ARCore 与打印标记均为 v0 目标；若标记阻塞核心闭环，先完成 ARCore 主链并紧随补齐标记兼容。支持范围以真机稳定性/性能验收为准 |
 | 角色 | 一个 3D 大肥鱼角色；开发期可使用合法占位模型；发行模型必须另过素材许可门禁 |
 | 玩家输入 | 手机触屏直接参与方块建造；玩家本身不渲染为世界角色 |
 | AI | PC 上的 DSH 是大脑；通过受限工具与玩家共用同一个世界状态；当前 v0 是单用户、单个 AI 桌宠 |
 | 未来接口（不扩大当前 v0） | 人格卡、多个 AI 实例、每个实例独立家园与权限、跨用户异步串门的邀请/消息/访问票据与审计事件接口先进入 schema/数据边界；当前不开放对应 UI、账号系统、互访授权服务或公网服务 |
 | 暂不包含 | iOS 真 AR、Windows 独立桌宠窗口、真实 PC Minecraft 联动、多人实时联机、跨用户异步串门运行时、语音、跨会话长期记忆、生存/战斗/红石 |
 
-以上是产品范围，不代表对应技术已完成。Android 的 ARCore/WebXR 与打印标记跟踪均为待验证技术路线；平板/手机型号覆盖、遮挡与漂移表现、标记尺寸/打印方式、真机性能、iOS 方案、3D 正式素材和部署方式仍需验证。非 ARCore 模式必须明确依赖打印并保持标记在摄像头可见范围内；失去可靠 tracking 时暂停世界输入，不能假称已锚定。
+以上是产品范围，不代表对应技术已完成。Android ARCore 主链已有 POC 首轮真机 smoke；SceneView 客户端、打印标记、设备覆盖、漂移表现、标记尺寸/打印方式、真机性能、iOS 方案、3D 正式素材和部署方式仍需验证。真实遮挡可作为已知限制，不阻断核心闭环。非 ARCore 模式必须明确依赖打印并保持标记在摄像头可见范围内；失去可靠 tracking 时暂停世界输入，不能假称已锚定。
 
 ### 1.3 工程建议（不是用户确认项）
 
@@ -39,7 +40,7 @@
 
 ### 2.1 主任务
 
-1. PC 启动方寸世界服务及 DSH 连接；用户在 Android Chrome 打开配对链接。
+1. PC 启动方寸 Host 与 DSH 连接；用户在原生 Android APK 中完成配对。
 2. 用户授权摄像头，在真实桌面检测水平面并放置/确认微缩岛锚点。
 3. 玩家用触屏选方块、点格子放置；能拆除允许拆除的方块，操作结果在 AI/PC 检视端一致。
 4. 大肥鱼可以主动观察世界、发起“想给自己搭个小木屋/摆点装饰”的自主目标；AI 选择合适的空地提出家园选址。用户可否决/重选；通过一次选址后建立受限 AI home plot。
@@ -59,7 +60,9 @@
 
 不做任意 MC 合成/怪物/生存规则、实时多人联机、跨用户异步串门的产品运行时、语音 ASR/TTS、任意长期对话记忆、AI 自动清理/改写玩家建筑、手机本地运行 DSH、游戏截图上传给模型、iOS 同期支持、用户模型在线市场、发布未授权角色美术。v0 允许在本用户明确同意的 AI home plot 内进行有限主动建造；不等同开放互联网多人或跨用户代理访问。
 
-## 3. 总体架构
+## 3. 总体架构（旧 WebXR 方案，已 superseded）
+
+> 本节架构图、客户端职责、浏览器合成与非 ARCore fallback 文字均为历史假设，不适用于当前实现；当前原生方案以 [ADR-0003](ADR-0003-android-client-and-ar-stack.md) 为准，执行以 [TECH-ROADMAP](TECH-ROADMAP.md) 为准。
 
 ```text
 Android Chrome / ARCore WebXR
@@ -77,11 +80,11 @@ PC 方寸 Host
   └─ local data：世界存档、plot/instance、短期事件/审计；v0 无云端同步或跨用户访问
 ```
 
-**AR 渲染边界：**WebXR 相机背景由浏览器/系统合成，普通页面通常拿不到背景纹理。MVP 不承诺对真实桌面摄像头画面做移轴、模糊或任意后期；仅对虚拟物体实现卡通材质、接触阴影与基础光照。实景遮挡/深度也不作为首发能力，除非设备实测证明可用且另有明确验收。
+**AR 渲染边界（旧 WebXR 假设，已 superseded）：**旧文关于浏览器合成的描述不适用于原生客户端。当前仅承诺对虚拟物体实现卡通材质、接触阴影与基础光照；真实场景遮挡可作为 v0 已知限制，不阻断核心闭环。
 
-**非 ARCore Android 兼容路线（用户认可方向，技术可行性待 spike）：**调查基于开源/许可合规的 fiducial marker（如 AprilTag/ArUco 类）方案，将打印标记放置桌面作为稳定参考；优先实现由原生 Android 相机/视觉跟踪模块提供 marker pose，浏览器/WebView 只接收受限 pose/capability 并渲染交互。纯浏览器 fallback 只有在 Android Chrome 能可靠获取摄像头帧、目标库可合法分发、持续跟踪足够稳且功耗可接受时才考虑。标记必须持续可见；遮挡或低置信度时冻结/隐藏虚拟场景并禁用世界写入，恢复识别后需重定位确认。此模式仍是摄像头透视叠加，不能承诺无标记平面检测、实景深度遮挡或与 ARCore 等同稳定。
+**非 ARCore Android 兼容路线（旧方案描述，现以原生 v0 标记目标为准）：**原生 APK 使用 CameraX/BoofCV 提供标记 pose；当前目标是 v0 同时支持 ARCore 与打印标记。若 marker 阻塞核心闭环，先完成 ARCore 主链并紧随补齐 marker。标记暂时不可见或低置信度时冻结世界写入，恢复识别后需重定位确认。真实场景遮挡可作为已知限制。
 
-**运行时安全边界：**浏览器只能经 HTTPS/WSS 与 `worldd` 通信；DSH 到 `worldd` 使用本机 stdio 或 loopback HTTP + 独立短期凭证。不得把 MCP 服务暴露到局域网/公网；不得把 token 放 URL query、持久日志或客户端 bundle。
+**运行时安全边界（旧浏览器方案已 superseded）：**原生 Android APK 经 TLS/WSS 与 `worldd` 通信；DSH 到 `worldd` 使用本机 stdio 或 loopback HTTP + 独立短期凭证。不得把 MCP 服务暴露到局域网/公网；不得把 token 放 URL query、持久日志或客户端 bundle。
 
 ## 4. 唯一基础数据与协议规范（v1 已按 ADR-0001 锁定；运行时契约分阶段补全）
 
@@ -140,7 +143,9 @@ v0 只开放最少工具；具体 JSON Schema 放入 `packages/protocol`，MCP �
 
 AI 结构 DSL 仅支持 box、line、wall、floor、有限尺寸的 stairs/roof 等经过测试的原语；材料必须来自 `BlockDef` allowlist。不得使用 shell、Lua、JS/eval、RCON 或从上游图纸代码执行玩家/AI 文本。参考 `dsh-game` 只复用经逐文件审查的许可兼容纯算法；不要把其 Minecraft 清除语义、RCON 写入或未核实的图片预览能力当作本产品现成功能。
 
-## 5. 模块化交接任务
+## 5. 模块化交接任务（旧 Web 客户端模块方案，已 superseded）
+
+> 下方 `client`、`render-voxel`、WebXR `ar-provider` 等模块拆分属于历史方案；原生 Android/Host 的当前模块边界与任务以 [ADR-0003](ADR-0003-android-client-and-ar-stack.md) 和 [TECH-ROADMAP](TECH-ROADMAP.md) 为准。
 
 建议仓库结构（目标结构，不代表当前已创建）：
 
@@ -171,24 +176,27 @@ packages/
 | `voxel-core` | 体素工程师 | 纯 TS；不得依赖 three/fs/ws/LLM | seed map、受限结构 DSL compiler、事务 diff/undo | 属性测试、越界/预算/清除语义、确定性构景 |
 | `companion-schema` | 数据/服务端 | 无 UI/LLM/IO；只依赖 world-schema | PersonaCard、CompanionInstance、HomePlotGrant、Visit* versioned validators | fail-closed schema、owner/scope、bounds/budget、visit read-only contract |
 | `worldd` | Node 服务端 | 依赖 schema/protocol/core；唯一写世界入口 | session、事务队列、WAL/快照、pairing API | 并发、幂等、恢复、鉴权、限流、恶意 payload |
-| `render-voxel` | Three.js 客户端 | 读 replica 与 WorldSpec；不直接连 MCP/写真值 | chunk mesh、hit highlight、pending ghost、XR render path | voxel fixture golden image、变更影响范围、移动设备 profile |
-| `ar-provider` | Android/WebXR | 只产生 pose/hit-test/capabilities；不解释业务方块/仲裁 | typed lifecycle/anchor/session adapter | 权限拒绝、tracking lost、pause/resume、relocalization、设备矩阵 |
-| `companion-schema` | 数据/服务端 | 只定义人格/实例/家园地块/未来串门契约；不授予写权限 | versioned PersonaCard、CompanionInstance、HomePlot、VisitInvitation/Event schemas | unknown fields/version、owner/plot binding、expiry、权限边界 |
+| `render-scene` | Android/图形 | 只读 replica 与 WorldSpec；不直接连 MCP/写真值 | 体素 MeshNode、格子高亮、ghost、角色 ModelNode、卡通材质 | 体素 fixture 截图、变更重建耗时、真机帧时 |
+| `ar-core` | Android/AR | 只产生 pose/hit-test/capabilities/tracking；不解释业务方块/仲裁 | ArProvider 接口、ARCore provider 与 MarkerProvider（v0 目标，按阻塞条件调度） | 权限拒绝、tracking lost、pause/resume、relocalization、设备矩阵 |
 | `companion-runtime` | AI/服务端 | 只产生受限意图；所有 world writes 经 worldd | autonomy loop、attention queue、home candidate/plan、interrupt/cancel | 主动性、预算、plot-only auto commit、玩家建筑保护、重启恢复 |
-| `render-character` | 角色/客户端 | 读 actor state/授权 manifest；不调用世界写接口 | 单模型加载、动作状态映射、资源释放/回退 | 模型合法性、缺失资源、反复装卸、帧时和内存 |
-| `dsh-adapter` | DSH 集成 | 依赖 protocol 与本机权限；所有写操作经 worldd | MCP tool definitions、取消/超时/错误翻译、prompt boundaries | mock tool end-to-end、拒绝未确认 commit、越权和注入测试 |
-| `client` / Host | 前端/桌面集成 | UI 编排、局域网配对；不持有 durable world truth | 安装/启动/配对/状态 UI、PWA 或本地 HTTPS host | fresh install、扫码兑换、断网、关闭与重启 |
-| `qa-fixtures` | QA/全栈 | 供所有包共享确定性输入 | 世界 seed、固定请求集、乱序网络脚本、设备测试记录模板 | CI 核心回归和真机报告 |
+| `render-character` | Android/SceneView | 读 actor state/授权 manifest；不调用世界写接口 | glTF 加载、动作状态映射、资源释放/回退 | 模型合法性、缺失资源、反复装卸、帧时和内存 |
+| `mcp-adapter` | DSH 集成 | 依赖 protocol 与本机权限；所有写操作经 worldd | MCP tool definitions、取消/超时/错误翻译、prompt boundaries | mock tool end-to-end、拒绝未确认 commit、越权和注入测试 |
+| `android-client` / `host` | Android/桌面集成 | UI 编排、局域网配对；不持有 durable world truth | 扫码/配对/状态 UI、Host HTTPS/WSS、PC 检视页 | fresh install、扫码兑换、断网、关闭与重启 |
+| `qa-fixtures` | QA/全栈 | 供所有包共享确定性输入 | 世界 seed、20 条固定请求、乱序网络脚本、设备测试记录模板 | CI 核心回归和真机报告 |
 
-**依赖顺序：**M0 Android ARCore/WebXR、打印标记 provider、TLS/WSS 风险验证可以与无依赖的资产清点并行；M1 schema 必须先于 core/protocol API 冻结；M2 可与 M3 的基础 Host skeleton 并行但不得各自定义数据；M3 后接 M4 连网 AR/marker 输入；M5 依赖 M3 的事务/预览接口及 M4 的用户确认 UI；M6 在发行资产和目标设备锁定后才能完成。当前代码已完成部分 M1/M2 核心与纯浏览器桌面预览，但 M0 与服务端里程碑尚未通过。
+**依赖顺序：**M0 原生 ARCore/SceneView、TLS/WSS 配对、DSH 工具面风险验证可与无依赖的资产清点并行；M1 契约（schema/protocol/DSL/错误码）必须先冻结；M2（Host）与 M3（Android 客户端核心）可在契约冻结后并行；M4 需要 M2/M3 都完成；M5 依赖 M2 的计划接口与 M3 的确认 UI；M6 依赖 M3 渲染与正式资产。当前代码已完成部分核心 schema/体素/companion 逻辑与浏览器本地模拟器，但原生客户端、Host 服务与 M0 验证尚未完成。
 
-### M0：风险验证与产品基线（技术负责人 + Android/客户端）
+> **注意（2026-11-17）：**以下 M0–M6 是旧里程碑（含 WebXR/浏览器假设），保留用于需求追溯；**执行以 [TECH-ROADMAP](TECH-ROADMAP.md) 的 M0–M8 为准**（原生客户端）。不要按本节 M0 的 WebXR 任务开工。
+
+### M0：风险验证与产品基线（旧 WebXR 任务，已 superseded）
+
+> 本节原 WebXR/Chrome AR 任务、验收条件与输出均仅作历史追溯，不再执行；改按 [TECH-ROADMAP](TECH-ROADMAP.md) 的原生 ARCore 与 marker v0 目标验证门执行。
 
 **先做，未过门不扩全栈。**
 
 - 任务：用真实支持 ARCore 的 Android 手机验证 HTTPS 安全上下文、Chrome WebXR `immersive-ar`、摄像头授权、水平面 hit-test、anchor 建立/跟踪丢失/恢复、alpha 渲染；用非 ARCore Android 设备验证打印 fiducial marker 的检测/pose、遮挡恢复、相机帧权限与功耗边界；两条路线都验证真实 LAN WSS 连通。同时用本机目标 DSH 版本验证其是否能接入 loopback stdio/HTTP MCP、列出并确认工具调用/取消/错误语义。若工具兼容未过，M5 前先实现/验证小型 Host plugin adapter，不得假设文档中的 MCP 配置片段可直接工作。
 - 输出：设备/OS/Chrome/ARCore 版本矩阵；标记规格、打印尺寸和许可记录；两种模式的录屏和控制台日志；安全上下文和配对策略的实测操作步骤；tracking 稳定性/遮挡恢复/功耗原始数据；WebXR 与 marker provider 限制清单；DSH MCP 能力清单和最小连通 POC。
-- Go：至少一台真实 ARCore Android 设备能进入 AR、放置并重定位场景，透明虚拟岛和阴影在 WebXR 合成画面可见；另至少一台非 ARCore Android 设备能用打印标记进入摄像头叠加模式，并在遮挡恢复后不跳变/不误写；同一局域网的 HTTPS/WSS 配对方案和 DSH MCP 连通 POC 均可复现。该 Go 仅批准继续实现，不等于多设备兼容或公开 beta。
+- Go：至少一台真实 ARCore Android 设备能进入 AR、放置并重定位场景，透明虚拟岛和阴影在 WebXR 合成画面可见；另至少一台非 ARCore Android 设备能用打印标记进入摄像头叠加模式，并在遮挡恢复后不跳变/不误写；同一局域网的 HTTPS/WSS 配对方案和 DSH MCP 连通 POC 均可复现。该 Go 仅为旧 WebXR 路线的历史门槛，现已 superseded；当前门槛见 TECH-ROADMAP。
 - No-go：先停做产品 UI，解决 TLS/WSS、设备支持或桌面锚定问题；不能把 photo/3DOF 假锚定或无标记普通相机叠加算作 6DoF AR 成功。打印标记模式必须单独标注能力边界；公开 beta 前至少再在不同档次的第二台设备完成验收。
 
 ### M1：可构建骨架与共享 schema（技术负责人/全栈）
@@ -198,10 +206,12 @@ packages/
 - DoD：fresh clone 单命令安装；所有 package 构建；边界、负坐标、快照往返、已纳入消息 schema 的 frame 拒绝未知值测试通过；不存在 `test` 固定 exit 1 或文档虚构脚本。
 - **当前 M1 partial 状态：**workspace/lock/typecheck/build/CI、WorldSpec、有限类型方块白名单、坐标/快照、intent/commit 与 hello/welcome/ack/resync/ping/pong/approve-plan/approval-granted 消息运行时校验和有界 JSON frame codec 已有实现及单元测试；已添加 `packages/protocol/schema/protocol-v1.json` 并在单元测试中用 Ajv 对目前每个实现的消息 envelope 与运行时 validator 交叉校验；仍未完成 schema 自动生成/漂移检查、fuzz/property suite、消息广播/握手服务和完整兼容矩阵。完整协议不得标记为已交付。
 
-### M2：体素核心与桌面静态场景（体素/渲染）
+### M2：体素核心与桌面静态场景（旧 WebXR 客户端安排已 superseded）
+
+> 本节沿用的浏览器/WebXR 客户端渲染安排已 superseded；静态体素数据与生成器要求仍有效，Android 渲染按 ADR-0003 与 TECH-ROADMAP 实现。
 
 - 把当前 `preview/m0.html` 中的确定性世界生成、面剔除/材质分桶迁入正式 package；生成种子固定；建设局部方块变更到受影响 chunk 重建的路径。
-- 遵循统一 16³ 数据域；草岛 14×14，底面连续；相机/AR 物理尺度严格 3 cm/格。桌面静态预览与 WebXR render path 分开，不将后处理链直接套到 XR compositor。
+- 遵循统一 16³ 数据域；草岛 14×14，底面连续；相机/AR 物理尺度严格 3 cm/格。桌面静态预览与原生 Android AR 渲染路径分别验证；不假设浏览器 WebXR compositor 或实景深度遮挡。
 - 建造单格选择高亮、空格放置 ghost 和可拆限制；真实 AR 下按桌面坐标显示。
 - DoD：固定 seed 下截图稳定；网格变更不修改未受影响区域；桌面测试视图与 Android AR 各自有视觉基线；角色缺失时回退合法占位，不阻断世界。
 
@@ -249,13 +259,13 @@ packages/
 | 领域 | 测试条件 | 建议初始门槛 |
 |---|---|---|
 | AR 锚定 | 两个不同档次的 ARCore Android；固定桌面标尺；建立 anchor 后沿 1 m 方形路线移动、重复 10 次 | 5 分钟内相对标尺漂移 p95 ≤3 cm，最大跳变 ≤5 cm；记录 raw 值，未达则标为已知不稳定而非通过 |
-| 帧率/热 | 最低支持机型，WebXR 场景含 3D 角色/阴影，连续 10 分钟 | 稳态 p95 帧时间 ≤33 ms；记录热态、内存、掉帧；不得只报告平均 fps |
+| 帧率/热 | 最低支持机型，原生 Android AR 场景含 3D 角色/阴影，连续 10 分钟 | 稳态 p95 帧时间 ≤33 ms；记录热态、内存、掉帧；不得只报告平均 fps |
 | 输入/同步 | Wi-Fi LAN，100 次 place/break、两客户端同格冲突、断网 30 秒恢复 | accepted 事务服务端和客户端最终一致；不重复应用 rev；accepted 数据重启保留；普通交互 p95 权威确认 ≤200 ms（本地 ghost 首帧 ≤100 ms） |
 | AI 计划 | 固定 20 条中文请求，模型版本/温度/世界 seed 固定 | ≥18 条返回 schema 合法且越界/冲突均被拒绝；未确认 commit = 0；LLM 耗时另记 p50/p95 |
 | 安全 | 错误/过期 credential、恶意 origin、大 payload、越界坐标、非法方块、prompt injection 文本 | 均在服务端拒绝；无写入/凭证日志；服务进程不崩溃 |
 | 许可/隐私 | 对发布目录和运行数据作清单扫描 | 发布物无 unknown/未授权素材；相机帧只留客户端，不上传；摄像头/模型传输/DSH 外部模型请求的数据流告知可见 |
 
-上述阈值是项目建议，不是当前实现成绩。自动化测量脚本、设备型号/系统/浏览器版本和原始日志需随验收结果提交。
+上述阈值是项目建议，不是当前实现成绩。自动化测量脚本、设备型号/系统版本和原始日志需随验收结果提交；浏览器版本不是原生客户端验收前置。
 
 **研发状态（2026-11-17）：**第一阶段 Node/TypeScript workspace 已通过类型检查、47 项测试和桌面模拟器 smoke，分支 `feat/phase1-voxel-sandbox` 已推送。第二阶段已有 persona/instance/home/visit schema、受限 Companion runtime/autonomy reducer、WorldAuthority 的原型 home grant/候选审批/异步提交校验及竞态测试。`npm run demo:companion` 可本机跑通一次用户批准 home plot → companion tick → 12 方块事务 → revision 1；该演示不持久化状态，也不连接 Android、Host/WSS 或实际 DSH/MCP。WorldAuthority 仍是 in-memory 原型，session auth/WAL/undo/Host WSS 和可操作产品 UI 尚未完成；persona、多 AI、visit 仅 schema 保留。Android 原生 ARCore POC 已构建并在 Samsung Tab S8（SM-X800）实测相机背景、平面命中、anchor 与绿色测试方块；用户反馈移动时稳定，遮挡时无真实深度合成且恢复后轻微漂移，详见 [ANDROID-DELIVERY](ANDROID-DELIVERY.md) 与 [AR-POC-FOLLOWUPS](AR-POC-FOLLOWUPS.md)。当前 APK 是独立 POC，不含正式 voxel 客户端、联网或 AI。
 
@@ -265,7 +275,7 @@ packages/
 - 架构决策采用 ADR，记录状态：`proposed / accepted / superseded`。把推断、待验证、实测明确区分。
 - 所有代码依赖锁定版本；参考源码固定 upstream commit/hash，MIT notice 保留；被 `.gitignore` 排除的 `refsrc/` 不能作为唯一交接来源。
 - PR 必须跑真实 `typecheck/test/build`；性能数据必须标设备和测试条件。fresh clone 不可重复构建视为阻断。
-- 时间估算目前不足以承诺日历日期。M0/M1 先测安全上下文、设备 AR 与同步风险，再按模块负责人和实测吞吐量排期；正式角色制作、许可清理、iOS SLAM 可单独影响总周期。
+- 不估传统团队人日或日历工期。按 M0/M1 的可复现验证证据推进；正式角色、许可清理与 iOS SLAM 均作为独立风险切片评估。
 
 ## 8. 风险与发布阻断
 
