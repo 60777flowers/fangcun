@@ -1,18 +1,23 @@
 /**
  * Client half of the Fangcun world panel.
  *
- * The centre column becomes a messaging-style pet manager: a companion
- * conversation list on the left, the selected companion's chat in the middle
- * (plus the island console tab), and that companion's profile on the right.
- * The user inventory strip lives at the bottom of the left column.
+ * The centre column is a messaging-style pet manager: companion conversations
+ * on the left with a "我的仓库" item warehouse underneath, the selected
+ * companion's chat (plus the island console tab) in the middle, and that
+ * companion's profile on the right — followed by the companion model section
+ * (recommended model card, GLB/VRM thumbnail import, avatar upload, and a local
+ * copy of the model into the Android client assets).
+ *
+ * Items move from the warehouse onto the profile's two slots by drag and drop,
+ * with a click/tap fallback. Another user's companion is strictly read-only.
  *
  * Data comes from the Host half's authenticated routes under
  * `/api/fangcun-host/*`; the browser calls them same-origin with the page
- * cookie, so the Fangcun Host needs no CORS or second port. The social
- * endpoints (`/api/core/companions`, `/api/core/inventory`, per-companion chat)
- * are being added to the Host concurrently: this panel renders whatever the
- * Host answers and degrades to clearly-labelled read-only/placeholder states
- * instead of throwing when they are missing.
+ * cookie. The Host's social API is being extended concurrently: this panel
+ * renders whatever is present and degrades to labelled placeholders instead of
+ * throwing. Model bytes never enter the panel bundle or the Host store — the
+ * browser reads the file locally and the Host half copies it to the Android
+ * asset directory on request.
  *
  * Panel convention: one `sidebar.panellist` icon row addressed by `id`, plus one
  * keyed `main` cell with the same id — so the page only exists while selected in
@@ -30,6 +35,159 @@ window.__ModuleLoader__.load({
     const API_BASE = '/api/fangcun-host'
     const POLL_MS = 2000
     const ISLAND_LOAD_TIMEOUT_MS = 6000
+    const MODEL_MAX_BYTES = 64 * 1024 * 1024
+    const RECOMMENDED_MODEL_URL = 'https://www.aplaybox.com/details/model/ayXkRzVflmnd'
+
+    // ---------------------------------------------------------------- GLB/VRM
+    const GLB_MAGIC = 0x46546c67
+    const CHUNK_JSON = 0x4e4f534a
+    const CHUNK_BIN = 0x004e4942
+
+    /** Parse the GLB container: 12-byte header, JSON chunk and BIN chunk. */
+    function parseGlbContainer(buffer) {
+      if (buffer.byteLength < 12) throw new Error('file is too small to be a GLB/VRM container')
+      const view = new DataView(buffer)
+      if (view.getUint32(0, true) !== GLB_MAGIC) throw new Error('not a GLB/VRM file (glTF magic missing)')
+      const version = view.getUint32(4, true)
+      const declaredLength = view.getUint32(8, true)
+      const end = Math.min(declaredLength === 0 ? buffer.byteLength : declaredLength, buffer.byteLength)
+      let offset = 12
+      let json = null
+      let bin = null
+      while (offset + 8 <= end) {
+        const chunkLength = view.getUint32(offset, true)
+        const chunkType = view.getUint32(offset + 4, true)
+        const start = offset + 8
+        const stop = start + chunkLength
+        if (stop > buffer.byteLength) break
+        if (chunkType === CHUNK_JSON && json === null) {
+          json = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, start, chunkLength)))
+        } else if (chunkType === CHUNK_BIN && bin === null) {
+          bin = new Uint8Array(buffer, start, chunkLength)
+        }
+        offset = stop + ((4 - (chunkLength % 4)) % 4)
+      }
+      if (json === null) throw new Error('GLB container has no JSON chunk')
+      return { json, bin, version, declaredLength }
+    }
+
+    /** VRM 1.0 (`VRMC_vrm`) and VRM 0.x (`VRM`) metadata, normalised. */
+    function decodeVrmMeta(gltf) {
+      const meta1 = gltf?.extensions?.VRMC_vrm?.meta
+      const meta0 = gltf?.extensions?.VRM?.meta
+      const meta = meta1 ?? meta0 ?? null
+      if (!meta || typeof meta !== 'object') {
+        return { name: null, author: null, version: null, specVersion: null, thumbnailImageIndex: null }
+      }
+      const name = typeof meta.name === 'string' && meta.name
+        ? meta.name
+        : (typeof meta.title === 'string' && meta.title ? meta.title : null)
+      let author = null
+      if (Array.isArray(meta.authors)) {
+        const list = meta.authors.filter((entry) => typeof entry === 'string' && entry)
+        author = list.length > 0 ? list.join(', ') : null
+      } else if (typeof meta.authors === 'string' && meta.authors) {
+        author = meta.authors
+      } else if (typeof meta.author === 'string' && meta.author) {
+        author = meta.author
+      }
+      const rawThumb = meta1 ? meta.thumbnailImage : meta.texture
+      const thumbnailImageIndex = typeof rawThumb === 'number' && Number.isInteger(rawThumb) && rawThumb >= 0
+        ? rawThumb
+        : null
+      return {
+        name,
+        author,
+        version: typeof meta.version === 'string' ? meta.version : null,
+        specVersion: meta1 ? 'VRM 1.0' : 'VRM 0.x',
+        thumbnailImageIndex,
+      }
+    }
+
+    /**
+     * Resolve the VRM thumbnail image bytes from the embedded JSON/BIN chunks.
+     * Returns `thumbnail: null` when the model has no embedded image instead of
+     * failing, so the caller can fall back to parsed metadata.
+     */
+    function extractThumbnail(gltf, bin) {
+      const meta = decodeVrmMeta(gltf)
+      const index = meta.thumbnailImageIndex
+      if (index === null || !bin) return { meta, thumbnail: null, mime: null }
+      const image = Array.isArray(gltf.images) ? gltf.images[index] : null
+      if (!image || typeof image !== 'object' || image.bufferView === undefined) {
+        return { meta, thumbnail: null, mime: null }
+      }
+      const bufferView = Array.isArray(gltf.bufferViews) ? gltf.bufferViews[image.bufferView] : null
+      if (!bufferView || typeof bufferView !== 'object' || (bufferView.buffer ?? 0) !== 0) {
+        return { meta, thumbnail: null, mime: null }
+      }
+      const byteOffset = typeof bufferView.byteOffset === 'number' ? bufferView.byteOffset : 0
+      const byteLength = typeof bufferView.byteLength === 'number' ? bufferView.byteLength : 0
+      if (byteLength <= 0 || byteOffset < 0 || byteOffset + byteLength > bin.byteLength) {
+        return { meta, thumbnail: null, mime: null }
+      }
+      return {
+        meta,
+        thumbnail: bin.subarray(byteOffset, byteOffset + byteLength),
+        mime: typeof image.mimeType === 'string' ? image.mimeType : 'image/png',
+      }
+    }
+
+    /** Full preview extraction used by the file picker; invalid files throw to the caller. */
+    function extractModelPreview(buffer) {
+      const parsed = parseGlbContainer(buffer)
+      const { meta, thumbnail, mime } = extractThumbnail(parsed.json, parsed.bin)
+      return { version: parsed.version, meta, thumbnail, mime }
+    }
+
+    function blobToDataUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result ?? ''))
+        reader.onerror = () => reject(reader.error ?? new Error('could not read the image'))
+        reader.readAsDataURL(blob)
+      })
+    }
+
+    /**
+     * The Host caps a decoded avatar image at 64 KiB, so a VRM thumbnail is
+     * downscaled to a small JPEG before upload. When canvas/image decoding is
+     * unavailable the raw data URL is returned and the Host's own validation
+     * reports the real reason.
+     */
+    async function prepareAvatarDataUrl(blob) {
+      try {
+        const bitmap = await createImageBitmap(blob)
+        const attempts = [
+          { size: 256, quality: 0.82 },
+          { size: 192, quality: 0.8 },
+          { size: 128, quality: 0.75 },
+        ]
+        for (const attempt of attempts) {
+          const canvas = document.createElement('canvas')
+          const scale = Math.min(1, attempt.size / Math.max(bitmap.width, bitmap.height, 1))
+          canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+          canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+          const context = canvas.getContext('2d')
+          if (!context) break
+          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+          const dataUrl = canvas.toDataURL('image/jpeg', attempt.quality)
+          if (dataUrl.length <= 80_000) {
+            try { bitmap.close?.() } catch { /* not all engines expose close */ }
+            return dataUrl
+          }
+        }
+        try { bitmap.close?.() } catch { /* ignore */ }
+      } catch { /* fall back to the raw bytes */ }
+      return blobToDataUrl(blob)
+    }
+
+    function formatBytes(bytes) {
+      if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return ''
+      if (bytes < 1024) return `${bytes} B`
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    }
 
     const zh = {
       'title': '方寸世界',
@@ -71,15 +229,21 @@ window.__ModuleLoader__.load({
       'profile.readonly': '别人的桌宠，只能看不能动',
       'profile.slots': '道具栏',
       'profile.emptySlot': '空位',
-      'inventory.title': '我的道具',
-      'inventory.empty': '还没有道具。',
-      'inventory.unavailable': '道具接口暂不可用，Host 更新后会出现。',
-      'inventory.readonly': '当前选中的是别人的桌宠，只能查看道具。',
-      'give.prompt': '送给 {name}',
+      'warehouse.title': '我的仓库',
+      'warehouse.hint': '把仓库里的道具拖到右边的格子里送给它',
+      'warehouse.hintSelected': '已选中「{item}」：点右边的空格子送给 {name}',
+      'warehouse.empty': '仓库是空的（Host 还没有发放道具）。',
+      'warehouse.unavailable': '道具接口暂不可用，Host 更新后会出现。',
+      'warehouse.readonly': '当前选中的是别人的桌宠，只能查看道具。',
+      'warehouse.drop': '拖到这里',
+      'warehouse.locked': '已锁定',
+      'warehouse.lockHint': '先选中一个仓库道具，再点这个格子。',
+      'warehouse.count': '×{count}',
       'give.ok': '已把「{item}」送给 {name}',
       'give.err.full': '对方的道具栏满了（最多 2 件）。',
       'give.err.notOwned': '你没有这件道具。',
       'give.err.notOwner': '别人的桌宠，只能看不能动。',
+      'give.err.alreadyHeld': '对方已经有这件道具了。',
       'give.err.unknownItem': '这件道具不存在。',
       'give.err.companionMissing': '找不到这个伙伴，可能已经离开了。',
       'give.err.unavailable': '赠送接口暂不可用（Host 还未提供）。',
@@ -115,6 +279,37 @@ window.__ModuleLoader__.load({
       'tick.paused': 'tick 已暂停',
       'tick.approval': 'tick 需要先批准家园选址',
       'tick.other': 'tick 完成',
+      'model.title': '伙伴模型',
+      'model.current': '当前头像',
+      'model.file': '模型文件',
+      'model.import': '导入模型',
+      'model.setAvatar': '设为头像',
+      'model.install': '安装到客户端',
+      'model.parsed': '模型已解析。',
+      'model.noThumb': '模型没有内嵌缩略图，已读取模型信息。',
+      'model.parseFailed': '无法解析模型文件',
+      'model.tooLarge': '模型文件超过 64 MB，请换一个更小的模型。',
+      'model.avatarOk': '已设为头像。',
+      'model.avatarUnsupported': 'Host 暂不支持 avatarImage 字段（接口正在扩展中），头像只在本地预览。',
+      'model.avatarTooLarge': '缩略图过大，Host 拒绝保存（图片上限 64 KB）。',
+      'model.avatarInvalid': '缩略图格式不受支持（Host 只接受 PNG/JPEG）。',
+      'model.installOk': '模型已保存到客户端资源。',
+      'model.installFailed': '保存模型失败',
+      'model.rebuild': '模型已保存到客户端资源，需要重新构建并安装 APK 才会在平板上生效。',
+      'model.command': '在 apps/android-ar-poc 目录执行：',
+      'model.path': '保存位置',
+      'model.size': '文件大小',
+      'model.readonly': '别人的桌宠：模型只读',
+      'model.recommend': '推荐模型：蓝色小肥鱼 Deepseek鲸鱼娘（木子恶魔）',
+      'model.recommendNote': '下载 .vrm 后点「导入模型」；模型版权归作者，禁止商用与二次分发，仅本地使用',
+      'model.recommendLink': '前往下载',
+      'model.localOnly': '模型只保存在你本机，不会进入仓库',
+      'model.busy.parse': '正在解析…',
+      'model.busy.avatar': '正在保存头像…',
+      'model.busy.install': '正在保存模型…',
+      'model.meta': '名称：{name} · 作者：{author} · {spec}',
+      'model.metaUnknown': '未提供模型名称/作者',
+      'model.noFile': '还没有选择模型文件。',
     }
 
     const en = {
@@ -157,15 +352,21 @@ window.__ModuleLoader__.load({
       'profile.readonly': "Someone else's pet — view only, nothing can be changed",
       'profile.slots': 'Item slots',
       'profile.emptySlot': 'empty',
-      'inventory.title': 'My items',
-      'inventory.empty': 'No items yet.',
-      'inventory.unavailable': 'Item API unavailable; it appears once the Host ships it.',
-      'inventory.readonly': 'The selected companion belongs to someone else; items are view-only.',
-      'give.prompt': 'Give to {name}',
+      'warehouse.title': 'My warehouse',
+      'warehouse.hint': 'Drag an item from the warehouse onto a slot on the right to give it away',
+      'warehouse.hintSelected': '“{item}” selected — click an empty slot on the right to give it to {name}',
+      'warehouse.empty': 'The warehouse is empty (the Host has not issued items yet).',
+      'warehouse.unavailable': 'Item API unavailable; it appears once the Host ships it.',
+      'warehouse.readonly': 'The selected companion belongs to someone else; items are view-only.',
+      'warehouse.drop': 'Drop here',
+      'warehouse.locked': 'locked',
+      'warehouse.lockHint': 'Pick an item in the warehouse first, then click this slot.',
+      'warehouse.count': '×{count}',
       'give.ok': 'Gave “{item}” to {name}',
       'give.err.full': 'Their item slots are full (2 max).',
       'give.err.notOwned': "You don't own that item.",
       'give.err.notOwner': "Someone else's pet — view only.",
+      'give.err.alreadyHeld': 'That companion already holds this item.',
       'give.err.unknownItem': 'That item does not exist.',
       'give.err.companionMissing': 'That companion is gone.',
       'give.err.unavailable': 'The give endpoint is not available yet.',
@@ -201,6 +402,37 @@ window.__ModuleLoader__.load({
       'tick.paused': 'tick paused',
       'tick.approval': 'tick needs a home-site approval first',
       'tick.other': 'tick finished',
+      'model.title': 'Companion model',
+      'model.current': 'Current avatar',
+      'model.file': 'Model file',
+      'model.import': 'Import model',
+      'model.setAvatar': 'Set as avatar',
+      'model.install': 'Install into client',
+      'model.parsed': 'Model parsed.',
+      'model.noThumb': 'The model has no embedded thumbnail; its metadata was read instead.',
+      'model.parseFailed': 'Could not parse the model file',
+      'model.tooLarge': 'The model file exceeds 64 MB; pick a smaller one.',
+      'model.avatarOk': 'Avatar saved.',
+      'model.avatarUnsupported': 'The Host does not accept avatarImage yet (its field is being extended); the avatar is only previewed locally.',
+      'model.avatarTooLarge': 'The thumbnail is too large for the Host (64 KB image cap).',
+      'model.avatarInvalid': 'Unsupported thumbnail format (the Host accepts PNG/JPEG only).',
+      'model.installOk': 'Model saved into the client assets.',
+      'model.installFailed': 'Could not save the model',
+      'model.rebuild': 'The model is saved into the client assets; rebuild and install the APK for it to appear on the tablet.',
+      'model.command': 'Run from apps/android-ar-poc:',
+      'model.path': 'Saved to',
+      'model.size': 'Size',
+      'model.readonly': "Someone else's pet: model is read-only",
+      'model.recommend': 'Recommended model: Blue Chubby Fish / Deepseek whale girl (by 木子恶魔)',
+      'model.recommendNote': 'After downloading the .vrm press “Import model”; the model is the author’s copyright — no commercial use or redistribution, local use only',
+      'model.recommendLink': 'Download page',
+      'model.localOnly': 'The model stays on your machine and never enters the repository',
+      'model.busy.parse': 'Parsing…',
+      'model.busy.avatar': 'Saving avatar…',
+      'model.busy.install': 'Saving model…',
+      'model.meta': 'Name: {name} · Author: {author} · {spec}',
+      'model.metaUnknown': 'No model name/author provided',
+      'model.noFile': 'No model file selected yet.',
     }
 
     const CSS = [
@@ -227,7 +459,9 @@ window.__ModuleLoader__.load({
       '.fc-card{min-width:0;min-height:0;display:flex;flex-direction:column;border:0.5px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-alias-bg-layer-1);overflow:hidden}',
       '.fc-list{grid-area:list}',
       '.fc-chat{grid-area:chat}',
-      '.fc-profile{grid-area:profile}',
+      '.fc-rightcol{grid-area:profile;min-height:0;min-width:0;display:flex;flex-direction:column;gap:12px;overflow:auto}',
+      '.fc-profile{flex:0 0 auto}',
+      '.fc-model{flex:0 0 auto}',
       '.fc-card-head{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:0.5px solid var(--dsw-alias-border-l3);min-width:0}',
       '.fc-card-title{font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary);white-space:nowrap}',
       '.fc-count{font-size:11px;color:var(--dsw-alias-label-tertiary)}',
@@ -244,20 +478,21 @@ window.__ModuleLoader__.load({
       '.fc-conv-tags{display:flex;align-items:center;gap:5px;flex:0 0 auto}',
       '.fc-tag{font-size:9.5px;line-height:1;padding:2px 5px;border-radius:999px;background:var(--dsw-alias-fill-l1);color:var(--dsw-alias-label-tertiary);border:0.5px solid var(--dsw-alias-border-l3);white-space:nowrap}',
       '.fc-unread{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-state-business-primary);flex:0 0 auto}',
-      '.fc-avatar{flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--dsw-alias-fill-l1);border:0.5px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-secondary)}',
+      '.fc-avatar{flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--dsw-alias-fill-l1);border:0.5px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-secondary);overflow:hidden}',
       '.fc-avatar[data-mine="true"]{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}',
-      '.fc-inv{flex:0 0 auto;border-top:0.5px solid var(--dsw-alias-border-l3);display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;max-height:190px;overflow:auto}',
-      '.fc-inv-head{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-tertiary);min-width:0}',
-      '.fc-inv-items{display:flex;flex-wrap:wrap;gap:6px}',
-      '.fc-item{display:flex;align-items:center;gap:5px;max-width:100%;border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:8px;padding:4px 7px 4px 5px;cursor:pointer;font-family:inherit;font-size:11px;min-width:0}',
+      '.fc-avatar-img{width:100%;height:100%;object-fit:cover;display:block}',
+      '.fc-warehouse{flex:0 0 auto;border-top:0.5px solid var(--dsw-alias-border-l3);display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;max-height:230px;overflow:auto}',
+      '.fc-warehouse-head{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-tertiary);min-width:0}',
+      '.fc-warehouse-hint{font-size:10px;line-height:1.45;color:var(--dsw-alias-label-tertiary)}',
+      '.fc-warehouse-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}',
+      '.fc-item{position:relative;display:flex;align-items:center;gap:6px;min-width:0;border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 7px;cursor:grab;font-family:inherit;font-size:11px;text-align:left}',
       '.fc-item:hover{background:var(--dsw-alias-interactive-bg-hover)}',
       '.fc-item[data-selected="true"]{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-fill-l1)}',
+      '.fc-item[data-dragging="true"]{opacity:.55}',
       '.fc-item[data-readonly="true"]{cursor:default}',
-      '.fc-item-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px}',
+      '.fc-item-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto}',
+      '.fc-item-count{flex:0 0 auto;font-size:10px;color:var(--dsw-alias-label-tertiary)}',
       '.fc-item-icon{flex:0 0 auto;display:flex;color:var(--dsw-alias-label-secondary)}',
-      '.fc-givebar{display:flex;flex-direction:column;gap:5px;border:0.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-base);border-radius:8px;padding:6px 8px}',
-      '.fc-givebar-row{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}',
-      '.fc-givebar-name{font-size:11px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}',
       '.fc-inline{font-size:10.5px;line-height:1.45;overflow-wrap:anywhere}',
       '.fc-inline[data-kind="ok"]{color:var(--dsw-alias-state-success-primary)}',
       '.fc-inline[data-kind="error"]{color:var(--dsw-alias-state-error-primary)}',
@@ -288,6 +523,7 @@ window.__ModuleLoader__.load({
       '.fc-consolerow .fc-value{color:var(--dsw-alias-label-primary);overflow-wrap:anywhere;min-width:0}',
       '.fc-linkbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 16px;border-radius:8px;border:0.5px solid transparent;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);font-size:12.5px;font-weight:600;text-decoration:none;font-family:inherit}',
       '.fc-linkbtn:hover{background:var(--dsw-alias-button-primary-hover)}',
+      '.fc-linkbtn[data-size="sm"]{height:26px;padding:0 10px;font-size:11.5px;border-radius:6px}',
       '.fc-profile-body{flex:1 1 auto;min-height:0;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}',
       '.fc-profile-top{display:flex;align-items:center;gap:10px;min-width:0}',
       '.fc-profile-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -298,17 +534,38 @@ window.__ModuleLoader__.load({
       '.fc-value{color:var(--dsw-alias-label-primary);min-width:0;overflow-wrap:anywhere}',
       '.fc-divider{height:0.5px;background:var(--dsw-alias-border-l3);margin:1px 0}',
       '.fc-slots{display:flex;flex-direction:column;gap:6px}',
-      '.fc-slot{display:flex;align-items:center;gap:7px;min-height:34px;border-radius:8px;border:0.5px dashed var(--dsw-alias-border-l2);padding:4px 8px;background:var(--dsw-alias-bg-base);font-size:11.5px;min-width:0}',
+      '.fc-slot{display:flex;align-items:center;gap:7px;min-height:38px;border-radius:8px;border:0.5px dashed var(--dsw-alias-border-l2);padding:5px 8px;background:var(--dsw-alias-bg-base);font-size:11.5px;min-width:0;box-sizing:border-box;text-align:left;font-family:inherit;color:var(--dsw-alias-label-primary);cursor:pointer}',
       '.fc-slot[data-filled="true"]{border-style:solid}',
-      '.fc-slot-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}',
-      '.fc-slot-empty{color:var(--dsw-alias-label-tertiary);font-size:11px}',
+      '.fc-slot[data-can-give="true"]:hover{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-fill-l1)}',
+      '.fc-slot[data-dropping="true"]{border-color:var(--dsw-alias-brand-primary);border-style:solid;background:var(--dsw-alias-fill-l1);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary) 28%, transparent)}',
+      '.fc-slot[data-locked="true"]{cursor:not-allowed;opacity:.72}',
+      '.fc-slot[data-feedback="ok"]{border-color:var(--dsw-alias-state-success-primary);border-style:solid}',
+      '.fc-slot[data-feedback="error"]{border-color:var(--dsw-alias-state-error-primary);border-style:solid}',
+      '.fc-slot-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto}',
+      '.fc-slot-empty{color:var(--dsw-alias-label-tertiary);font-size:11px;flex:1 1 auto}',
+      '.fc-slot-hint{font-size:9.5px;color:var(--dsw-alias-label-tertiary);flex:0 0 auto}',
+      '.fc-slot .fc-tip-host{flex:1 1 auto;min-width:0}',
       '.fc-tip-host{position:relative;display:inline-flex;min-width:0}',
       '.fc-tip{position:fixed;z-index:60;min-width:170px;max-width:250px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-tooltip-bg);color:var(--dsw-alias-tooltip-label);font-size:11px;line-height:1.5;box-shadow:0 6px 20px rgba(0,0,0,.24);pointer-events:none;transform:translateY(-100%)}',
       '.fc-tip-title{font-weight:600;margin-bottom:2px}',
       '.fc-tip-lock{color:var(--dsw-alias-state-warn-label);margin-top:3px}',
       '.fc-collapse{display:none;border:0.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-elevated-fill);color:var(--dsw-alias-label-secondary);border-radius:6px;padding:1px 7px;font-size:11px;cursor:pointer;font-family:inherit}',
       '.fc-footerbar{flex:0 0 auto;display:flex;align-items:center;gap:8px;min-height:20px;font-size:10.5px;color:var(--dsw-alias-label-tertiary);padding:0 2px;min-width:0;overflow:hidden}',
-      '@media (max-width:1100px){.fc-body{grid-template-columns:230px minmax(0,1fr);grid-template-areas:"list chat" "list profile";grid-template-rows:minmax(0,1fr) auto}.fc-profile{max-height:230px}.fc-collapse{display:inline-flex}.fc-profile-body[data-collapsed="true"]{display:none}}',
+      '.fc-model-body{flex:1 1 auto;min-height:0;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:9px}',
+      '.fc-reco{border:0.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-fill-l1);border-radius:9px;padding:8px 9px;display:flex;flex-direction:column;gap:5px}',
+      '.fc-reco-title{font-size:11.5px;font-weight:600;line-height:1.45;color:var(--dsw-alias-label-primary)}',
+      '.fc-reco-note{font-size:10px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
+      '.fc-reco-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+      '.fc-reco-local{font-size:10px;color:var(--dsw-alias-state-success-primary)}',
+      '.fc-model-current{display:flex;align-items:center;gap:10px;min-width:0}',
+      '.fc-model-thumb{width:64px;height:64px;border-radius:10px;object-fit:cover;border:0.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-fill-l1);display:flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-secondary);overflow:hidden;flex:0 0 auto}',
+      '.fc-model-thumb-img{width:100%;height:100%;object-fit:cover;display:block}',
+      '.fc-model-current-meta{display:flex;flex-direction:column;gap:3px;min-width:0}',
+      '.fc-model-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}',
+      '.fc-model-file{font-size:10.5px;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere}',
+      '.fc-model-meta{font-size:10.5px;line-height:1.5;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}',
+      '.fc-hidden-file{display:none}',
+      '@media (max-width:1100px){.fc-body{grid-template-columns:230px minmax(0,1fr);grid-template-areas:"list chat" "list profile";grid-template-rows:minmax(0,1fr) auto}.fc-rightcol{max-height:340px}.fc-collapse{display:inline-flex}.fc-profile-body[data-collapsed="true"]{display:none}}',
       '@media (max-width:800px){.fc-body{grid-template-columns:minmax(0,1fr);grid-template-areas:"chat" "profile";grid-template-rows:minmax(0,1fr) auto}.fc-list{display:none}.fc-conv-select{display:inline-block}}',
     ].join('')
 
@@ -397,16 +654,7 @@ window.__ModuleLoader__.load({
       h('circle', { cx: 18.6, cy: 11.9, r: 0.95, fill: 'currentColor' }))
     }
 
-    function Avatar({ companion, size = 26 }) {
-      return h('span', {
-        className: 'fc-avatar',
-        'data-mine': companion?.isMine ? 'true' : 'false',
-        style: { width: `${size}px`, height: `${size}px` },
-        'aria-hidden': true,
-      }, h(FangcunGlyph, { size: Math.round(size * 0.66), active: companion?.isMine === true }))
-    }
-
-    /** Item sprites; `icon` is the sprite name the Host sends (seed item: "basin"). */
+    /** Item sprites; `icon` is the sprite name the Host catalog sends. */
     function ItemIcon({ icon, size = 16 }) {
       if (icon === 'basin') {
         return h('svg', {
@@ -426,6 +674,38 @@ window.__ModuleLoader__.load({
         }),
         h('path', { d: 'M8.3 11.8c1.2.7 2.4 1 3.7 1s2.5-.3 3.7-1', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round', opacity: 0.6 }))
       }
+      if (icon === 'cup') {
+        return h('svg', {
+          viewBox: '0 0 24 24',
+          width: size,
+          height: size,
+          fill: 'none',
+          'aria-hidden': true,
+          style: { display: 'block' },
+        },
+        h('path', { d: 'M5 8h11v7.5A3.5 3.5 0 0 1 12.5 19h-4A3.5 3.5 0 0 1 5 15.5z', stroke: 'currentColor', strokeWidth: 1.5, strokeLinejoin: 'round' }),
+        h('path', { d: 'M16 10.2h1.6a2.4 2.4 0 0 1 0 4.8H16', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' }),
+        h('path', { d: 'M2.8 8h15.4', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' }),
+        h('path', { d: 'M8 5.6c.5-.8 1.2-1.2 2-1.2s1.5.4 2 1.2', stroke: 'currentColor', strokeWidth: 1.1, strokeLinecap: 'round', opacity: 0.55 }))
+      }
+      if (icon === 'bell') {
+        return h('svg', {
+          viewBox: '0 0 24 24',
+          width: size,
+          height: size,
+          fill: 'none',
+          'aria-hidden': true,
+          style: { display: 'block' },
+        },
+        h('path', {
+          d: 'M12 4.2c-3.3 0-5.4 2.4-5.4 5.6 0 3.4-.9 4.6-1.9 5.7h14.6c-1-1.1-1.9-2.3-1.9-5.7 0-3.2-2.1-5.6-5.4-5.6z',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinejoin: 'round',
+        }),
+        h('path', { d: 'M10.1 18.6a2 2 0 0 0 3.8 0', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' }),
+        h('path', { d: 'M12 4.2V2.8', stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round' }))
+      }
       return h('svg', {
         viewBox: '0 0 24 24',
         width: size,
@@ -437,6 +717,20 @@ window.__ModuleLoader__.load({
       h('rect', { x: 4, y: 6, width: 16, height: 13, rx: 3, stroke: 'currentColor', strokeWidth: 1.5 }),
       h('path', { d: 'M4 10.5h16', stroke: 'currentColor', strokeWidth: 1.2, opacity: 0.6 }),
       h('circle', { cx: 9, cy: 7.6, r: 0.9, fill: 'currentColor', opacity: 0.7 }))
+    }
+
+    /** Avatar: the companion's Host image when present, else the fish glyph. */
+    function Avatar({ companion, size = 26, override = null }) {
+      const source = override
+        ?? (typeof companion?.avatarImage === 'string' && companion.avatarImage ? companion.avatarImage : null)
+      return h('span', {
+        className: 'fc-avatar',
+        'data-mine': companion?.isMine ? 'true' : 'false',
+        style: { width: `${size}px`, height: `${size}px` },
+        'aria-hidden': true,
+      }, source
+        ? h('img', { className: 'fc-avatar-img', src: source, alt: '', draggable: false })
+        : h(FangcunGlyph, { size: Math.round(size * 0.66), active: companion?.isMine === true }))
     }
 
     /** Fixed-position tooltip so scroll containers cannot clip the preview. */
@@ -470,6 +764,10 @@ window.__ModuleLoader__.load({
     const fallbackPanelInfo = (selector) => selector({ activePanelId: PANEL_ID })
 
     function FangcunPanel({ t, usePanelInfo }) {
+      // Hook order (also documented for the structural test): social, host,
+      // selectedId, draft, busy, error, notice, unread, warehouseSelected,
+      // slotFeedback, tab, island, islandFailed, islandFrameLoaded, profileOpen,
+      // copied, dragItemId, dropSlot, model.
       const [social, setSocial] = useState(null)
       const [host, setHost] = useState(null)
       const [selectedId, setSelectedId] = useState(null)
@@ -478,23 +776,42 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null)
       const [notice, setNotice] = useState(null)
       const [unread, setUnread] = useState({})
-      const [giveItemId, setGiveItemId] = useState(null)
-      const [giveState, setGiveState] = useState(null)
+      const [warehouseSelected, setWarehouseSelected] = useState(null)
+      const [slotFeedback, setSlotFeedback] = useState(null)
       const [tab, setTab] = useState('chat')
       const [island, setIsland] = useState(null)
       const [islandFailed, setIslandFailed] = useState(false)
       const [islandFrameLoaded, setIslandFrameLoaded] = useState(false)
       const [profileOpen, setProfileOpen] = useState(true)
       const [copied, setCopied] = useState(false)
+      const [dragItemId, setDragItemId] = useState(null)
+      const [dropSlot, setDropSlot] = useState(null)
+      const [model, setModel] = useState({
+        file: null,
+        previewUrl: null,
+        meta: null,
+        busy: null,
+        error: null,
+        notice: null,
+        install: null,
+        avatarPreview: null,
+      })
 
       const mountedRef = useRef(true)
       const selectedRef = useRef(null)
       const seenRef = useRef(new Map())
       const frameTimerRef = useRef(null)
+      const fileInputRef = useRef(null)
+      const modelFileRef = useRef(null)
+      const previewBlobRef = useRef(null)
+      const previewUrlRef = useRef(null)
+      const dragRef = useRef(null)
 
       const useActivePanelId = typeof usePanelInfo === 'function' ? usePanelInfo : fallbackPanelInfo
       const activePanelId = useActivePanelId((info) => info.activePanelId)
       const isActivePanel = activePanelId === undefined || activePanelId === null || activePanelId === PANEL_ID
+
+      const patchModel = useCallback((patch) => setModel((current) => ({ ...current, ...patch })), [])
 
       const applySocial = useCallback((payload, { full }) => {
         setSocial(payload)
@@ -560,6 +877,10 @@ window.__ModuleLoader__.load({
         return () => {
           mountedRef.current = false
           if (frameTimerRef.current) clearTimeout(frameTimerRef.current)
+          if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current)
+          previewUrlRef.current = null
+          previewBlobRef.current = null
+          modelFileRef.current = null
         }
       }, [])
 
@@ -582,12 +903,12 @@ window.__ModuleLoader__.load({
         return row?.displayName ?? id
       }, [actions, selected])
       const canChat = status === 'running' && busy === null && transcript?.available === true && selected !== null
+      const canGive = selectedIsMine && busy === null
 
       const run = useCallback(async (kind, task) => {
         setBusy(kind)
         setError(null)
         setNotice(null)
-        setGiveState(null)
         try {
           return await task()
         } catch (failure) {
@@ -639,6 +960,12 @@ window.__ModuleLoader__.load({
         }
       }, [busy, draft, loadSocial, run, selected])
 
+      const clearDragState = useCallback(() => {
+        dragRef.current = null
+        setDragItemId(null)
+        setDropSlot(null)
+      }, [])
+
       const selectCompanion = useCallback((companionId) => {
         if (!companionId || companionId === selectedRef.current) return
         selectedRef.current = companionId
@@ -649,50 +976,105 @@ window.__ModuleLoader__.load({
           delete next[companionId]
           return next
         })
-        setGiveItemId(null)
-        setGiveState(null)
+        setWarehouseSelected(null)
+        setSlotFeedback(null)
+        clearDragState()
+        // A previewed avatar/model belongs to the previous companion.
+        setModel((current) => ({ ...current, avatarPreview: null }))
         loadSocial(true)
-      }, [loadSocial])
+      }, [clearDragState, loadSocial])
 
-      const onPickItem = useCallback((item) => {
-        if (!selected) {
-          setGiveState({ kind: 'error', text: t('chat.none') })
-          return
-        }
-        if (!selected.isMine) {
-          setGiveState({ kind: 'error', text: t('inventory.readonly') })
-          setGiveItemId(null)
-          return
-        }
-        setGiveState(null)
-        setGiveItemId((current) => (current === item.itemId ? null : item.itemId))
-      }, [selected, t])
-
-      const onGive = useCallback(async () => {
-        if (!selected || !selected.isMine || !giveItemId) return
-        const item = inventory.find((row) => row.itemId === giveItemId)
+      const giveItem = useCallback(async (slotIndex, itemId) => {
+        if (!selected || !selected.isMine || !itemId) return
+        const item = inventory.find((row) => row.itemId === itemId)
+        setSlotFeedback(null)
         const payload = await run('give', () => callApi('/give', {
           method: 'POST',
-          body: JSON.stringify({ companionId: selected.companionId, itemId: giveItemId }),
+          body: JSON.stringify({ companionId: selected.companionId, itemId }),
         }))
         if (!payload || payload.failed) {
           const code = payload?.failed?.code ?? 'unknown'
           const mapped = {
             companion_inventory_full: t('give.err.full'),
             item_not_owned: t('give.err.notOwned'),
+            item_already_held: t('give.err.alreadyHeld'),
             not_owner: t('give.err.notOwner'),
             unknown_item: t('give.err.unknownItem'),
             companion_not_found: t('give.err.companionMissing'),
             invalid_companion: t('give.err.companionMissing'),
             social_unavailable: t('give.err.unavailable'),
           }[code]
-          setGiveState({ kind: 'error', text: mapped ?? t('give.err.unknown', { code }) })
+          setSlotFeedback({ index: slotIndex, kind: 'error', text: mapped ?? t('give.err.unknown', { code }) })
           return
         }
-        setGiveItemId(null)
-        setGiveState({ kind: 'ok', text: t('give.ok', { item: item?.name ?? giveItemId, name: selected.name }) })
+        setWarehouseSelected(null)
+        setSlotFeedback({ index: slotIndex, kind: 'ok', text: t('give.ok', { item: item?.name ?? itemId, name: selected.name }) })
         await loadSocial(true)
-      }, [giveItemId, inventory, loadSocial, run, selected, t])
+      }, [inventory, loadSocial, run, selected, t])
+
+      const onPickWarehouseItem = useCallback((item) => {
+        if (!selected) {
+          setSlotFeedback({ index: 0, kind: 'error', text: t('chat.none') })
+          return
+        }
+        if (!selected.isMine) {
+          setSlotFeedback({ index: 0, kind: 'error', text: t('warehouse.readonly') })
+          setWarehouseSelected(null)
+          return
+        }
+        setSlotFeedback(null)
+        setWarehouseSelected((current) => (current === item.itemId ? null : item.itemId))
+      }, [selected, t])
+
+      const onWarehouseDragStart = useCallback((event, item) => {
+        if (!selectedIsMine) {
+          event.preventDefault()
+          return
+        }
+        dragRef.current = item.itemId
+        setDragItemId(item.itemId)
+        setSlotFeedback(null)
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = 'move'
+          try { event.dataTransfer.setData('text/plain', item.itemId) } catch { /* some browsers restrict reads */ }
+        }
+      }, [selectedIsMine])
+
+      const onSlotDragOver = useCallback((event, index) => {
+        if (!canGive) return
+        event.preventDefault()
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+        setDropSlot(index)
+      }, [canGive])
+
+      const onSlotDragLeave = useCallback((index) => {
+        setDropSlot((current) => (current === index ? null : current))
+      }, [])
+
+      const onSlotDrop = useCallback((event, index) => {
+        event.preventDefault()
+        if (!canGive) return
+        let itemId = dragRef.current
+        try {
+          const transferred = event.dataTransfer?.getData('text/plain')
+          if (transferred) itemId = transferred
+        } catch { /* keep the ref value */ }
+        clearDragState()
+        if (itemId) giveItem(index, itemId)
+      }, [canGive, clearDragState, giveItem])
+
+      const onSlotClick = useCallback((index) => {
+        if (!selected) return
+        if (!selectedIsMine) {
+          setSlotFeedback({ index, kind: 'error', text: t('profile.readonly') })
+          return
+        }
+        if (!warehouseSelected) {
+          setSlotFeedback({ index, kind: 'hint', text: t('warehouse.lockHint') })
+          return
+        }
+        giveItem(index, warehouseSelected)
+      }, [giveItem, selected, selectedIsMine, t, warehouseSelected])
 
       const onStart = useCallback(() => run('start', async () => {
         const response = await callApi('/start', { method: 'POST', body: '{}' })
@@ -754,10 +1136,131 @@ window.__ModuleLoader__.load({
         } catch { /* clipboard is best-effort */ }
       }, [host])
 
+      // -------------------------------------------------------- model import
+      const onPickModel = useCallback(async (event) => {
+        const file = event?.target?.files?.[0] ?? null
+        if (event?.target) event.target.value = ''
+        if (!file) return
+        if (previewUrlRef.current) {
+          URL.revokeObjectURL(previewUrlRef.current)
+          previewUrlRef.current = null
+        }
+        previewBlobRef.current = null
+        modelFileRef.current = file
+        patchModel({
+          file: { name: file.name, size: file.size },
+          previewUrl: null,
+          meta: null,
+          busy: null,
+          error: null,
+          notice: null,
+          install: null,
+        })
+        if (file.size > MODEL_MAX_BYTES) {
+          patchModel({ error: t('model.tooLarge') })
+          modelFileRef.current = null
+          return
+        }
+        patchModel({ busy: 'parse' })
+        try {
+          const buffer = await file.arrayBuffer()
+          const preview = extractModelPreview(buffer)
+          if (preview.thumbnail) {
+            const blob = new Blob([preview.thumbnail], { type: preview.mime ?? 'image/png' })
+            const url = URL.createObjectURL(blob)
+            previewBlobRef.current = blob
+            previewUrlRef.current = url
+            patchModel({
+              busy: null,
+              previewUrl: url,
+              meta: {
+                name: preview.meta.name,
+                author: preview.meta.author,
+                version: preview.meta.version,
+                specVersion: preview.meta.specVersion,
+                hasThumbnail: true,
+              },
+              notice: t('model.parsed'),
+            })
+          } else {
+            patchModel({
+              busy: null,
+              meta: {
+                name: preview.meta.name,
+                author: preview.meta.author,
+                version: preview.meta.version,
+                specVersion: preview.meta.specVersion,
+                hasThumbnail: false,
+              },
+              notice: t('model.noThumb'),
+            })
+          }
+        } catch (failure) {
+          patchModel({
+            busy: null,
+            error: `${t('model.parseFailed')}: ${failure?.message ?? String(failure)}`,
+          })
+        }
+      }, [patchModel, t])
+
+      const onSetAvatar = useCallback(async () => {
+        if (!selected?.isMine || !previewBlobRef.current) return
+        patchModel({ busy: 'avatar', error: null, notice: null })
+        try {
+          const dataUrl = await prepareAvatarDataUrl(previewBlobRef.current)
+          const payload = await callApi('/avatar', {
+            method: 'POST',
+            body: JSON.stringify({ companionId: selected.companionId, avatarImage: dataUrl }),
+          })
+          if (!mountedRef.current) return
+          patchModel({ busy: null, avatarPreview: dataUrl, notice: t('model.avatarOk'), error: null })
+          if (payload?.companion) await loadSocial(true)
+        } catch (failure) {
+          if (!mountedRef.current) return
+          const code = failure?.code
+          const mapped = code === 'avatar_unsupported'
+            ? t('model.avatarUnsupported')
+            : (code === 'avatar_too_large'
+              ? t('model.avatarTooLarge')
+              : (code === 'invalid_avatar' ? t('model.avatarInvalid') : null))
+          patchModel({
+            busy: null,
+            error: mapped ?? `${t('error.generic')}: ${failure?.message ?? String(failure)}`,
+          })
+        }
+      }, [loadSocial, patchModel, selected, t])
+
+      const onInstallModel = useCallback(async () => {
+        const file = modelFileRef.current
+        if (!file || !selected?.isMine) return
+        patchModel({ busy: 'install', error: null, notice: null, install: null })
+        try {
+          const payload = await callApi(`/model?companionId=${encodeURIComponent(selected.companionId)}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: file,
+          })
+          if (!mountedRef.current) return
+          patchModel({
+            busy: null,
+            install: { path: payload.path, command: payload.command, bytes: payload.bytes },
+            notice: t('model.installOk'),
+          })
+        } catch (failure) {
+          if (!mountedRef.current) return
+          patchModel({ busy: null, error: `${t('model.installFailed')}: ${failure?.message ?? String(failure)}` })
+        }
+      }, [patchModel, selected, t])
+
+      // ---------------------------------------------------------------- view
       const islandUrl = island?.url ?? 'http://127.0.0.1:4173/?mode=host'
       const showIslandFrame = island?.embeddable === true && !islandFailed
       const revisionText = typeof host?.revision === 'number' ? host.revision : '–'
       const blockText = typeof host?.blockCount === 'number' ? host.blockCount : '–'
+      const modelCompanionImage = selected?.avatarImage ?? null
+      const modelPreviewImage = model.previewUrl
+        ?? (model.avatarPreview && selected ? model.avatarPreview : null)
+        ?? modelCompanionImage
 
       const renderConversationRow = (companion) => {
         const last = companion.lastMessage
@@ -784,9 +1287,9 @@ window.__ModuleLoader__.load({
         companion.isMine ? null : h('span', { className: 'fc-tag', title: t('profile.readonly') }, '🔒'))
       }
 
-      const renderItemCard = (item) => {
-        const selectedItem = giveItemId === item.itemId
+      const renderWarehouseItem = (item) => {
         const readOnly = !selectedIsMine
+        const selectedItem = warehouseSelected === item.itemId
         return h(Tip, {
           key: item.itemId,
           title: item.name,
@@ -796,26 +1299,116 @@ window.__ModuleLoader__.load({
         h('button', {
           type: 'button',
           className: 'fc-item',
+          draggable: !readOnly,
           'data-selected': selectedItem ? 'true' : 'false',
+          'data-dragging': dragItemId === item.itemId ? 'true' : 'false',
           'data-readonly': readOnly ? 'true' : 'false',
+          onClick: () => onPickWarehouseItem(item),
+          onDragStart: (event) => onWarehouseDragStart(event, item),
+          onDragEnd: clearDragState,
           'aria-label': `${t('item.icon')}: ${item.name}`,
-          onClick: () => onPickItem(item),
         },
         h('span', { className: 'fc-item-icon' }, h(ItemIcon, { icon: item.icon, size: 16 })),
-        h('span', { className: 'fc-item-name' }, item.name)))
+        h('span', { className: 'fc-item-name' }, item.name),
+        item.count > 1 ? h('span', { className: 'fc-item-count' }, t('warehouse.count', { count: item.count })) : null))
+      }
+
+      const renderWarehouse = () => {
+        const unavailable = social !== null && social.inventoryAvailable === false
+        const readOnly = !selectedIsMine
+        return h('div', { className: 'fc-warehouse' },
+          h('div', { className: 'fc-warehouse-head' },
+            h('span', { className: 'fc-card-title', style: { fontSize: '11.5px' } }, t('warehouse.title')),
+            h('span', { className: 'fc-count' }, String(inventory.length)),
+            h('span', { className: 'fc-spacer' }),
+            readOnly
+              ? h('span', { className: 'fc-lock' }, h('span', { 'aria-hidden': true }, '🔒'), h('span', null, t('warehouse.readonly')))
+              : null),
+          readOnly
+            ? null
+            : h('div', { className: 'fc-warehouse-hint' },
+              warehouseSelected
+                ? t('warehouse.hintSelected', {
+                  item: inventory.find((row) => row.itemId === warehouseSelected)?.name ?? warehouseSelected,
+                  name: selected?.name ?? '',
+                })
+                : t('warehouse.hint')),
+          unavailable
+            ? h('div', { className: 'fc-inline', 'data-kind': 'hint' }, t('warehouse.unavailable'))
+            : inventory.length === 0
+              ? h('div', { className: 'fc-inline', 'data-kind': 'hint' }, t('warehouse.empty'))
+              : h('div', { className: 'fc-warehouse-grid' }, inventory.map(renderWarehouseItem)),
+          error ? h('div', { className: 'fc-inline', 'data-kind': 'error' }, error) : null,
+          notice ? h('div', { className: 'fc-inline', 'data-kind': 'ok' }, notice) : null,
+          notRunning
+            ? h('div', null,
+              h('div', { className: 'fc-inline', 'data-kind': 'error' }, t('state.notRunning')),
+              h('div', { className: 'fc-inline', 'data-kind': 'hint' },
+                host?.spawnFailed ? t('state.startFailed') : t('state.notRunningHint')),
+              h('div', { className: 'fc-manual' }, host?.manualCommand ?? 'node scripts/run-host.mjs'))
+            : null,
+          host?.lastError ? h('div', { className: 'fc-inline', 'data-kind': 'error' }, host.lastError) : null)
+      }
+
+      const renderSlots = () => {
+        const slots = [0, 1].map((index) => selected?.items?.[index] ?? null)
+        const locked = !selectedIsMine
+        const feedback = slotFeedback
+        return h(React.Fragment, null,
+          h('div', { className: 'fc-slots' },
+            slots.map((item, index) => {
+              const dropping = dropSlot === index && canGive
+              const feedbackKind = feedback?.index === index ? feedback.kind : null
+              const common = {
+                key: item ? `${item.itemId}-${index}` : `empty-${index}`,
+                className: 'fc-slot',
+                'data-filled': item ? 'true' : 'false',
+                'data-can-give': canGive ? 'true' : 'false',
+                'data-dropping': dropping ? 'true' : 'false',
+                'data-locked': locked ? 'true' : 'false',
+                'data-feedback': feedbackKind ?? undefined,
+                onClick: () => onSlotClick(index),
+                onDragOver: (event) => onSlotDragOver(event, index),
+                onDragLeave: () => onSlotDragLeave(index),
+                onDrop: (event) => onSlotDrop(event, index),
+                title: locked ? t('profile.readonly') : (item ? item.name : t('warehouse.drop')),
+              }
+              const body = item
+                ? [h('span', { className: 'fc-item-icon' }, h(ItemIcon, { icon: item.icon, size: 16 })),
+                  h('span', { className: 'fc-slot-name' }, item.name)]
+                : [h('span', { className: 'fc-slot-empty' }, locked ? t('profile.emptySlot') : t('warehouse.drop')),
+                  h('span', { className: 'fc-slot-hint' }, locked ? t('warehouse.locked') : '')]
+              const content = item
+                ? h(Tip, {
+                  title: item.name,
+                  description: item.description ?? t('item.descriptionMissing'),
+                  lock: locked ? t('profile.readonly') : null,
+                }, h('span', { style: { display: 'flex', alignItems: 'center', gap: '7px', minWidth: 0 } }, body))
+                : body
+              return h('div', common, content)
+            })),
+          feedback
+            ? h('div', {
+              className: 'fc-inline',
+              'data-kind': feedback.kind === 'error' ? 'error' : (feedback.kind === 'ok' ? 'ok' : 'hint'),
+            }, feedback.text)
+            : null)
       }
 
       const renderProfile = () => {
         if (!selected) {
           return h('div', { className: 'fc-profile-body' }, h('div', { className: 'fc-empty' }, t('profile.none')))
         }
-        const slots = [0, 1].map((index) => selected.items?.[index] ?? null)
         return h('div', {
           className: 'fc-profile-body',
           'data-collapsed': profileOpen ? 'false' : 'true',
         },
         h('div', { className: 'fc-profile-top' },
-          h(Avatar, { companion: selected, size: 40 }),
+          h(Avatar, {
+            companion: selected,
+            size: 40,
+            override: model.avatarPreview,
+          }),
           h('div', { style: { minWidth: 0 } },
             h('div', { className: 'fc-profile-name' }, selected.name),
             h('div', { className: 'fc-profile-owner' },
@@ -835,22 +1428,106 @@ window.__ModuleLoader__.load({
             h('span', { className: 'fc-value' }, selected.avatarModelId ?? selected.personaId ?? '–'))),
         h('div', { className: 'fc-divider' }),
         h('div', { className: 'fc-label' }, t('profile.slots')),
-        h('div', { className: 'fc-slots' },
-          slots.map((item, index) => item
-            ? h(Tip, {
-              key: `${item.itemId}-${index}`,
-              title: item.name,
-              description: item.description ?? t('item.descriptionMissing'),
-              lock: selected.isMine ? null : t('profile.readonly'),
-            },
-            h('div', { className: 'fc-slot', 'data-filled': 'true' },
-              h('span', { className: 'fc-item-icon' }, h(ItemIcon, { icon: item.icon, size: 16 })),
-              h('span', { className: 'fc-slot-name' }, item.name)))
-            : h('div', { key: `empty-${index}`, className: 'fc-slot', 'data-filled': 'false' },
-              h('span', { className: 'fc-slot-empty' }, t('profile.emptySlot'))))),
-        selected.isMine
+        renderSlots(),
+        selectedIsMine
           ? null
           : h('div', { className: 'fc-lock' }, h('span', { 'aria-hidden': true }, '🔒'), h('span', null, t('profile.readonly'))))
+      }
+
+      const renderModelSection = () => {
+        const readOnly = !selectedIsMine
+        const busyModel = model.busy
+        const metaText = model.meta
+          ? (model.meta.name || model.meta.author
+            ? t('model.meta', {
+              name: model.meta.name ?? '?',
+              author: model.meta.author ?? '?',
+              spec: model.meta.specVersion ?? '',
+            })
+            : t('model.metaUnknown'))
+          : null
+        return h('section', { className: 'fc-card fc-model' },
+          h('div', { className: 'fc-card-head' },
+            h('span', { className: 'fc-card-title' }, t('model.title')),
+            h('span', { className: 'fc-spacer' }),
+            readOnly ? h('span', { className: 'fc-tag' }, t('model.readonly')) : null),
+          h('div', { className: 'fc-model-body' },
+            h('div', { className: 'fc-reco' },
+              h('div', { className: 'fc-reco-title' }, t('model.recommend')),
+              h('div', { className: 'fc-reco-note' }, t('model.recommendNote')),
+              h('div', { className: 'fc-reco-row' },
+                h('a', {
+                  className: 'fc-linkbtn',
+                  'data-size': 'sm',
+                  href: RECOMMENDED_MODEL_URL,
+                  target: '_blank',
+                  rel: 'noreferrer noopener',
+                }, t('model.recommendLink')),
+                h('span', { className: 'fc-reco-local' }, t('model.localOnly')))),
+            h('div', { className: 'fc-model-current' },
+              h('span', { className: 'fc-model-thumb' },
+                modelPreviewImage
+                  ? h('img', { className: 'fc-model-thumb-img', src: modelPreviewImage, alt: '' })
+                  : h(FangcunGlyph, { size: 34, active: selectedIsMine })),
+              h('div', { className: 'fc-model-current-meta' },
+                h('div', { className: 'fc-row' },
+                  h('span', { className: 'fc-label', style: { minWidth: '54px' } }, t('model.current')),
+                  h('span', { className: 'fc-value' }, selected?.name ?? '–')),
+                h('div', { className: 'fc-row' },
+                  h('span', { className: 'fc-label', style: { minWidth: '54px' } }, t('model.file')),
+                  h('span', { className: 'fc-value' }, selected?.avatarModelId ?? '–')))),
+            h('div', { className: 'fc-model-actions' },
+              h('button', {
+                type: 'button',
+                className: 'fc-btn',
+                'data-size': 'sm',
+                disabled: readOnly || busy !== null || busyModel !== null,
+                onClick: () => fileInputRef.current?.click(),
+              }, busyModel === 'parse' ? t('model.busy.parse') : t('model.import')),
+              h('input', {
+                ref: fileInputRef,
+                type: 'file',
+                accept: '.vrm,.glb',
+                className: 'fc-hidden-file',
+                onChange: onPickModel,
+                'aria-label': t('model.import'),
+              }),
+              h('button', {
+                type: 'button',
+                className: 'fc-btn',
+                'data-size': 'sm',
+                disabled: readOnly || busy !== null || busyModel !== null || !model.previewUrl,
+                onClick: onSetAvatar,
+              }, busyModel === 'avatar' ? t('model.busy.avatar') : t('model.setAvatar')),
+              h('button', {
+                type: 'button',
+                className: 'fc-btn',
+                'data-variant': 'primary',
+                'data-size': 'sm',
+                disabled: readOnly || busy !== null || busyModel !== null || !model.file,
+                onClick: onInstallModel,
+              }, busyModel === 'install' ? t('model.busy.install') : t('model.install'))),
+            model.file
+              ? h('div', { className: 'fc-model-file' },
+                `${model.file.name} · ${formatBytes(model.file.size)}`)
+              : h('div', { className: 'fc-inline', 'data-kind': 'hint' }, t('model.noFile')),
+            metaText
+              ? h('div', { className: 'fc-model-meta' }, metaText)
+              : null,
+            model.meta && model.meta.hasThumbnail === false
+              ? h('div', { className: 'fc-inline', 'data-kind': 'hint' }, t('model.noThumb'))
+              : null,
+            model.error ? h('div', { className: 'fc-inline', 'data-kind': 'error' }, model.error) : null,
+            model.notice ? h('div', { className: 'fc-inline', 'data-kind': 'ok' }, model.notice) : null,
+            model.install
+              ? h('div', { className: 'fc-reco', style: { background: 'var(--dsw-alias-bg-base)' } },
+                h('div', { className: 'fc-inline', 'data-kind': 'ok' }, t('model.rebuild')),
+                h('div', { className: 'fc-model-file' }, `${t('model.path')}: ${model.install.path}`),
+                h('div', { className: 'fc-model-file' }, `${t('model.command')} ${model.install.command}`))
+              : null,
+            readOnly
+              ? h('div', { className: 'fc-inline', 'data-kind': 'hint' }, t('model.readonly'))
+              : null))
       }
 
       const renderChatPane = () => {
@@ -937,56 +1614,6 @@ window.__ModuleLoader__.load({
             }, t('island.retry'))))
       }
 
-      const renderInventory = () => {
-        const unavailable = social !== null && social.inventoryAvailable === false
-        const giveItem = giveItemId ? inventory.find((item) => item.itemId === giveItemId) ?? null : null
-        return h('div', { className: 'fc-inv' },
-          h('div', { className: 'fc-inv-head' },
-            h('span', { className: 'fc-card-title', style: { fontSize: '11.5px' } }, t('inventory.title')),
-            h('span', { className: 'fc-count' }, String(inventory.length)),
-            h('span', { className: 'fc-spacer' }),
-            selectedIsMine
-              ? null
-              : h('span', { className: 'fc-lock' }, h('span', { 'aria-hidden': true }, '🔒'), h('span', null, t('inventory.readonly')))),
-          unavailable
-            ? h('div', { className: 'fc-inline', 'data-kind': 'hint' }, t('inventory.unavailable'))
-            : inventory.length === 0
-              ? h('div', { className: 'fc-inline', 'data-kind': 'hint' }, t('inventory.empty'))
-              : h('div', { className: 'fc-inv-items' }, inventory.map(renderItemCard)),
-          giveItem && selectedIsMine
-            ? h('div', { className: 'fc-givebar' },
-              h('div', { className: 'fc-givebar-name' }, t('give.prompt', { name: selected.name })),
-              h('div', { className: 'fc-givebar-row' },
-                h('button', {
-                  type: 'button',
-                  className: 'fc-btn',
-                  'data-variant': 'primary',
-                  'data-size': 'sm',
-                  disabled: busy !== null,
-                  onClick: onGive,
-                }, busy === 'give' ? '…' : t('give.prompt', { name: selected.name })),
-                h('button', {
-                  type: 'button',
-                  className: 'fc-btn',
-                  'data-size': 'sm',
-                  onClick: () => setGiveItemId(null),
-                }, t('action.cancel'))))
-            : null,
-          giveState
-            ? h('div', { className: 'fc-inline', 'data-kind': giveState.kind }, giveState.text)
-            : null,
-          error ? h('div', { className: 'fc-inline', 'data-kind': 'error' }, error) : null,
-          notice ? h('div', { className: 'fc-inline', 'data-kind': 'ok' }, notice) : null,
-          notRunning
-            ? h('div', null,
-              h('div', { className: 'fc-inline', 'data-kind': 'error' }, t('state.notRunning')),
-              h('div', { className: 'fc-inline', 'data-kind': 'hint' },
-                host?.spawnFailed ? t('state.startFailed') : t('state.notRunningHint')),
-              h('div', { className: 'fc-manual' }, host?.manualCommand ?? 'node scripts/run-host.mjs'))
-            : null,
-          host?.lastError ? h('div', { className: 'fc-inline', 'data-kind': 'error' }, host.lastError) : null)
-      }
-
       return h('section', {
         className: 'fc-page',
         'aria-label': t('title'),
@@ -1036,7 +1663,7 @@ window.__ModuleLoader__.load({
               companions.length === 0
                 ? h('div', { className: 'fc-empty' }, t('list.empty'))
                 : companions.map(renderConversationRow)),
-          renderInventory()),
+          renderWarehouse()),
         h('section', { className: 'fc-card fc-chat' },
           h('div', { className: 'fc-card-head' },
             companions.length > 0
@@ -1067,18 +1694,20 @@ window.__ModuleLoader__.load({
                 onClick: () => setTab('island'),
               }, t('tab.island')))),
           tab === 'chat' ? renderChatPane() : renderIslandPane()),
-        h('aside', { className: 'fc-card fc-profile' },
-          h('div', { className: 'fc-card-head' },
-            h('span', { className: 'fc-card-title' }, t('profile.title')),
-            selectedIsMine ? null : h('span', { className: 'fc-tag' }, t('profile.readonly')),
-            h('span', { className: 'fc-spacer' }),
-            h('button', {
-              type: 'button',
-              className: 'fc-collapse',
-              onClick: () => setProfileOpen((value) => !value),
-              'aria-expanded': profileOpen ? 'true' : 'false',
-            }, profileOpen ? t('action.collapse') : t('action.expand'))),
-          renderProfile())),
+        h('div', { className: 'fc-rightcol' },
+          h('aside', { className: 'fc-card fc-profile' },
+            h('div', { className: 'fc-card-head' },
+              h('span', { className: 'fc-card-title' }, t('profile.title')),
+              selectedIsMine ? null : h('span', { className: 'fc-tag' }, t('profile.readonly')),
+              h('span', { className: 'fc-spacer' }),
+              h('button', {
+                type: 'button',
+                className: 'fc-collapse',
+                onClick: () => setProfileOpen((value) => !value),
+                'aria-expanded': profileOpen ? 'true' : 'false',
+              }, profileOpen ? t('action.collapse') : t('action.expand'))),
+            renderProfile()),
+          renderModelSection())),
       h('div', { className: 'fc-footerbar' },
         h('span', null, host?.hostUrl ?? ''),
         host?.pairingCode
@@ -1114,6 +1743,11 @@ window.__ModuleLoader__.load({
           inject: () => ({ t }),
         }, FangcunPanel))
       },
+      // Structural-test hooks; only when the test harness opts in. Production
+      // plugins export exactly { inject, apply }.
+      ...(typeof window !== 'undefined' && window.__DSH_FANGCUN_TEST__ === true
+        ? { __test: { parseGlbContainer, extractModelPreview, decodeVrmMeta, extractThumbnail } }
+        : {}),
     }
   },
 })

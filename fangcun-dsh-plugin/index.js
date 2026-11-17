@@ -10,6 +10,8 @@
  * `/api/fangcun-host/*` that the package's Client half calls.
  */
 import { spawn } from 'node:child_process'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export const name = 'fangcun-dsh-plugin'
 // The route surface is the only Client-facing transport, so the plugin needs the
@@ -37,6 +39,16 @@ const SOCIAL_CACHE_MS = 1500
 const ISLAND_CACHE_MS = 10000
 const ISLAND_PREFLIGHT_TIMEOUT_MS = 2000
 const ISLAND_URL = 'http://127.0.0.1:4173/?mode=host'
+
+/** Local client asset target for an imported companion model (never committed). */
+const MODEL_TARGET_SUBDIR = 'apps/android-ar-poc/app/src/main/assets/models/companion'
+const MODEL_MAX_BYTES = 64 * 1024 * 1024
+// Host decodes the data URL and caps the image at 64 KiB; allow the base64
+// envelope (~87 KiB) plus headroom and let the Host's own validation speak.
+const AVATAR_IMAGE_MAX_CHARS = 200_000
+const COMPANION_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/
+const GLB_MAGIC = [0x67, 0x6c, 0x54, 0x46] // 'glTF' little-endian uint32 0x46546C67
+const MODEL_REBUILD_COMMAND = 'cd apps/android-ar-poc && gradle assembleDebug'
 
 const PAIRING_LINE = /pairing code[^:\n]*:\s*([A-Za-z0-9]{4,20})/
 
@@ -414,6 +426,7 @@ class FangcunHostService {
     const messages = {
       companion_inventory_full: 'companion inventory is full',
       item_not_owned: 'item is not in the user inventory',
+      item_already_held: 'the companion already holds this item',
       unknown_item: 'unknown item id',
       companion_not_found: 'unknown companion',
       not_owner: 'companion belongs to another user',
@@ -423,6 +436,91 @@ class FangcunHostService {
     }
     const status = result.status >= 400 && result.status < 500 ? result.status : 409
     throw new FangcunError(code, messages[code] ?? code, status)
+  }
+
+  /**
+   * Persist the imported thumbnail as the companion's avatar through the Host's
+   * companion PATCH. The Host field is being extended concurrently: until it
+   * lands, its `unknown_companion_field` rejection is reported as
+   * `avatar_unsupported` so the panel can say so honestly.
+   */
+  async setAvatar(companionId, avatarImage) {
+    if (typeof companionId !== 'string' || !COMPANION_ID_PATTERN.test(companionId)) {
+      throw new FangcunError('invalid_companion', 'companionId is invalid')
+    }
+    if (typeof avatarImage !== 'string' || !avatarImage) {
+      throw new FangcunError('invalid_avatar', 'avatarImage is required')
+    }
+    if (avatarImage.length > AVATAR_IMAGE_MAX_CHARS) {
+      throw new FangcunError('avatar_too_large', `avatarImage must be at most ${AVATAR_IMAGE_MAX_CHARS} characters`, 413)
+    }
+    if (!/^data:image\/(png|jpeg|webp);base64,/.test(avatarImage)) {
+      throw new FangcunError('invalid_avatar', 'avatarImage must be a base64 data URL of a PNG/JPEG/WebP image')
+    }
+    await this.#ensureRunning()
+    const result = await this.#hostPatch(`/api/core/companions/${encodeURIComponent(companionId)}`, { avatarImage })
+    if (result.ok) {
+      this.#socialCache.at = 0
+      return { companionId, companion: result.payload ?? null }
+    }
+    const code = typeof result.error === 'string' && result.error ? result.error : 'avatar_failed'
+    if (result.status === 404 && code === 'not_found') {
+      throw new FangcunError('social_unavailable', 'Host does not expose the companion patch route yet', 503)
+    }
+    if (code === 'unknown_companion_field' || code === 'invalid_companion_request') {
+      throw new FangcunError('avatar_unsupported', 'Host does not accept avatarImage yet', 503)
+    }
+    const status = result.status >= 400 && result.status < 500 ? result.status : 409
+    throw new FangcunError(code, `avatar update refused: ${code}`, status)
+  }
+
+  /**
+   * Store an imported model file into the Android client's companion asset dir.
+   * The bytes never enter the panel bundle, the repo history or the Host store:
+   * they are written to the local build asset path and must be rebuilt into an
+   * APK to take effect on the tablet.
+   */
+  async installModel(companionId, bytes) {
+    if (typeof companionId !== 'string' || !COMPANION_ID_PATTERN.test(companionId)) {
+      throw new FangcunError('invalid_companion', 'companionId is invalid')
+    }
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
+      throw new FangcunError('invalid_model', 'model body is empty')
+    }
+    if (bytes.byteLength > MODEL_MAX_BYTES) {
+      throw new FangcunError('model_too_large', `model must be at most ${MODEL_MAX_BYTES} bytes`, 413)
+    }
+    if (!GLB_MAGIC.every((byte, index) => bytes[index] === byte)) {
+      throw new FangcunError('invalid_model_container', 'model is not a GLB/VRM container (glTF magic missing)')
+    }
+    await this.#ensureRunning()
+    const companionsResult = await this.#hostGet('/api/core/companions')
+    if (companionsResult.ok) {
+      const list = Array.isArray(companionsResult.payload)
+        ? companionsResult.payload
+        : (Array.isArray(companionsResult.payload?.companions) ? companionsResult.payload.companions : [])
+      const target = list.find((row) => row?.companionId === companionId)
+      if (!target) throw new FangcunError('companion_not_found', 'unknown companion', 404)
+      if (target.isMine === false) throw new FangcunError('not_owner', 'companion belongs to another user', 403)
+    }
+
+    const targetDir = join(this.#repoDir, MODEL_TARGET_SUBDIR)
+    const fileName = `${companionId}.vrm`
+    const absolutePath = join(targetDir, fileName)
+    try {
+      mkdirSync(targetDir, { recursive: true })
+      writeFileSync(absolutePath, bytes)
+    } catch (error) {
+      throw new FangcunError('model_write_failed', error?.message ?? String(error), 500)
+    }
+    return {
+      stored: true,
+      companionId,
+      path: `${MODEL_TARGET_SUBDIR}/${fileName}`,
+      bytes: bytes.byteLength,
+      needsRebuild: true,
+      command: MODEL_REBUILD_COMMAND,
+    }
   }
 
   /** Preflight the island console so the panel can decide before framing it. */
@@ -668,10 +766,19 @@ class FangcunHostService {
 
   /** One optional Host write with the same non-throwing contract as #hostGet. */
   async #hostPost(path, body) {
+    return this.#hostWrite('POST', path, body)
+  }
+
+  /** One optional Host PATCH (companion profile/avatar updates). */
+  async #hostPatch(path, body) {
+    return this.#hostWrite('PATCH', path, body)
+  }
+
+  async #hostWrite(method, path, body) {
     let response
     try {
       response = await fetch(`${this.#hostUrl}${path}`, {
-        method: 'POST',
+        method,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(READ_TIMEOUT_MS),
@@ -894,16 +1001,21 @@ function normalizeCompanion(raw) {
         : (typeof raw.personaId === 'string' ? raw.personaId : null)),
     state: typeof raw.state === 'string' ? raw.state : null,
     activeAction: typeof raw.activeAction === 'string' ? raw.activeAction : null,
+    // Optional data URL the Host may attach once its avatar field lands; the
+    // panel falls back to its own fish glyph when it is absent.
+    avatarImage: typeof raw.avatarImage === 'string' && raw.avatarImage.length <= AVATAR_IMAGE_MAX_CHARS
+      ? raw.avatarImage
+      : null,
     items: items.slice(0, 2),
   }
 }
 
 /** Build the authenticated exact-Fetch routes the Client half calls. */
 function createRoutes(service) {
-  const route = (path, methods, handler) => ({
+  const route = (path, methods, handler, requestBody = 'buffered') => ({
     path,
     methods,
-    requestBody: 'buffered',
+    requestBody,
     fetch: async (request) => {
       try {
         return await handler(request)
@@ -912,6 +1024,35 @@ function createRoutes(service) {
       }
     },
   })
+
+  /** Collect one streamed upload with a hard byte cap (the model file). */
+  const readCappedBody = async (request, maxBytes) => {
+    const body = request.body
+    if (!body || typeof body.getReader !== 'function') {
+      throw new FangcunError('invalid_model', 'model upload requires a request body')
+    }
+    const reader = body.getReader()
+    const chunks = []
+    let total = 0
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > maxBytes) {
+        try { await reader.cancel() } catch { /* already closed */ }
+        throw new FangcunError('model_too_large', `model must be at most ${maxBytes} bytes`, 413)
+      }
+      chunks.push(value)
+    }
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return bytes
+  }
 
   return [
     route(`${API_PREFIX}/state`, ['GET'], async (request) => {
@@ -943,6 +1084,22 @@ function createRoutes(service) {
       const result = await service.give(body.companionId, body.itemId)
       return json({ ok: true, companionId: result.companionId, itemId: result.itemId })
     }),
+    route(`${API_PREFIX}/avatar`, ['POST'], async (request) => {
+      const body = await readJsonBody(request)
+      const result = await service.setAvatar(body.companionId, body.avatarImage)
+      return json({ ok: true, companionId: result.companionId, companion: result.companion })
+    }),
+    route(`${API_PREFIX}/model`, ['POST'], async (request) => {
+      const params = new URL(request.url).searchParams
+      const companionId = params.get('companionId') ?? ''
+      const contentType = (request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+      if (contentType !== 'application/octet-stream') {
+        throw new FangcunError('invalid_content_type', 'model uploads must be application/octet-stream', 415)
+      }
+      const bytes = await readCappedBody(request, MODEL_MAX_BYTES)
+      const result = await service.installModel(companionId, bytes)
+      return json({ ok: true, ...result })
+    }, 'streaming'),
     route(`${API_PREFIX}/island`, ['GET'], async () => json(await service.island())),
     route(`${API_PREFIX}/tick`, ['POST'], async () => {
       const outcome = await service.tick()
