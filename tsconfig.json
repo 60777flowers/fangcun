@@ -8,6 +8,7 @@
     { "path": "./packages/protocol" },
     { "path": "./packages/voxel-core" },
     { "path": "./packages/worldd" },
-    { "path": "./packages/host" }
+    { "path": "./packages/host" },
+    { "path": "./packages/mcp" }
   ]
 }
