@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout as delay } from "node:timers/promises";
 import { applyTransaction, createSeedWorld, getBlock } from "@fangcun/voxel-core";
 import { FangcunHost } from "../src/index.ts";
 import { HostStore } from "../src/persistence.ts";
@@ -46,6 +47,22 @@ function openSocket(url: string): Promise<WebSocket> {
     socket.addEventListener("open", () => resolve(socket), { once: true });
     socket.addEventListener("error", () => reject(new Error("socket failed")), { once: true });
   });
+}
+
+type CoreAddress = Readonly<{ host: string; port: number }>;
+
+async function coreJson<T>(address: CoreAddress, path: string, body?: unknown): Promise<{ status: number; body: T }> {
+  const init: RequestInit = body === undefined
+    ? { method: "GET" }
+    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const response = await fetch(`http://${address.host}:${address.port}/api/core${path}`, init);
+  return { status: response.status, body: (await response.json()) as T };
+}
+
+/** Companion tick takes no body, so POST it without the JSON content type. */
+async function coreTick<T>(address: CoreAddress): Promise<{ status: number; body: T }> {
+  const response = await fetch(`http://${address.host}:${address.port}/api/core/companion/tick`, { method: "POST" });
+  return { status: response.status, body: (await response.json()) as T };
 }
 
 test("store keeps world and commit log consistent across reopen", () => {
@@ -260,3 +277,183 @@ test("a host commit matches a local transaction applied to the same revision", (
   assert.equal(getBlock(applied.world, { x: 3, y: 4, z: 3 }), "log");
   assert.equal(applied.rev, world.rev + 1);
 });
+
+type ChatHistory = Readonly<{ messages: Array<{ role: "user" | "companion"; text: string; atMs: number }> }>;
+
+test("core chat round-trips through the in-memory log and caps history at 30", async () => {
+  const host = new FangcunHost({ worldId: "chat-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    const reply = await coreJson<{ reply: string; state: string }>(address, "/chat", { text: "你好呀" });
+    assert.equal(reply.status, 200);
+    assert.match(reply.body.reply, /[\u4e00-\u9fff]/, "the persona always answers in Chinese");
+    assert.ok(reply.body.reply.length <= 80, "the reply fits a companion_say bubble");
+    assert.equal(typeof reply.body.state, "string");
+
+    const first = await coreJson<ChatHistory>(address, "/chat");
+    assert.deepEqual(first.body.messages.map((message) => message.role), ["user", "companion"]);
+    assert.equal(first.body.messages[0]!.text, "你好呀");
+    assert.equal(first.body.messages[1]!.text, reply.body.reply);
+    for (const message of first.body.messages) assert.ok(Number.isSafeInteger(message.atMs));
+
+    // The MCP/agent hook speaks without inventing a user turn.
+    assert.deepEqual((await coreJson(address, "/companion/say", { text: "我先去数云啦" })).body, { ok: true });
+    const afterSay = await coreJson<ChatHistory>(address, "/chat");
+    assert.equal(afterSay.body.messages.at(-1)?.role, "companion");
+    assert.equal(afterSay.body.messages.at(-1)?.text, "我先去数云啦");
+
+    for (let index = 0; index < 16; index += 1) {
+      await coreJson(address, "/chat", { text: `第 ${index} 句` });
+    }
+    const capped = await coreJson<ChatHistory>(address, "/chat");
+    assert.equal(capped.body.messages.length, 30, "history keeps the newest 30 messages");
+    assert.equal(capped.body.messages.at(-1)?.role, "companion");
+    assert.equal(capped.body.messages.at(-2)?.role, "user");
+
+    assert.equal((await coreJson(address, "/chat", { text: "字".repeat(201) })).status, 400, "200-char cap is enforced");
+    assert.equal((await coreJson(address, "/chat", { text: "   " })).status, 400, "blank chat text is rejected");
+    assert.equal((await coreJson(address, "/companion/say", { text: "字".repeat(81) })).status, 400, "80-char say cap is enforced");
+    assert.equal(host.revision, 0, "chat never mutates the world");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("chat broadcasts the companion reply as companion_say", async () => {
+  const host = new FangcunHost({ worldId: "chat-ws-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    const code = host.issuePairingCode();
+    const pairResponse = await fetch(`http://${address.host}:${address.port}/api/pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code.code, clientId: "tablet-1" }),
+    });
+    const pairing = (await pairResponse.json()) as { token: string };
+    const socket = await openSocket(`ws://${address.host}:${address.port}/api/ws`);
+    const read = socketReader(socket);
+    try {
+      socket.send(JSON.stringify({ protocolVersion: 1, type: "hello", worldId: "chat-ws-world", clientId: "tablet-1", credential: pairing.token, lastAppliedRev: 0 }));
+      assert.equal((await read()).type, "welcome");
+      assert.equal((await read()).type, "companion_state");
+
+      const chat = await coreJson<{ reply: string }>(address, "/chat", { text: "谢谢你的小屋" });
+      const say = await read();
+      assert.equal(say.type, "companion_say");
+      assert.equal(say.text, chat.body.reply);
+    } finally {
+      socket.close();
+    }
+  } finally {
+    await host.stop();
+  }
+});
+
+test("autonomy endpoint toggles the self-driving loop and reports its interval", async () => {
+  const host = new FangcunHost({ worldId: "autonomy-toggle-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 60_000 });
+  const address = await host.start();
+  try {
+    const initial = await coreJson<{ enabled: boolean; intervalMs: number; lastRunAtMs: number | null }>(address, "/autonomy");
+    assert.equal(initial.status, 200);
+    assert.equal(initial.body.enabled, true);
+    assert.equal(initial.body.intervalMs, 60_000);
+    assert.equal(initial.body.lastRunAtMs, null);
+
+    const off = await coreJson<{ enabled: boolean }>(address, "/autonomy", { enabled: false });
+    assert.equal(off.status, 200);
+    assert.equal(off.body.enabled, false);
+    assert.equal((await coreJson<{ enabled: boolean }>(address, "/autonomy")).body.enabled, false);
+
+    const on = await coreJson<{ enabled: boolean }>(address, "/autonomy", { enabled: true });
+    assert.equal(on.body.enabled, true);
+
+    assert.equal((await coreJson(address, "/autonomy", { enabled: "yes" })).status, 400, "the toggle requires a boolean");
+    assert.equal(host.revision, 0, "toggling autonomy never mutates the world");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("FANGCUN_AUTONOMY_MS=0 disables the loop from configuration", async () => {
+  const previous = process.env.FANGCUN_AUTONOMY_MS;
+  process.env.FANGCUN_AUTONOMY_MS = "0";
+  let host: FangcunHost;
+  try {
+    host = new FangcunHost({ worldId: "autonomy-env-world", port: 0, ownerUserId: "owner-1" });
+  } finally {
+    if (previous === undefined) delete process.env.FANGCUN_AUTONOMY_MS;
+    else process.env.FANGCUN_AUTONOMY_MS = previous;
+  }
+  const address = await host.start();
+  try {
+    const status = await coreJson<{ enabled: boolean; intervalMs: number }>(address, "/autonomy");
+    assert.equal(status.body.enabled, false);
+    assert.equal(status.body.intervalMs, 0);
+    assert.equal((await coreJson(address, "/autonomy", { enabled: true })).status, 409, "a zero interval cannot be toggled on");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("disabled autonomy never mutates the world", async () => {
+  const host = new FangcunHost({ worldId: "autonomy-off-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40 });
+  const address = await host.start();
+  try {
+    assert.equal((await coreJson(address, "/autonomy", { enabled: false })).status, 200);
+    // Grant a home manually: only the scheduler is off, so nothing may build on its own.
+    const tick = await coreTick<{ result: { status: string; candidate?: { candidateId: string } } }>(address);
+    assert.equal(tick.body.result.status, "home_approval_required");
+    const candidateId = tick.body.result.candidate?.candidateId;
+    assert.ok(candidateId);
+    assert.equal((await coreJson(address, "/home/approve", { candidateId })).status, 200);
+    await delay(220);
+    assert.equal(host.revision, 0, "a disabled scheduler must not commit a build");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("autonomy never runs two companion ticks at once or double-commits", async () => {
+  const host = new FangcunHost({ worldId: "autonomy-serial-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40 });
+  const address = await host.start();
+  try {
+    const tick = await coreTick<{ result: { candidate?: { candidateId: string } } }>(address);
+    const candidateId = tick.body.result.candidate?.candidateId;
+    assert.ok(candidateId);
+    assert.equal((await coreJson(address, "/home/approve", { candidateId })).status, 200);
+    await delay(250);
+    assert.equal(host.revision, 1, "many intervals produce exactly one commit");
+    const status = await coreJson<{ lastRunAtMs: number | null }>(address, "/autonomy");
+    assert.ok(typeof status.body.lastRunAtMs === "number" && status.body.lastRunAtMs > 0, "the scheduler actually ran");
+
+    // Concurrent manual ticks serialize behind the same chain; the world authority
+    // rejects the second build, so the revision cannot jump twice.
+    const [first, second] = await Promise.all([coreTick<{ result: { status: string } }>(address), coreTick<{ result: { status: string } }>(address)]);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(host.revision, 1, "concurrent ticks cannot double-commit");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("autonomy respects tracking readiness by delegating to the world authority", async () => {
+  let trackingReady = true;
+  const host = new FangcunHost({ worldId: "autonomy-tracking-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40, trackingReady: () => trackingReady });
+  const address = await host.start();
+  try {
+    // A ready lease first lets the Host propose a candidate and the owner grant it.
+    const tick = await coreTick<{ result: { candidate?: { candidateId: string } } }>(address);
+    const candidateId = tick.body.result.candidate?.candidateId;
+    assert.ok(candidateId);
+    trackingReady = false;
+    assert.equal((await coreJson(address, "/home/approve", { candidateId })).status, 200);
+    await delay(200);
+    assert.equal(host.revision, 0, "the authority pauses the tick while tracking is unready");
+    const pausedTick = await coreTick<{ result: { status: string; reason?: string } }>(address);
+    assert.equal(pausedTick.body.result.status, "paused");
+  } finally {
+    await host.stop();
+  }
+});
+

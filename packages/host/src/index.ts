@@ -8,6 +8,16 @@ import { WorldAuthority, type CompanionTickDecision } from "@fangcun/worldd";
 import { findHomeCandidates } from "@fangcun/companion-runtime";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
 import { HostStore } from "./persistence.ts";
+import {
+  buildLine,
+  CHAT_MAX_TEXT_LENGTH,
+  COMPANION_HOME_GRANTED_LINE,
+  COMPANION_HOME_PROPOSAL_LINE,
+  COMPANION_SAY_MAX_TEXT_LENGTH,
+  composeCompanionReply,
+  idleLine,
+  type ChatMessage,
+} from "./persona.ts";
 import { WsConnection } from "./websocket.ts";
 
 /**
@@ -25,18 +35,14 @@ import { WsConnection } from "./websocket.ts";
 const MAX_HTTP_BODY_BYTES = 8 * 1024;
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const DEFAULT_AUTONOMY_INTERVAL_MS = 20_000;
+/** 30 messages is about 15 exchanges: enough for a demo without unbounded memory. */
+const CHAT_HISTORY_LIMIT = 30;
+/** Idle chatter is "occasional": one line every third idle interval, not every tick. */
+const AUTONOMY_SAY_EVERY_STEPS = 3;
 
 const WORLD_SCHEMA_HASH = `sha256:${createHash("sha256").update(JSON.stringify(WORLD_SPEC)).digest("hex")}`;
 const BLOCK_CATALOG_HASH = `sha256:${createHash("sha256").update(BLOCK_IDS.join(",")).digest("hex")}`;
-
-/** Deterministic placeholder lines; a real DSH/LLM persona replaces these later. */
-const COMPANION_LINES: readonly string[] = Object.freeze([
-  "搭好啦！看看我的新家～",
-  "又垒了一块，离屋顶更近了",
-  "你放的那块刚好给我当台阶",
-  "这块地很舒服，谢谢老板",
-  "再攒点材料，我想开个窗",
-]);
 
 type Session = {
   connection: WsConnection;
@@ -44,6 +50,8 @@ type Session = {
   lastAppliedRev: number;
   authenticated: boolean;
 };
+
+type TickOutcome = Readonly<{ result: CompanionTickDecision; world: unknown }>;
 
 export type PairingCode = Readonly<{ code: string; expiresAtMs: number }>;
 export type HostOptions = Readonly<{
@@ -54,6 +62,10 @@ export type HostOptions = Readonly<{
   ownerUserId?: string;
   nowMs?: () => number;
   idFactory?: () => string;
+  /** Overrides `FANGCUN_AUTONOMY_MS`; 0 disables the self-driving loop. */
+  autonomyIntervalMs?: number;
+  /** Demo-only readiness probe; production binds this to a fresh authenticated device lease. */
+  trackingReady?: () => boolean;
 }>;
 export type HostAddress = Readonly<{ host: string; port: number; worldId: string }>;
 
@@ -82,8 +94,20 @@ export class FangcunHost {
   #tokens = new Map<string, { clientId: string; expiresAtMs: number }>();
   #pairing: PairingCode | null = null;
   #companion: CompanionInstance;
+  #companionState: CompanionStateName = "idle";
   #lastTick: CompanionTickDecision | null = null;
   #grant: HomePlotGrant | null = null;
+  #chat: ChatMessage[] = [];
+  #lineIndex = 0;
+  #idleLineIndex = 0;
+  #trackingReady: () => boolean;
+  #autonomyEnabled: boolean;
+  #autonomyIntervalMs: number;
+  #autonomyLastRunAtMs: number | null = null;
+  #autonomyTimer: ReturnType<typeof setInterval> | null = null;
+  #autonomySteps = 0;
+  #tickCount = 0;
+  #tickChain: Promise<void> = Promise.resolve();
 
   constructor(options: HostOptions = {}) {
     this.#worldId = options.worldId ?? "fangcun-local";
@@ -93,6 +117,14 @@ export class FangcunHost {
     this.#now = options.nowMs ?? Date.now;
     this.#idFactory = options.idFactory ?? (() => randomUUID());
     this.#dbPath = options.dbPath ?? ":memory:";
+    this.#trackingReady = options.trackingReady ?? (() => true);
+    // 0 disables the loop; a malformed env value falls back to the default instead of
+    // silently turning autonomy off.
+    const configuredInterval = options.autonomyIntervalMs ?? Number(process.env.FANGCUN_AUTONOMY_MS ?? DEFAULT_AUTONOMY_INTERVAL_MS);
+    this.#autonomyIntervalMs = Number.isSafeInteger(configuredInterval) && configuredInterval >= 0
+      ? configuredInterval
+      : DEFAULT_AUTONOMY_INTERVAL_MS;
+    this.#autonomyEnabled = this.#autonomyIntervalMs > 0;
     this.#companion = Object.freeze({
       schemaVersion: 1,
       companionId: "fish-1",
@@ -153,10 +185,12 @@ export class FangcunHost {
     const address = server.address();
     if (address === null || typeof address === "string") throw new Error("unexpected server address");
     this.#port = address.port;
+    this.#syncAutonomyTimer();
     return Object.freeze({ host: this.#host, port: this.#port, worldId: this.#worldId });
   }
 
   async stop(): Promise<void> {
+    this.#stopAutonomyTimer();
     for (const session of this.#sessions) session.connection.close(1001);
     this.#sessions.clear();
     const server = this.#server;
@@ -293,6 +327,43 @@ export class FangcunHost {
       return send(outcome.approved ? 200 : 409, outcome.body);
     }
 
+    if (request.method === "GET" && path === "/api/core/chat") {
+      return send(200, { messages: this.#chat });
+    }
+
+    if (request.method === "POST" && path === "/api/core/chat") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const outcome = this.#chatExchange((body.value as { text?: unknown }).text);
+      return outcome.ok
+        ? send(200, { reply: outcome.reply, state: outcome.state })
+        : send(outcome.status, { error: outcome.error });
+    }
+
+    if (request.method === "POST" && path === "/api/core/companion/say") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const outcome = this.#companionSay((body.value as { text?: unknown }).text);
+      return outcome.ok
+        ? send(200, { ok: true })
+        : send(outcome.status, { error: outcome.error });
+    }
+
+    if (request.method === "GET" && path === "/api/core/autonomy") {
+      return send(200, this.#autonomyStatus());
+    }
+
+    if (request.method === "POST" && path === "/api/core/autonomy") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const enabled = (body.value as { enabled?: unknown }).enabled;
+      if (typeof enabled !== "boolean") return send(400, { error: "invalid_autonomy_request" });
+      // A zero interval is a configuration-level stop; the toggle cannot revive it.
+      if (enabled && this.#autonomyIntervalMs <= 0) return send(409, { error: "autonomy_interval_zero" });
+      this.#setAutonomyEnabled(enabled);
+      return send(200, this.#autonomyStatus());
+    }
+
     send(404, { error: "not_found" });
   }
 
@@ -314,6 +385,7 @@ export class FangcunHost {
   }
 
   #setCompanionState(state: CompanionStateName): void {
+    this.#companionState = state;
     this.#broadcast({
       protocolVersion: 1,
       type: "companion_state",
@@ -335,6 +407,37 @@ export class FangcunHost {
     });
   }
 
+  #appendChat(role: ChatMessage["role"], text: string): void {
+    this.#chat.push(Object.freeze({ role, text, atMs: this.#now() }));
+    if (this.#chat.length > CHAT_HISTORY_LIMIT) this.#chat.splice(0, this.#chat.length - CHAT_HISTORY_LIMIT);
+  }
+
+  /**
+   * One PC chat turn: append the user message, compose the companion reply and
+   * broadcast it. The tablet only renders companion speech, so `companion_say`
+   * carries the reply (never the user's own text).
+   */
+  #chatExchange(rawText: unknown): { ok: true; reply: string; state: CompanionStateName } | { ok: false; status: number; error: string } {
+    if (typeof rawText !== "string") return { ok: false, status: 400, error: "invalid_chat_text" };
+    const text = rawText.trim();
+    if (text.length < 1 || text.length > CHAT_MAX_TEXT_LENGTH) return { ok: false, status: 400, error: "invalid_chat_text" };
+    this.#appendChat("user", text);
+    const { reply } = composeCompanionReply(text);
+    this.#appendChat("companion", reply);
+    this.#say(reply);
+    return { ok: true, reply, state: this.#companionState };
+  }
+
+  /** MCP/agent speech hook: broadcast a line without inventing a chat turn for it. */
+  #companionSay(rawText: unknown): { ok: true } | { ok: false; status: number; error: string } {
+    if (typeof rawText !== "string") return { ok: false, status: 400, error: "invalid_companion_say" };
+    const text = rawText.trim();
+    if (text.length < 1 || text.length > COMPANION_SAY_MAX_TEXT_LENGTH) return { ok: false, status: 400, error: "invalid_companion_say" };
+    this.#appendChat("companion", text);
+    this.#say(text);
+    return { ok: true };
+  }
+
   #commitAndBroadcast(commit: CommitMessage): boolean {
     try {
       this.#store!.commit(this.#authority.snapshot, commit);
@@ -345,18 +448,35 @@ export class FangcunHost {
     return true;
   }
 
-  async #runTick(): Promise<{ result: CompanionTickDecision; world: unknown }> {
+  /**
+   * Serializes companion ticks: the autonomy timer and the HTTP endpoints share one
+   * chain, so two ticks can never interleave their async plan hashing.
+   */
+  #runTick(): Promise<TickOutcome> {
+    this.#tickCount += 1;
+    const run = this.#tickChain.then(() => this.#runTickNow());
+    this.#tickChain = run.then(() => undefined, () => undefined);
+    return run.finally(() => { this.#tickCount -= 1; });
+  }
+
+  async #runTickNow(): Promise<TickOutcome> {
+    if (!this.#store) {
+      // A tick racing Host shutdown has no durable store to publish to; refuse it
+      // instead of mutating the in-memory authority.
+      return { result: { status: "paused", intents: [], reason: "host_stopping" }, world: worldStateToObject(this.#authority.snapshot) };
+    }
     this.#setCompanionState("planning");
-    const result = await this.#authority.runCompanionTick({ authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: true });
+    const result = await this.#authority.runCompanionTick({ authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: this.#trackingReady() });
     this.#lastTick = result;
     if (result.status === "committed" && result.commit) {
       this.#setCompanionState("building");
       this.#commitAndBroadcast(result.commit);
       this.#setCompanionState("idle");
-      this.#say(COMPANION_LINES[this.#lineIndex++ % COMPANION_LINES.length]!);
+      this.#say(buildLine(this.#lineIndex));
+      this.#lineIndex += 1;
     } else if (result.status === "home_approval_required") {
       this.#setCompanionState("awaiting_approval");
-      this.#say("我想住这块地，可以吗？");
+      this.#say(COMPANION_HOME_PROPOSAL_LINE);
     } else if (result.status === "paused") {
       this.#setCompanionState("paused");
     } else {
@@ -365,7 +485,71 @@ export class FangcunHost {
     return { result, world: worldStateToObject(this.#authority.snapshot) };
   }
 
-  #lineIndex = 0;
+  #autonomyStatus(): Readonly<{ enabled: boolean; intervalMs: number; lastRunAtMs: number | null }> {
+    return Object.freeze({
+      enabled: this.#autonomyEnabled && this.#autonomyIntervalMs > 0,
+      intervalMs: this.#autonomyIntervalMs,
+      lastRunAtMs: this.#autonomyLastRunAtMs,
+    });
+  }
+
+  #setAutonomyEnabled(enabled: boolean): void {
+    this.#autonomyEnabled = enabled;
+    this.#syncAutonomyTimer();
+  }
+
+  #syncAutonomyTimer(): void {
+    this.#stopAutonomyTimer();
+    if (!this.#autonomyEnabled || this.#autonomyIntervalMs <= 0) return;
+    const timer = setInterval(() => { void this.#autonomyStep(); }, this.#autonomyIntervalMs);
+    // Never keep a CLI or test process alive just because the companion is idle.
+    timer.unref();
+    this.#autonomyTimer = timer;
+  }
+
+  #stopAutonomyTimer(): void {
+    if (this.#autonomyTimer === null) return;
+    clearInterval(this.#autonomyTimer);
+    this.#autonomyTimer = null;
+  }
+
+  /**
+   * One self-driving behaviour per interval. Priority: propose a home while none is
+   * granted (and none is pending owner approval), then build inside the grant,
+   * otherwise just talk. Every world decision is delegated to WorldAuthority;
+   * this scheduler never writes the world itself.
+   */
+  async #autonomyStep(): Promise<void> {
+    if (!this.#autonomyEnabled || this.#autonomyIntervalMs <= 0 || this.#server === null) return;
+    // A manual tick or a previous slow step still owns the companion; skipping
+    // keeps two ticks from ever overlapping.
+    if (this.#tickCount > 0) return;
+    this.#autonomySteps += 1;
+    this.#autonomyLastRunAtMs = this.#now();
+    if (!this.#companion.autonomyEnabled) return;
+    try {
+      if (!this.#grant) {
+        if (this.#lastTick?.status === "home_approval_required" && this.#lastTick.candidate) {
+          this.#maybeAutonomySay();
+          return;
+        }
+        await this.#runTick();
+        return;
+      }
+      const outcome = await this.#runTick();
+      if (outcome.result.status !== "committed") this.#maybeAutonomySay();
+    } catch {
+      // A best-effort step must never take the Host down; the next interval retries.
+    }
+  }
+
+  #maybeAutonomySay(): void {
+    // "Occasionally": one idle line every third interval keeps the bubble alive
+    // without spamming the tablet or pretending the companion did real work.
+    if (this.#autonomySteps % AUTONOMY_SAY_EVERY_STEPS !== 0) return;
+    this.#say(idleLine(this.#idleLineIndex));
+    this.#idleLineIndex += 1;
+  }
 
   #approveHome(candidateId: unknown): { approved: boolean; body: unknown } {
     const candidate = findHomeCandidates(this.#authority.snapshot)[0];
@@ -394,7 +578,7 @@ export class FangcunHost {
       this.#store.saveGrant(grant);
       this.#grant = grant;
       this.#setCompanionState("idle");
-      this.#say("这块地归我啦！");
+      this.#say(COMPANION_HOME_GRANTED_LINE);
     }
     return { approved, body: { approved, world: worldStateToObject(this.#authority.snapshot) } };
   }

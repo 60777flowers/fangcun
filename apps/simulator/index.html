@@ -146,6 +146,22 @@
           <p class="proposal-footnote">Generated locally with a fixed set of safe build patterns. No AI service or network request is used.</p>
         </section>
 
+        <section id="chat-section" class="tool-section chat-section" aria-labelledby="chat-title" hidden>
+          <div class="section-heading"><span class="section-index">05</span><h2 id="chat-title">Companion chat</h2><span class="heading-rule"></span></div>
+          <p class="section-caption">Talk to the fish. Host mode only; replies come from the local persona.</p>
+          <div class="chat-heading-row"><span class="eyebrow">MESSAGES</span><span id="chat-status" class="chat-status">—</span></div>
+          <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-label="Companion chat messages"></div>
+          <form id="chat-form" class="chat-form">
+            <label class="sr-only" for="chat-input">Message to the companion</label>
+            <input id="chat-input" name="text" type="text" maxlength="200" autocomplete="off" placeholder="Say hello…">
+            <button id="chat-send" class="chat-send" type="submit">Send</button>
+          </form>
+          <div class="autonomy-row">
+            <div><span class="status-label">AUTONOMY</span><strong id="autonomy-state" class="autonomy-state">—</strong></div>
+            <button id="autonomy-toggle" class="autonomy-toggle" type="button" aria-pressed="false" disabled>Toggle</button>
+          </div>
+        </section>
+
         <footer class="rail-footer"><span class="footer-mark" aria-hidden="true">F</span><span>FANGCUN <span>·</span> EXPERIMENTAL DESKTOP VIEW</span></footer>
       </aside>
     </section>

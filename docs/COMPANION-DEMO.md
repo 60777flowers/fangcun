@@ -25,6 +25,27 @@ the browser appears on the tablet after the Host broadcasts the commit.
 
 `?mode=core` keeps the original browser-only sandbox (`local mode` tab).
 
+### Companion chat and self-driving loop (`?mode=host` only)
+
+The PC inspector adds a chat panel and an autonomy toggle. They are backed by the durable
+Host, so `?mode=core` does not show them:
+
+- `POST /api/core/chat` → `{reply, state}`; `GET /api/core/chat` → the last 30 in-memory
+  messages. Replies come from a deterministic local persona (Chinese, ≤80 chars, no LLM,
+  no network); `packages/host/src/persona.ts` is the single seam a real DSH/LLM reply can
+  replace later.
+- The companion reply is broadcast as `companion_say`, so the tablet bubble shows it.
+  `POST /api/core/companion/say` lets an MCP/agent tool make the companion speak directly
+  (this is what the MCP adapter calls).
+- The Host self-drives every `FANGCUN_AUTONOMY_MS` (default `20000`; `0` disables the
+  loop). When idle it proposes a home candidate, then builds inside the approved grant,
+  and otherwise occasionally says an idle line. Pause, tracking readiness, budget and
+  grant state are all re-checked inside `WorldAuthority`; the scheduler never writes the
+  world itself.
+- `GET /api/core/autonomy` reports `{enabled, intervalMs, lastRunAtMs}` and
+  `POST /api/core/autonomy {enabled}` toggles it. The chat panel polls chat every 1.5 s
+  while open.
+
 ## 2. Durable Host (`packages/host`)
 
 A real Host process with SQLite persistence and a WebSocket replica protocol.
@@ -44,6 +65,9 @@ Implemented:
 - `resync`, `ping`/`pong`.
 - Companion `home` approval and AI tick endpoints; approved grants and AI commits are
   persisted, so the world and the granted home survive a Host restart.
+- PC chat window plus a self-driving autonomy loop (`/api/core/chat`,
+  `/api/core/companion/say`, `/api/core/autonomy`), with chat and companion speech
+  broadcast as `companion_say` to the tablet. The persona is a local placeholder, not an LLM.
 - Sequence numbers are scoped to one live connection, so a reconnect starts at `seq = 1`.
 
 Not implemented yet (do not claim these): LAN TLS with pinned fingerprints, QR pairing UI,

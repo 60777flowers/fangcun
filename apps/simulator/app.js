@@ -50,6 +50,14 @@ const buildTickButton = document.querySelector("#build-tick");
 const statsNote = document.querySelector(".stats-note");
 const sceneWorldMode = document.querySelector("#scene-world-mode");
 const worldModeEyebrow = document.querySelector("#world-mode-eyebrow");
+const chatSection = document.querySelector("#chat-section");
+const chatLog = document.querySelector("#chat-log");
+const chatForm = document.querySelector("#chat-form");
+const chatInput = document.querySelector("#chat-input");
+const chatSendButton = document.querySelector("#chat-send");
+const chatStatus = document.querySelector("#chat-status");
+const autonomyStateLabel = document.querySelector("#autonomy-state");
+const autonomyToggle = document.querySelector("#autonomy-toggle");
 const tileWidth = 34;
 const tileHeight = 17;
 const blockHeight = 16;
@@ -57,6 +65,7 @@ const baseX = canvas.width / 2;
 const baseY = 362;
 const halfWidth = tileWidth / 2;
 const halfHeight = tileHeight / 2;
+const CHAT_POLL_MS = 1500;
 
 let localWorld = createSeedWorld("local-preview");
 let world = localWorld;
@@ -74,6 +83,10 @@ let selectedTile = null;
 let clickMode = "select";
 let proposal = null;
 let toastTimer;
+let chatPollTimer;
+let chatSignature = "";
+let chatBusy = false;
+let autonomyEnabled = false;
 const tileButtons = new Map();
 
 function pointFor(x, y, z) {
@@ -335,6 +348,128 @@ function updateCompanionStatus() {
   companionStateLabel.textContent = `${state}${companion.autonomyEnabled === false ? " · autonomy off" : ""}`;
 }
 
+// The chat panel and the autonomy toggle are Host-only surfaces: `?mode=core` keeps
+// its in-memory sandbox API, which has no companion conversation or scheduler.
+function setChatVisible(visible) {
+  const open = visible === true;
+  chatSection.hidden = !open;
+  if (!open) {
+    if (chatPollTimer) clearInterval(chatPollTimer);
+    chatPollTimer = undefined;
+    return;
+  }
+  void loadChat();
+  void loadAutonomy();
+  if (!chatPollTimer) chatPollTimer = setInterval(() => void loadChat(), CHAT_POLL_MS);
+}
+
+function formatChatTime(atMs) {
+  if (!Number.isFinite(atMs)) return "";
+  const at = new Date(atMs);
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+function renderChat(messages) {
+  const signature = JSON.stringify(messages);
+  if (signature === chatSignature) return;
+  chatSignature = signature;
+  chatLog.replaceChildren();
+  if (!messages.length) {
+    const empty = document.createElement("p");
+    empty.className = "chat-empty";
+    empty.textContent = "还没有聊天记录，先跟我打个招呼吧";
+    chatLog.append(empty);
+    return;
+  }
+  for (const message of messages) {
+    if (!message || typeof message.text !== "string") continue;
+    const isUser = message.role === "user";
+    const row = document.createElement("div");
+    row.className = `chat-message is-${isUser ? "user" : "companion"}`;
+    const role = document.createElement("span");
+    role.className = "chat-role";
+    // Host text is untrusted display data: always assign through textContent.
+    role.textContent = `${isUser ? "YOU" : "FISH"} · ${formatChatTime(message.atMs)}`;
+    const copy = document.createElement("p");
+    copy.className = "chat-copy";
+    copy.textContent = message.text;
+    row.append(role, copy);
+    chatLog.append(row);
+  }
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+async function loadChat() {
+  if (chatSection.hidden) return;
+  try {
+    const payload = await coreRequest("/chat");
+    renderChat(Array.isArray(payload.messages) ? payload.messages : []);
+    chatStatus.textContent = "LIVE · HOST";
+    chatStatus.classList.remove("is-offline");
+  } catch {
+    chatStatus.textContent = "OFFLINE";
+    chatStatus.classList.add("is-offline");
+  }
+}
+
+async function sendChat(event) {
+  event.preventDefault();
+  if (chatBusy) return;
+  const text = chatInput.value.trim();
+  if (!text) return;
+  chatBusy = true;
+  chatSendButton.disabled = true;
+  try {
+    const payload = await coreRequest("/chat", { method: "POST", body: JSON.stringify({ text }) });
+    if (typeof payload.reply !== "string") throw new Error("Host returned no chat reply.");
+    chatInput.value = "";
+    if (typeof payload.state === "string") companionStateLabel.textContent = payload.state;
+    await loadChat();
+  } catch (error) {
+    toastMessage(`Chat failed: ${error.message}`);
+  } finally {
+    chatBusy = false;
+    chatSendButton.disabled = false;
+  }
+}
+
+function renderAutonomy(payload) {
+  const intervalMs = Number(payload?.intervalMs);
+  const schedulable = Number.isFinite(intervalMs) && intervalMs > 0;
+  autonomyEnabled = payload?.enabled === true;
+  const intervalLabel = schedulable ? `every ${Math.max(1, Math.round(intervalMs / 1000))}s` : "interval 0";
+  autonomyStateLabel.textContent = autonomyEnabled ? `on · ${intervalLabel}` : "off";
+  autonomyToggle.textContent = autonomyEnabled ? "Pause" : "Resume";
+  autonomyToggle.setAttribute("aria-pressed", String(autonomyEnabled));
+  autonomyToggle.disabled = !schedulable;
+}
+
+async function loadAutonomy() {
+  if (chatSection.hidden) return;
+  try {
+    renderAutonomy(await coreRequest("/autonomy"));
+  } catch {
+    autonomyStateLabel.textContent = "Unavailable";
+    autonomyToggle.disabled = true;
+  }
+}
+
+async function toggleAutonomy() {
+  if (autonomyToggle.disabled) return;
+  autonomyToggle.disabled = true;
+  try {
+    const payload = await coreRequest("/autonomy", {
+      method: "POST",
+      body: JSON.stringify({ enabled: !autonomyEnabled }),
+    });
+    renderAutonomy(payload);
+    toastMessage(payload.enabled === true ? "Autonomy resumed. The companion acts on its own." : "Autonomy paused.");
+  } catch (error) {
+    toastMessage(`Autonomy toggle failed: ${error.message}`);
+    await loadAutonomy();
+  }
+}
+
 function setCandidates(values) {
   candidates = values.filter((candidate) => candidate && typeof candidate.candidateId === "string");
   candidateSelect.replaceChildren();
@@ -396,6 +531,8 @@ async function loadCoreState() {
     setRuntimeNotice(error.message);
   } finally {
     setCoreBusy(false);
+    // The Host now answers autonomy state; refresh the toggle once the connection is known.
+    if (!chatSection.hidden) void loadAutonomy();
   }
 }
 
@@ -434,6 +571,7 @@ function setRuntimeMode(mode) {
     setRuntimeNotice("");
     refreshWorldView();
   }
+  setChatVisible(shared && HOST_MODE);
   updateControls();
 }
 
@@ -823,6 +961,8 @@ retryCoreButton.addEventListener("click", retryCore);
 buildTickButton.addEventListener("click", runBuildTick);
 approveCandidateButton.addEventListener("click", approveCandidate);
 candidateSelect.addEventListener("change", renderSelectedCandidate);
+chatForm.addEventListener("submit", sendChat);
+autonomyToggle.addEventListener("click", toggleAutonomy);
 placeButton.addEventListener("click", placeSelected);
 breakButton.addEventListener("click", breakSelected);
 document.querySelector("#proposal-form").addEventListener("submit", (event) => {
