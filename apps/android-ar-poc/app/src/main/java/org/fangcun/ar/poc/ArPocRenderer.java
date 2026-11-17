@@ -9,6 +9,7 @@ import com.google.ar.core.Camera;
 import com.google.ar.core.Frame;
 import com.google.ar.core.HitResult;
 import com.google.ar.core.Plane;
+import com.google.ar.core.Pose;
 import com.google.ar.core.Session;
 import com.google.ar.core.TrackingState;
 import com.google.ar.core.exceptions.CameraNotAvailableException;
@@ -28,6 +29,8 @@ import javax.microedition.khronos.opengles.GL10;
  */
 final class ArPocRenderer implements GLSurfaceView.Renderer {
     private static final int FLOAT_BYTES = 4;
+    /** Minimum viewing distance for the first anchor; the island is 0.48 m wide. */
+    private static final float MIN_ANCHOR_DISTANCE = 0.75f;
 
     private final ArPocActivity activity;
     private final VoxelWorld world;
@@ -40,6 +43,7 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private final float[] viewProjection = new float[16];
     private final float[] inverseViewProjection = new float[16];
     private final float[] anchorInverse = new float[16];
+    private final float[] cameraPose = new float[16];
     private volatile Session session;
     private Anchor anchor;
     private BackgroundRenderer background;
@@ -176,7 +180,11 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, modelView, 0);
             if (meshDirty) rebuildMesh();
             drawVoxels();
-            publishStatus(hintStatus());
+            camera.getPose().toMatrix(cameraPose, 0);
+            float dcx = cameraPose[12] - modelMatrix[12];
+            float dcy = cameraPose[13] - modelMatrix[13];
+            float dcz = cameraPose[14] - modelMatrix[14];
+            publishStatus(hintStatus((float) Math.sqrt(dcx * dcx + dcy * dcy + dcz * dcz)));
         } catch (CameraNotAvailableException e) {
             releaseAnchor();
             publishStatus("Camera unavailable — AR paused, writes disabled");
@@ -186,16 +194,18 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         }
     }
 
-    private String hintStatus() {
+    private String hintStatus(float distanceMeters) {
         int x = hintVoxelX;
         int z = hintVoxelZ;
+        String distance = String.format(java.util.Locale.US, "camera %.2f m from island centre (island is 0.48 m wide)", distanceMeters);
         if (x == Integer.MIN_VALUE || z == Integer.MIN_VALUE) {
-            return "Island anchored\nTap the island to place a block; tap a full column to break the top.";
+            return "Island anchored\n" + distance + "\nHold 0.8-1.2 m away, then tap a column to build.";
         }
         int placeY = world.firstEmptyY(x, z);
         String target = placeY >= 0 ? "place at y=" + placeY : "break column";
         return "Island anchored  rev " + world.revision() + "  blocks " + world.countBlocks()
-            + "\nTarget column x=" + x + " z=" + z + " (" + target + ")\nTap to apply.";
+            + "\n" + distance
+            + "\nTarget column x=" + x + " z=" + z + " (" + target + ")";
     }
 
     private void rebuildMesh() {
@@ -233,19 +243,66 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
             planeHits++;
             Plane plane = (Plane) hit.getTrackable();
             if (plane.getTrackingState() != TrackingState.TRACKING || !plane.isPoseInPolygon(hit.getHitPose())) continue;
+            Pose hitPose = hit.getHitPose();
             Anchor newAnchor;
-            try { newAnchor = hit.createAnchor(); }
-            catch (RuntimeException e) { publishStatus("Anchor creation failed — tap again"); return; }
+            try {
+                newAnchor = session.createAnchor(pushedAwayPose(frame, hitPose));
+            } catch (RuntimeException e) {
+                publishStatus("Anchor creation failed — tap again");
+                return;
+            }
             releaseAnchor();
             anchor = newAnchor;
             meshDirty = true;
-            publishStatus("Island anchored on the tabletop");
+            publishStatus("Island anchored 0.75 m ahead");
             return;
         }
         tapDiagnostic = planeHits == 0 ? "Tap missed plane — move device to map surface, retry."
             : "Plane hit outside detected surface polygon — keep moving, retry.";
         tapDiagnosticUntilMs = System.currentTimeMillis() + 2500;
         publishStatus(tapDiagnostic);
+    }
+
+    /**
+     * The island is 0.48 m wide, so anchoring at the exact tap point puts it under the
+     * device when the user taps close to themselves. Keep it on the same table plane but
+     * push it out to a comfortable viewing distance along the line of sight.
+     */
+    private Pose pushedAwayPose(Frame frame, Pose hitPose) {
+        Pose cameraPose = frame.getCamera().getPose();
+        float[] camera = cameraPose.getTranslation();
+        float[] hit = hitPose.getTranslation();
+        float dx = hit[0] - camera[0];
+        float dz = hit[2] - camera[2];
+        double horizontal = Math.hypot(dx, dz);
+        if (horizontal >= MIN_ANCHOR_DISTANCE) return hitPose;
+
+        float fx;
+        float fz;
+        if (horizontal < 1e-3) {
+            // Tap landed almost straight below the device: fall back to the camera's horizontal heading.
+            float[] matrix = new float[16];
+            cameraPose.toMatrix(matrix, 0);
+            fx = -matrix[8];
+            fz = -matrix[10];
+            double length = Math.hypot(fx, fz);
+            if (length < 1e-6) {
+                fx = 0f;
+                fz = -1f;
+            } else {
+                fx /= (float) length;
+                fz /= (float) length;
+            }
+        } else {
+            fx = (float) (dx / horizontal);
+            fz = (float) (dz / horizontal);
+        }
+        float[] translation = {
+            camera[0] + fx * MIN_ANCHOR_DISTANCE,
+            hit[1],
+            camera[2] + fz * MIN_ANCHOR_DISTANCE,
+        };
+        return new Pose(translation, hitPose.getRotationQuaternion());
     }
 
     /**
