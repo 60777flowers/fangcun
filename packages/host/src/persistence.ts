@@ -281,6 +281,18 @@ export class HostStore {
     return raw === null ? null : parseLegacyPetProfile(parseJsonMeta(raw, "pet profile"));
   }
 
+  /**
+   * Demo-only one-time marker for the opt-in grant migration
+   * (`FANGCUN_DEMO_RELOCATE_GRANT=1`). Persisted so a restart never migrates twice.
+   */
+  loadDemoGrantMigrated(): boolean {
+    return this.#readMeta("demoGrantMigrated") === "1";
+  }
+
+  saveDemoGrantMigrated(): void {
+    this.#writeMeta("demoGrantMigrated", "1");
+  }
+
   #readMeta(key: string): string | null {
     const row = this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value?: string } | undefined;
     return row?.value ?? null;

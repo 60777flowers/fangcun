@@ -11,7 +11,7 @@
 - 种子岛 footprint 为 `[-7,7) × [-7,7)`，地面占用 `y=[0,1)`（单层草方块），所有柱体连续到底；初版固定材质层。
 - 建造与拆除的业务操作只能作用于 `y>=1`（地形层以上）；初始地形受保护。AI 只放置空格、不拆除；玩家可拆除建造区方块。服务端以后仍须以 session 确定 actor，禁止信任客户端自报权限。
 - 事务采用严格 `baseRev === currentRev`；全量校验通过后才原子应用。同一事务最多 256 格、禁止重复目标格；操作 canonical 输出按线性 index 升序。成功事务恰好递增一个 revision；拆除需要 expected block。
-- 当前方块 ID 使用 `grass/dirt/stone/planks/log/leaves/sand/glass` 8 个基础 ID。2026-11-17 追加 8 个装饰 ID：`brick/tile/wool_white/wool_red/bookshelf/lantern/pumpkin/flower`（共 16 个，规范顺序以 `BLOCK_IDS` 为准；装饰块与基础块同为普通可放置方块，不引入重力/碰撞/光照等新规则）。ID 只允许在末尾追加，未知 ID 在协议与快照处 fail closed；未来扩展必须同步更新 schema、协议枚举与资源目录。
+- 当前方块 ID 使用 `grass/dirt/stone/planks/log/leaves/sand/glass` 8 个基础 ID。2026-11-17 追加 8 个装饰 ID：`brick/tile/wool_white/wool_red/bookshelf/lantern/pumpkin/flower`（共 16 个，规范顺序以 `BLOCK_IDS` 为准；装饰块与基础块同为普通可放置方块，不引入重力/碰撞/光照等新规则）。后续再追加 1 个座位块 `stairs`（共 17 个；它同样是普通可放置方块，“座位”只是 companion 行为语义）。ID 只允许在末尾追加，未知 ID 在协议与快照处 fail closed；未来扩展必须同步更新 schema、协议枚举与资源目录。
 - intent frame 上限 16 KiB、server commit frame 上限 512 KiB；提交消息最多 256 操作。
 - 快照显式携带 `schemaVersion=1`；未知版本、非法/稀疏 cell array 和未知方块必须拒绝，不做静默迁移。
 

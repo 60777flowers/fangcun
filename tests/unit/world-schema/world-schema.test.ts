@@ -1,11 +1,11 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { BLOCK_DEFS, BLOCK_IDS, WORLD_CELL_COUNT, WORLD_SPEC, coordToIndex, indexToCoord, isBlockId, isInBounds } from "../../../packages/world-schema/src/index.ts";
 
 // The v1 catalog ids in their pinned order. Durable stores encode a block id as
 // BLOCK_IDS.indexOf(id) + 1, so these positions must never move.
 const V1_BLOCK_IDS = ["grass", "dirt", "stone", "planks", "log", "leaves", "sand", "glass"] as const;
-const DECORATIVE_BLOCK_COUNT = 8;
+const DECORATIVE_BLOCK_COUNT = 9; // 8 decorative + the v0 stairs seat block
 
 test("WorldSpec uses the agreed 16 cubed domain and 3 cm scale", () => {
   assert.equal(WORLD_CELL_COUNT, 4096);
@@ -33,9 +33,11 @@ test("block allowlist rejects unknown identifiers", () => {
   assert.equal(isBlockId("tnt"), false);
 });
 
-test("catalog appends eight decorative ids after the pinned v1 ids", () => {
+test("catalog appends nine decorative/seat ids after the pinned v1 ids", () => {
   assert.equal(BLOCK_IDS.length, V1_BLOCK_IDS.length + DECORATIVE_BLOCK_COUNT);
   assert.deepEqual(BLOCK_IDS.slice(0, V1_BLOCK_IDS.length), [...V1_BLOCK_IDS], "v1 ids keep their positions");
+  assert.equal(BLOCK_IDS.at(-1), "stairs", "the v0 seat block is appended last");
+  assert.equal(BLOCK_DEFS.stairs.label, "台阶（座位）");
   assert.equal(new Set(BLOCK_IDS).size, BLOCK_IDS.length, "block ids are unique");
   assert.equal(Object.keys(BLOCK_DEFS).length, BLOCK_IDS.length, "every id has exactly one BlockDef");
   for (const id of BLOCK_IDS) {

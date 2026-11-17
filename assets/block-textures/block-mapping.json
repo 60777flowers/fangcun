@@ -30,6 +30,7 @@
     "bookshelf": { "top": "planks_oak", "side": "bookshelf", "bottom": "planks_oak" },
     "lantern": { "top": "glowstone", "side": "glowstone", "bottom": "glowstone" },
     "pumpkin": { "top": "pumpkin_top", "side": "pumpkin_face_off", "bottom": "pumpkin_top" },
-    "flower": { "top": "flower_rose", "side": "flower_rose", "bottom": "flower_rose" }
+    "flower": { "top": "flower_rose", "side": "flower_rose", "bottom": "flower_rose" },
+    "stairs": { "top": "planks_oak", "side": "planks_oak", "bottom": "planks_oak" }
   }
 }

@@ -4,8 +4,8 @@ import {
   type TransactionResult,
   type WorldState,
 } from "@fangcun/voxel-core";
-import type { ClientIntent, CommitMessage, ServerAck } from "@fangcun/protocol";
-import { isCanonicalUtc, isGrantActive, validateCompanionInstance, validateHomePlotGrant, type CompanionInstance, type HomePlotGrant } from "@fangcun/companion-schema";
+import type { ClientIntent, CommitMessage, IntentOperation, ServerAck } from "@fangcun/protocol";
+import { isCanonicalUtc, isGrantActive, isInsidePlot, validateCompanionInstance, validateHomePlotGrant, type CompanionInstance, type HomePlotGrant } from "@fangcun/companion-schema";
 import { buildStarterHomePlan, checkHomeAutoCommitEligibility, findHomeCandidates, isHomeCandidateApprovable, nextCompanionTick, type HashCanonicalDiff, type HomeBuildPlan, type HomeCandidate } from "@fangcun/companion-runtime";
 
 export type HomeCommitDecision = Readonly<{
@@ -17,6 +17,19 @@ export type HomeCommitDecision = Readonly<{
 }>;
 
 export type HomeGrantActor = Readonly<{ authenticatedOwnerUserId: string }>;
+
+/**
+ * One block of a stepwise home build (the Host's block-by-block queue). It is not a
+ * plan capability: worldd re-validates the grant, allowlist, plot bounds, revision and
+ * occupancy for every single step, so a stale or revoked grant cannot slip blocks in.
+ */
+export type HomeStepRequest = Readonly<{
+  plotId: string;
+  companionId: string;
+  grantRev: number;
+  baseRev: number;
+  operation: Extract<IntentOperation, { type: "place" }>;
+}>;
 
 export type CompanionTickDecision = Readonly<{
   status: "paused" | "home_approval_required" | "no_candidate" | "plan_unavailable" | "committed" | "rejected";
@@ -258,6 +271,81 @@ export class WorldAuthority {
       this.#lastHomeCommitAt.set(commitBudgetKey, commitNowMs);
       this.#homePlans.set(planSnapshot.planId, txId);
       return { accepted: true, world: this.#world, commit, blocksUsedToday: blocksUsedToday + planSnapshot.blockCount };
+    } finally {
+      this.#homeBusy = false;
+    }
+  }
+
+  /**
+   * Commits exactly one step of a stepwise home build. Unlike `commitHomePlan` this is
+   * not rate-limited by the 5 s plan throttle — the Host's build queue paces the steps —
+   * but every step still re-checks the trusted grant, allowlist, AABB, revision,
+   * occupancy, tracking readiness and daily budget. Occupancy/terrain errors surface as
+   * the transaction's own codes so the Host can stop the queue with an honest reason.
+   */
+  commitHomeStep(
+    step: HomeStepRequest,
+    actor: HomeGrantActor,
+    options: Readonly<{ trackingReady: boolean }>,
+  ): HomeCommitDecision {
+    const reject = (reason: string, blocksUsedToday = 0): HomeCommitDecision => ({ accepted: false, reason, world: this.#world, blocksUsedToday });
+    if (!actor || typeof actor.authenticatedOwnerUserId !== "string"
+      || !options || typeof options.trackingReady !== "boolean") return reject("grant_missing");
+    if (!step || typeof step !== "object"
+      || typeof step.plotId !== "string" || typeof step.companionId !== "string"
+      || !Number.isSafeInteger(step.grantRev) || !Number.isSafeInteger(step.baseRev)
+      || !step.operation || step.operation.type !== "place" || typeof step.operation.blockId !== "string"
+      || !step.operation.at || !Number.isSafeInteger(step.operation.at.x)
+      || !Number.isSafeInteger(step.operation.at.y) || !Number.isSafeInteger(step.operation.at.z)) {
+      return reject("invalid_step");
+    }
+    if (this.#homeBusy) return reject("rate_limited");
+    this.#homeBusy = true;
+    try {
+      const nowMs = this.#clock();
+      if (!Number.isFinite(nowMs) || nowMs < 0) return reject("plan_expired");
+      const grant = this.#homeGrants.get(step.plotId);
+      if (!grant) return reject("grant_missing");
+      const companion = this.#homeCompanions.get(step.companionId);
+      if (!companion || grant.companionId !== step.companionId || companion.companionId !== step.companionId) return reject("instance_mismatch");
+      if (grant.grantRev !== step.grantRev || grant.revokedAt) return reject("grant_revoked");
+      if (actor.authenticatedOwnerUserId !== grant.ownerUserId
+        || this.#owners.get(grant.worldId) !== actor.authenticatedOwnerUserId
+        || !this.#homeGrantIssuerUserIds.has(actor.authenticatedOwnerUserId)
+        || grant.worldId !== this.#world.worldId) return reject("grant_missing");
+      if (!isGrantActive(grant, nowMs)) return reject("grant_expired");
+      if (!options.trackingReady) return reject("tracking_unready");
+      if (!companion.autonomyEnabled || companion.state === "paused") return reject("autonomy_paused");
+      if (step.baseRev !== this.#world.rev) return reject("stale_revision");
+      if (!isInsidePlot(grant, step.operation.at)) return reject("outside_plot");
+      if (!grant.allowedBlockIds.includes(step.operation.blockId)) return reject("block_not_allowed");
+      const budgetDay = new Date(nowMs).toISOString().slice(0, 10);
+      const budgetKey = `${grant.plotId}:${budgetDay}`;
+      const blocksUsedToday = this.#homeBlocksUsed.get(budgetKey) ?? 0;
+      if (blocksUsedToday + 1 > grant.maxBlocksPerDay) return reject("daily_budget", blocksUsedToday);
+      // applyTransaction synchronously rechecks baseRev, bounds, protected terrain and occupancy.
+      const result = applyTransaction(this.#world, [step.operation], { baseRev: step.baseRev, actor: "ai" });
+      if (!result.ok) return reject(result.code, blocksUsedToday);
+      let txId: string;
+      try {
+        txId = this.#idFactory();
+        if (!txId || txId.length > 128) throw new TypeError("invalid txId");
+      } catch {
+        return reject("commit_prepare_failed", blocksUsedToday);
+      }
+      const commit: CommitMessage = Object.freeze({
+        protocolVersion: 1,
+        type: "commit",
+        worldId: this.#world.worldId,
+        rev: result.rev,
+        txId,
+        actor: "ai",
+        operations: result.operations,
+      });
+      // Publish only after every validation and envelope preparation succeeded.
+      this.#world = result.world;
+      this.#homeBlocksUsed.set(budgetKey, blocksUsedToday + 1);
+      return { accepted: true, world: this.#world, commit, blocksUsedToday: blocksUsedToday + 1 };
     } finally {
       this.#homeBusy = false;
     }

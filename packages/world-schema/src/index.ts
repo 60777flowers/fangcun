@@ -15,8 +15,10 @@ export type BlockId = (typeof BLOCK_IDS)[number];
 
 // The first eight ids are the v1 terrain/build set and MUST keep their positions:
 // durable stores encode a block as `index + 1`, so appending is the only compatible
-// way to grow the catalog. The last eight are decorative; they are ordinary
-// placeable blocks with no extra world rules (no gravity, collision or light).
+// way to grow the catalog. The next eight are decorative; `stairs` is appended after
+// them as the v0 "seat" block (an ordinary placeable block — being a seat is a
+// companion-behaviour concept, not new world physics). None of these add gravity,
+// collision or light rules.
 export const BLOCK_IDS = [
   "grass",
   "dirt",
@@ -34,6 +36,7 @@ export const BLOCK_IDS = [
   "lantern",
   "pumpkin",
   "flower",
+  "stairs",
 ] as const;
 
 export type BlockDef = Readonly<{
@@ -61,6 +64,9 @@ export const BLOCK_DEFS: Readonly<Record<BlockId, BlockDef>> = Object.freeze({
   lantern: Object.freeze({ id: "lantern", label: "灯笼", solid: true, placeable: true }),
   pumpkin: Object.freeze({ id: "pumpkin", label: "南瓜", solid: true, placeable: true }),
   flower: Object.freeze({ id: "flower", label: "小花", solid: true, placeable: true }),
+  // v0 seat block: the companion sits on it after finishing a house build. It is a
+  // normal placeable block; the "seat" meaning lives only in companion behaviour.
+  stairs: Object.freeze({ id: "stairs", label: "台阶（座位）", solid: true, placeable: true }),
 });
 
 export const WORLD_CELL_COUNT = WORLD_SPEC.size.x * WORLD_SPEC.size.y * WORLD_SPEC.size.z;

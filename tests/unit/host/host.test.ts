@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { applyTransaction, createSeedWorld, getBlock } from "@fangcun/voxel-core";
-import { COMPANION_ACTION_IDS, validateCompanionActionMessage } from "@fangcun/protocol";
+import { COMPANION_ACTION_IDS, validateCompanionActionMessage, validateCompanionBuildProposalMessage } from "@fangcun/protocol";
+import { HOUSE_PLAN_BLOCK_COUNT } from "@fangcun/companion-runtime";
+import { coordToIndex } from "@fangcun/world-schema";
 import { FangcunHost } from "../../../packages/host/src/index.ts";
 import { addItemToCompanion } from "../../../packages/host/src/items.ts";
 import { HostStore } from "../../../packages/host/src/persistence.ts";
@@ -1021,7 +1023,7 @@ test("disabled autonomy never mutates the world", async () => {
   }
 });
 
-test("autonomy never runs two companion ticks at once or double-commits", async () => {
+test("autonomy self-proposes a house instead of instant-building, and manual ticks still serialize", async () => {
   const host = new FangcunHost({ worldId: "autonomy-serial-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40 });
   const address = await host.start();
   try {
@@ -1029,13 +1031,14 @@ test("autonomy never runs two companion ticks at once or double-commits", async 
     const candidateId = tick.body.result.candidate?.candidateId;
     assert.ok(candidateId);
     assert.equal((await coreJson(address, "/home/approve", { candidateId })).status, 200);
-    await delay(250);
-    assert.equal(host.revision, 1, "many intervals produce exactly one commit");
+    // The self-driven loop now asks instead of committing an instant 12-block home.
+    const proposed = await waitForState(address, (state) => state.houseProposal !== null, "the self-driven house proposal");
+    assert.equal(proposed.world.rev, 0, "autonomy asks before any instant generation");
+    assert.equal(proposed.companionState, "awaiting_approval");
     const status = await coreJson<{ lastRunAtMs: number | null }>(address, "/autonomy");
     assert.ok(typeof status.body.lastRunAtMs === "number" && status.body.lastRunAtMs > 0, "the scheduler actually ran");
 
-    // Concurrent manual ticks serialize behind the same chain; the world authority
-    // rejects the second build, so the revision cannot jump twice.
+    // Manual ticks keep the legacy instant path and still serialize: the revision can only jump once.
     const [first, second] = await Promise.all([coreTick<{ result: { status: string } }>(address), coreTick<{ result: { status: string } }>(address)]);
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
@@ -1065,4 +1068,880 @@ test("autonomy respects tracking readiness by delegating to the world authority"
   }
 });
 
+// ------------------------------------------------------------------------------------
+// House proposal + block-by-block build queue
+// ------------------------------------------------------------------------------------
 
+type HomeBounds = Readonly<{
+  min: Readonly<{ x: number; y: number; z: number }>;
+  maxExclusive: Readonly<{ x: number; y: number; z: number }>;
+}>;
+type PendingProposalBody = Readonly<{
+  proposalId: string;
+  companionId: string;
+  bounds: HomeBounds;
+  planBlockCount: number;
+  expiresAtMs: number;
+}>;
+type BuildSummaryBody = Readonly<{
+  inProgress: boolean;
+  completedBlocks: number;
+  totalBlocks: number;
+  intervalMs: number;
+  lastError: string | null;
+  seatPlaced: boolean;
+  seatError: string | null;
+}>;
+type GrantMigrationBody = Readonly<{
+  at: number;
+  grantId: string;
+  from: HomeBounds;
+  to: HomeBounds;
+  reason: string;
+}>;
+type HouseStateBody = Readonly<{
+  world: Readonly<{ rev: number; blocks: Array<string | null> }>;
+  homeGrantActive: boolean;
+  companionState: string;
+  houseProposal: PendingProposalBody | null;
+  grantMigration: GrantMigrationBody | null;
+  build: BuildSummaryBody;
+}>;
+type CompanionDetailBody = Readonly<{ companionId: string; houseProposal: PendingProposalBody | null }>;
+type PlaceOpBody = Readonly<{ type: "place"; at: { x: number; y: number; z: number }; blockId: string }>;
+
+/** Grants a home plot and returns the candidate bounds the grant now covers. */
+async function grantHome(address: CoreAddress): Promise<HomeBounds> {
+  const tick = await coreTick<{ result: { status: string; candidate?: { candidateId: string; bounds: HomeBounds } } }>(address);
+  assert.equal(tick.body.result.status, "home_approval_required");
+  const candidate = tick.body.result.candidate;
+  assert.ok(candidate, "the tick exposes a home candidate");
+  const approved = await coreJson<{ approved: boolean }>(address, "/home/approve", { candidateId: candidate.candidateId });
+  assert.equal(approved.body.approved, true);
+  return candidate.bounds;
+}
+
+async function proposeHouse(address: CoreAddress): Promise<PendingProposalBody> {
+  const response = await coreJson<{ proposal: PendingProposalBody }>(address, "/house/propose", undefined, "POST");
+  assert.equal(response.status, 200, `propose failed: ${JSON.stringify(response.body)}`);
+  return response.body.proposal;
+}
+
+async function decideHouse(address: CoreAddress, proposalId: string, approve: boolean): Promise<{ status: number; body: { approved?: boolean; planBlockCount?: number; error?: string } }> {
+  return coreJson(address, "/house/decide", { proposalId, approve });
+}
+
+async function hostState(address: CoreAddress): Promise<HouseStateBody> {
+  return (await coreJson<HouseStateBody>(address, "/state")).body;
+}
+
+async function waitForState(
+  address: CoreAddress,
+  predicate: (state: HouseStateBody) => boolean,
+  label: string,
+  timeoutMs = 10000,
+): Promise<HouseStateBody> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = await hostState(address);
+    if (predicate(state)) return state;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}: ${JSON.stringify(state.build)}`);
+    await delay(5);
+  }
+}
+
+/** Bounds a completion promise so a product hang fails the test instead of hanging the run. */
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    delay(timeoutMs).then(() => { throw new Error(`timed out waiting for ${label}`); }),
+  ]);
+}
+
+/** Pairs a WebSocket client and drains the hello welcome/companion_state frames. */
+async function pairTablet(host: FangcunHost, address: CoreAddress): Promise<{ socket: WebSocket; read: () => Promise<Record<string, unknown>> }> {
+  const code = host.issuePairingCode();
+  const pairResponse = await fetch(`http://${address.host}:${address.port}/api/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: code.code, clientId: "house-tablet-1" }),
+  });
+  const pairing = (await pairResponse.json()) as { token: string };
+  const socket = await openSocket(`ws://${address.host}:${address.port}/api/ws`);
+  const read = socketReader(socket);
+  socket.send(JSON.stringify({ protocolVersion: 1, type: "hello", worldId: host.worldId, clientId: "house-tablet-1", credential: pairing.token, lastAppliedRev: 0 }));
+  assert.equal((await read()).type, "welcome");
+  assert.equal((await read()).type, "companion_state");
+  return { socket, read };
+}
+
+/** Reads frames until the expected type arrives (bounded by the socket reader's timeout). */
+async function readUntilType(read: () => Promise<Record<string, unknown>>, type: string): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const frame = await read();
+    if (frame.type === type) return frame;
+  }
+  throw new Error(`no ${type} frame observed`);
+}
+
+function blockInState(state: HouseStateBody, at: Readonly<{ x: number; y: number; z: number }>): string | null {
+  return state.world.blocks[coordToIndex(at)] ?? null;
+}
+
+test("house proposal is rejected without a grant and exposed in state after proposing", async () => {
+  const host = new FangcunHost({ worldId: "house-proposal-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    const noGrant = await coreJson<{ error: string }>(address, "/house/propose", undefined, "POST");
+    assert.equal(noGrant.status, 409);
+    assert.equal(noGrant.body.error, "grant_missing");
+
+    await grantHome(address);
+    const startRev = host.revision;
+    const proposal = await proposeHouse(address);
+    assert.equal(proposal.companionId, "fish-1");
+    assert.equal(proposal.planBlockCount, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(proposal.planBlockCount, 24, "the v0 cottage plan stays inside the 24-block budget");
+    assert.equal(proposal.bounds.maxExclusive.x - proposal.bounds.min.x, 3);
+    assert.equal(proposal.bounds.maxExclusive.y - proposal.bounds.min.y, 3);
+    assert.equal(proposal.bounds.maxExclusive.z - proposal.bounds.min.z, 3);
+    assert.ok(proposal.expiresAtMs > Date.now(), "the proposal carries a future TTL");
+    assert.equal(host.revision, startRev, "proposing never mutates the world");
+
+    const state = await hostState(address);
+    assert.deepEqual(state.houseProposal, proposal);
+    assert.equal(state.build.inProgress, false);
+    const detail = (await coreJson<CompanionDetailBody>(address, "/companions/fish-1")).body;
+    assert.deepEqual(detail.houseProposal, proposal);
+    assert.equal((await coreJson<CompanionDetailBody>(address, "/companions/fish-friend-1")).body.houseProposal, null);
+
+    const duplicate = await coreJson<{ error: string }>(address, "/house/propose", undefined, "POST");
+    assert.equal(duplicate.status, 409);
+    assert.equal(duplicate.body.error, "proposal_pending");
+
+    const rejected = await decideHouse(address, proposal.proposalId, false);
+    assert.equal(rejected.status, 200);
+    assert.equal(rejected.body.approved, false);
+    assert.equal(host.revision, startRev, "rejecting a proposal leaves the world untouched");
+    assert.equal((await hostState(address)).houseProposal, null);
+    assert.equal((await coreJson<CompanionDetailBody>(address, "/companions/fish-1")).body.houseProposal, null);
+    assert.equal((await decideHouse(address, proposal.proposalId, true)).status, 404, "a decided proposal id is not found again");
+    assert.equal((await decideHouse(address, "missing-proposal", true)).status, 404);
+    assert.equal((await coreJson(address, "/house/decide", { proposalId: "x", approve: "yes" })).status, 400);
+    assert.equal((await coreJson(address, "/house/decide", { proposalId: "x", approve: true, extra: 1 })).status, 400);
+  } finally {
+    await host.stop();
+  }
+});
+
+test("house proposal searches the plot when the origin is occupied and builds on the chosen footprint", async () => {
+  const host = new FangcunHost({ worldId: "house-search-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    const bounds = await grantHome(address);
+    const occupiedAt = { x: bounds.min.x, y: bounds.min.y, z: bounds.min.z };
+    const blocked = await coreJson<{ decision: { ack: { accepted: boolean } } }>(address, "/intent", {
+      clientId: "house-blocker",
+      seq: 1,
+      baseRev: host.revision,
+      operation: { type: "place", at: occupiedAt, blockId: "stone" },
+    });
+    assert.equal(blocked.body.decision.ack.accepted, true);
+    const revBeforePropose = host.revision;
+
+    // All four 3x3 origins inside the 4x4 grant tie on distance to the plot centre; the
+    // deterministic z-then-x tie-break skips the occupied (0,0) origin and picks (1,0).
+    const proposal = await proposeHouse(address);
+    assert.deepEqual(proposal.bounds.min, { x: bounds.min.x + 1, y: bounds.min.y, z: bounds.min.z }, "the proposal points at the next clear footprint");
+    assert.deepEqual(proposal.bounds.maxExclusive, { x: bounds.min.x + 4, y: bounds.min.y + 3, z: bounds.min.z + 3 });
+    assert.equal(proposal.planBlockCount, 24);
+    assert.equal(host.revision, revBeforePropose, "searching for a footprint never mutates the world");
+
+    // The whole queue (and the seat) is generated relative to the chosen footprint.
+    await decideHouse(address, proposal.proposalId, true);
+    const done = await withTimeout(host.waitForBuildIdle(), 10000, "build on the searched footprint");
+    assert.equal(done.completedBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(done.seatPlaced, true);
+    const state = await hostState(address);
+    const min = proposal.bounds.min;
+    assert.equal(blockInState(state, { x: min.x, y: min.y, z: min.z }), "planks", "floor follows the chosen footprint");
+    assert.equal(blockInState(state, { x: min.x + 1, y: min.y + 1, z: min.z + 1 }), "stairs", "seat is the chosen footprint's centre");
+    assert.equal(blockInState(state, occupiedAt), "stone", "the pre-existing block at the origin is untouched");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("house proposal returns plot_not_clear only when no 3x3 area is clear anywhere", async () => {
+  const host = new FangcunHost({ worldId: "house-blocked-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    const bounds = await grantHome(address);
+    // Fill every ground cell of the (at most 6x6) grant; every 3x3 footprint now has an
+    // occupied floor, so the proposal has nowhere to go.
+    let seq = 0;
+    for (let z = bounds.min.z; z < bounds.maxExclusive.z; z += 1) {
+      for (let x = bounds.min.x; x < bounds.maxExclusive.x; x += 1) {
+        seq += 1;
+        const placed = await coreJson<{ decision: { ack: { accepted: boolean } } }>(address, "/intent", {
+          clientId: "house-filler",
+          seq,
+          baseRev: host.revision,
+          operation: { type: "place", at: { x, y: bounds.min.y, z }, blockId: "stone" },
+        });
+        assert.equal(placed.body.decision.ack.accepted, true, `filler placement ${seq} succeeded`);
+      }
+    }
+    const propose = await coreJson<{ error: string }>(address, "/house/propose", undefined, "POST");
+    assert.equal(propose.status, 409);
+    assert.equal(propose.body.error, "plot_not_clear");
+    assert.equal(host.revision, seq, "a blocked proposal performs no world write");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("a cramped legacy grant is widened once (max 6x6) so a cottage can still be proposed", async () => {
+  const db = tempDb();
+  try {
+    const first = new FangcunHost({ worldId: "grant-widen-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const address = await first.start();
+    let bounds: HomeBounds;
+    try {
+      bounds = await grantHome(address);
+      // Simulate the legacy starter home at the grant origin: its 2x2 floor overlaps
+      // every 3x3 footprint a 4x4 grant could offer, so plain origin scanning fails.
+      let seq = 0;
+      for (let dz = 0; dz < 2; dz += 1) {
+        for (let dx = 0; dx < 2; dx += 1) {
+          seq += 1;
+          const placed = await coreJson<{ decision: { ack: { accepted: boolean } } }>(address, "/intent", {
+            clientId: "grant-widen-filler",
+            seq,
+            baseRev: first.revision,
+            operation: { type: "place", at: { x: bounds.min.x + dx, y: bounds.min.y, z: bounds.min.z + dz }, blockId: "planks" },
+          });
+          assert.equal(placed.body.decision.ack.accepted, true);
+        }
+      }
+      assert.equal(
+        (await coreJson<{ error: string }>(address, "/house/propose", undefined, "POST")).status,
+        409,
+        "the legacy starter home blocks every 3x3 inside the 4x4 grant",
+      );
+    } finally {
+      await first.stop();
+    }
+
+    const second = new FangcunHost({ worldId: "grant-widen-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0, buildIntervalMs: 0, demoRelocateGrant: true });
+    const secondAddress = await second.start();
+    try {
+      const state = await hostState(secondAddress);
+      assert.equal(state.homeGrantActive, true);
+      assert.ok(state.grantMigration, "the opt-in demo migration is exposed in state");
+      assert.equal(state.grantMigration!.reason, "widened_for_clear_footprint");
+      assert.equal(state.grantMigration!.grantId, "grant-local-home-1");
+      assert.deepEqual(state.grantMigration!.from, bounds);
+      const proposed = await coreJson<{ proposal: PendingProposalBody }>(secondAddress, "/house/propose", undefined, "POST");
+      assert.equal(proposed.status, 200, `widened grant should propose: ${JSON.stringify(proposed.body)}`);
+      const proposal = proposed.body.proposal;
+      assert.equal(proposal.planBlockCount, HOUSE_PLAN_BLOCK_COUNT);
+      assert.equal(proposal.bounds.maxExclusive.x - proposal.bounds.min.x, 3);
+      // The widened grant (≤6x6) is persisted for the next start.
+      const raw = new DatabaseSync(db.path);
+      const rows = raw.prepare("SELECT json FROM grant").all() as Array<{ json: string }>;
+      raw.close();
+      assert.equal(rows.length, 1);
+      const stored = JSON.parse(rows[0]!.json) as { bounds: HomeBounds };
+      assert.equal(stored.bounds.maxExclusive.x - stored.bounds.min.x, 6, "the demo grant grew to the 6x6 schema maximum");
+      assert.equal(stored.bounds.maxExclusive.z - stored.bounds.min.z, 6);
+      assert.deepEqual(state.grantMigration!.to, stored.bounds, "the migration record matches the persisted grant");
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
+test("the demo grant migration is opt-in: without the flag a blocked grant stays plot_not_clear", async () => {
+  const db = tempDb();
+  try {
+    const first = new FangcunHost({ worldId: "grant-opt-in-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const address = await first.start();
+    let bounds: HomeBounds;
+    try {
+      bounds = await grantHome(address);
+      let seq = 0;
+      for (let dz = 0; dz < 2; dz += 1) {
+        for (let dx = 0; dx < 2; dx += 1) {
+          seq += 1;
+          const placed = await coreJson<{ decision: { ack: { accepted: boolean } } }>(address, "/intent", {
+            clientId: "grant-opt-in-filler",
+            seq,
+            baseRev: first.revision,
+            operation: { type: "place", at: { x: bounds.min.x + dx, y: bounds.min.y, z: bounds.min.z + dz }, blockId: "planks" },
+          });
+          assert.equal(placed.body.decision.ack.accepted, true);
+        }
+      }
+    } finally {
+      await first.stop();
+    }
+
+    // No flag (and no option): the startup migration must not run at all.
+    const second = new FangcunHost({ worldId: "grant-opt-in-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0, buildIntervalMs: 0 });
+    const secondAddress = await second.start();
+    try {
+      const state = await hostState(secondAddress);
+      assert.equal(state.grantMigration, null, "no migration happens without the demo flag");
+      const rejected = await coreJson<{ error: string }>(secondAddress, "/house/propose", undefined, "POST");
+      assert.equal(rejected.status, 409);
+      assert.equal(rejected.body.error, "plot_not_clear");
+      const raw = new DatabaseSync(db.path);
+      const rows = raw.prepare("SELECT json FROM grant").all() as Array<{ json: string }>;
+      raw.close();
+      const stored = JSON.parse(rows[0]!.json) as { bounds: HomeBounds };
+      assert.deepEqual(stored.bounds, bounds, "the grant is untouched when the demo flag is off");
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
+test("a legacy grant with no room even after widening is relocated once to a clear build site", async () => {
+  const db = tempDb();
+  try {
+    const first = new FangcunHost({ worldId: "grant-relocate-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0 });
+    const address = await first.start();
+    let oldBounds: HomeBounds;
+    try {
+      oldBounds = await grantHome(address);
+      // Fill the entire 4x4 grant floor: no 3x3 fits in the original plot or any 6x6
+      // expansion of it, but the rest of the island stays clear.
+      let seq = 0;
+      for (let z = oldBounds.min.z; z < oldBounds.maxExclusive.z; z += 1) {
+        for (let x = oldBounds.min.x; x < oldBounds.maxExclusive.x; x += 1) {
+          seq += 1;
+          const placed = await coreJson<{ decision: { ack: { accepted: boolean } } }>(address, "/intent", {
+            clientId: "grant-relocate-filler",
+            seq,
+            baseRev: first.revision,
+            operation: { type: "place", at: { x, y: oldBounds.min.y, z }, blockId: "stone" },
+          });
+          assert.equal(placed.body.decision.ack.accepted, true);
+        }
+      }
+      assert.equal((await coreJson<{ error: string }>(address, "/house/propose", undefined, "POST")).status, 409);
+    } finally {
+      await first.stop();
+    }
+
+    // The demo migration is opt-in via the env flag; default is off (see previous test).
+    const previousFlag = process.env.FANGCUN_DEMO_RELOCATE_GRANT;
+    process.env.FANGCUN_DEMO_RELOCATE_GRANT = "1";
+    let second: FangcunHost;
+    try {
+      second = new FangcunHost({ worldId: "grant-relocate-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0, buildIntervalMs: 0 });
+    } finally {
+      if (previousFlag === undefined) delete process.env.FANGCUN_DEMO_RELOCATE_GRANT;
+      else process.env.FANGCUN_DEMO_RELOCATE_GRANT = previousFlag;
+    }
+    const secondAddress = await second.start();
+    let migratedBounds: HomeBounds;
+    try {
+      const state = await hostState(secondAddress);
+      assert.ok(state.grantMigration, "the opt-in demo migration is exposed in state");
+      assert.equal(state.grantMigration!.reason, "relocated_to_clear_site");
+      assert.equal(state.grantMigration!.grantId, "grant-local-home-1");
+      assert.deepEqual(state.grantMigration!.from, oldBounds);
+      const raw = new DatabaseSync(db.path);
+      const rows = raw.prepare("SELECT json FROM grant").all() as Array<{ json: string }>;
+      raw.close();
+      const stored = JSON.parse(rows[0]!.json) as { bounds: HomeBounds };
+      migratedBounds = stored.bounds;
+      assert.deepEqual(state.grantMigration!.to, stored.bounds, "the migration record matches the persisted grant");
+      assert.notDeepEqual(stored.bounds.min, oldBounds.min, "the demo grant moved to a clear site");
+      assert.notDeepEqual(stored.bounds.maxExclusive, oldBounds.maxExclusive);
+      const proposed = await coreJson<{ proposal: PendingProposalBody }>(secondAddress, "/house/propose", undefined, "POST");
+      assert.equal(proposed.status, 200, `relocated grant should propose: ${JSON.stringify(proposed.body)}`);
+      assert.equal(proposed.body.proposal.planBlockCount, HOUSE_PLAN_BLOCK_COUNT);
+      assert.equal(blockInState(state, { x: oldBounds.min.x, y: oldBounds.min.y, z: oldBounds.min.z }), "stone", "the old blocks are untouched");
+    } finally {
+      await second.stop();
+    }
+
+    // Idempotent: another restart with the flag on must not migrate again.
+    const third = new FangcunHost({ worldId: "grant-relocate-world", port: 0, ownerUserId: "owner-1", dbPath: db.path, autonomyIntervalMs: 0, buildIntervalMs: 0, demoRelocateGrant: true });
+    const thirdAddress = await third.start();
+    try {
+      const state = await hostState(thirdAddress);
+      assert.equal(state.grantMigration, null, "the demo migration never repeats on restart");
+      const raw = new DatabaseSync(db.path);
+      const rows = raw.prepare("SELECT json FROM grant").all() as Array<{ json: string }>;
+      raw.close();
+      const stored = JSON.parse(rows[0]!.json) as { bounds: HomeBounds };
+      assert.deepEqual(stored.bounds, migratedBounds, "the migrated grant is stable across restarts");
+      assert.equal((await coreJson<{ proposal: PendingProposalBody }>(thirdAddress, "/house/propose", undefined, "POST")).status, 200);
+    } finally {
+      await third.stop();
+    }
+  } finally {
+    db.cleanup();
+  }
+});
+
+test("an approved house builds one block per commit in floor→walls→roof order and seats the companion", async () => {
+  // Manual scheduler: the queue advances only when the test pumps it, so the commit
+  // sequence cannot be squeezed by other test files running concurrently.
+  const pendingSteps: Array<() => void> = [];
+  const host = new FangcunHost({
+    worldId: "house-build-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 0,
+    buildStepScheduler: (run) => { pendingSteps.push(run); return () => undefined; },
+  });
+  const address = await host.start();
+  let socket: WebSocket | undefined;
+  try {
+    const bounds = await grantHome(address);
+    const startRev = host.revision;
+    const paired = await pairTablet(host, address);
+    socket = paired.socket;
+    const proposal = await proposeHouse(address);
+
+    const proposalFrame = await paired.read();
+    assert.equal(proposalFrame.type, "companion_build_proposal");
+    const validatedFrame = validateCompanionBuildProposalMessage(proposalFrame);
+    assert.equal(validatedFrame.ok, true);
+    if (validatedFrame.ok) {
+      assert.equal(validatedFrame.value.proposalId, proposal.proposalId);
+      assert.equal(validatedFrame.value.blockCount, HOUSE_PLAN_BLOCK_COUNT);
+      assert.deepEqual(validatedFrame.value.bounds, proposal.bounds);
+    }
+    const awaiting = await paired.read();
+    assert.equal(awaiting.type, "companion_state");
+    assert.equal(awaiting.state, "awaiting_approval");
+    const proposalSay = await paired.read();
+    assert.equal(proposalSay.type, "companion_say");
+    assert.match(String(proposalSay.text), /小房子/);
+
+    const decided = await decideHouse(address, proposal.proposalId, true);
+    assert.equal(decided.status, 200);
+    assert.equal(decided.body.approved, true);
+    assert.equal(decided.body.planBlockCount, HOUSE_PLAN_BLOCK_COUNT);
+
+    // Pump the manual scheduler to completion (24 block steps + 1 completion step).
+    let pumped = 0;
+    while (pendingSteps.length > 0 && pumped < 100) {
+      const step = pendingSteps.shift()!;
+      step();
+      pumped += 1;
+    }
+    assert.equal(pumped, HOUSE_PLAN_BLOCK_COUNT + 1, "the queue takes one step per block plus a completion step");
+    const summary = await withTimeout(host.waitForBuildIdle(), 2000, "manual build completion");
+    assert.equal(summary.inProgress, false);
+    assert.equal(summary.completedBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(summary.intervalMs, 0);
+    assert.equal(summary.lastError, null);
+    assert.equal(summary.seatPlaced, true);
+
+    // All frames were broadcast synchronously while pumping; read the buffered stream.
+    const frames: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < HOUSE_PLAN_BLOCK_COUNT + 6; index += 1) frames.push(await paired.read());
+    const building = frames[0]!;
+    assert.equal(building.type, "companion_state");
+    assert.equal(building.state, "building");
+    const startSay = frames[1]!;
+    assert.equal(startSay.type, "companion_say");
+    assert.match(String(startSay.text), /开工/);
+
+    // 24 plan commits, then the single seat placement.
+    const planCommits = frames.slice(2, 2 + HOUSE_PLAN_BLOCK_COUNT) as unknown as Array<{ rev: number; actor: string; operations: PlaceOpBody[] }>;
+    for (const [index, frame] of frames.slice(2, 2 + HOUSE_PLAN_BLOCK_COUNT).entries()) {
+      assert.equal(frame.type, "commit", `frame ${index} is a build commit`);
+    }
+    const seatFrame = frames[2 + HOUSE_PLAN_BLOCK_COUNT]!;
+    assert.equal(seatFrame.type, "commit");
+    const seatCommit = seatFrame as unknown as { rev: number; operations: PlaceOpBody[] };
+    assert.equal(seatCommit.operations.length, 1);
+    assert.equal(seatCommit.operations[0]!.blockId, "stairs");
+    assert.deepEqual(seatCommit.operations[0]!.at, { x: bounds.min.x + 1, y: bounds.min.y + 1, z: bounds.min.z + 1 });
+
+    const idle = frames[3 + HOUSE_PLAN_BLOCK_COUNT]!;
+    assert.equal(idle.type, "companion_state");
+    assert.equal(idle.state, "idle");
+    const doneSay = frames[4 + HOUSE_PLAN_BLOCK_COUNT]!;
+    assert.equal(doneSay.type, "companion_say");
+    assert.match(String(doneSay.text), /房子盖好/);
+    const sitAction = frames[5 + HOUSE_PLAN_BLOCK_COUNT]!;
+    assert.equal(sitAction.type, "companion_action");
+    assert.equal(sitAction.actionId, "sit", "the seat expression reuses companion_action");
+
+    // Exactly one place op per commit, ai actor, strictly increasing rev.
+    assert.equal(planCommits.length, 24);
+    planCommits.forEach((commit, index) => {
+      assert.equal(commit.actor, "ai");
+      assert.equal(commit.operations.length, 1, `commit ${index} has exactly one operation`);
+      assert.equal(commit.rev, startRev + index + 1);
+    });
+    assert.equal(seatCommit.rev, startRev + HOUSE_PLAN_BLOCK_COUNT + 1, "the seat is a separate final commit");
+
+    // Build order: floor (9) → walls (7) → roof (8), bottom-up.
+    const baseY = bounds.min.y;
+    const heights = planCommits.map((commit) => commit.operations[0]!.at.y - baseY);
+    assert.deepEqual(heights.slice(0, 9), Array(9).fill(0), "floor is built first at the base layer");
+    assert.deepEqual(heights.slice(9, 16), Array(7).fill(1), "walls follow one layer up");
+    assert.deepEqual(heights.slice(16), Array(8).fill(2), "the roof is built last");
+    const planBlockIds = planCommits.map((commit) => commit.operations[0]!.blockId);
+    assert.deepEqual(planBlockIds.slice(0, 9), Array(9).fill("planks"), "floor is planks");
+    assert.equal(planBlockIds.slice(9, 16).filter((id) => id === "glass").length, 1, "one glass window in the walls");
+    assert.equal(planBlockIds.slice(9, 16).filter((id) => id === "planks").length, 6);
+    assert.deepEqual(planBlockIds.slice(16), Array(8).fill("planks"), "roof is planks");
+    const cells = new Set(planCommits.map((commit) => {
+      const at = commit.operations[0]!.at;
+      return `${at.x},${at.y},${at.z}`;
+    }));
+    assert.equal(cells.size, HOUSE_PLAN_BLOCK_COUNT, "every planned cell is placed exactly once");
+
+    const finalState = await hostState(address);
+    assert.equal(finalState.build.lastError, null);
+    assert.equal(finalState.build.totalBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(finalState.build.seatPlaced, true);
+    assert.equal(finalState.build.seatError, null);
+    assert.equal(finalState.houseProposal, null);
+    assert.equal(finalState.world.rev, startRev + HOUSE_PLAN_BLOCK_COUNT + 1);
+
+    const centre = { x: bounds.min.x + 1, y: bounds.min.y, z: bounds.min.z + 1 };
+    assert.equal(blockInState(finalState, { x: bounds.min.x, y: baseY, z: bounds.min.z }), "planks", "floor corner");
+    assert.equal(blockInState(finalState, { x: bounds.min.x, y: baseY + 1, z: bounds.min.z }), "planks", "wall corner");
+    assert.equal(blockInState(finalState, { x: bounds.min.x + 1, y: baseY + 1, z: bounds.min.z }), null, "front door gap stays empty");
+    assert.equal(blockInState(finalState, { x: bounds.min.x + 2, y: baseY + 1, z: bounds.min.z + 1 }), "glass", "window is glass");
+    assert.equal(blockInState(finalState, { x: bounds.min.x, y: baseY + 2, z: bounds.min.z }), "planks", "roof layer");
+    assert.equal(blockInState(finalState, { x: bounds.min.x, y: baseY + 2, z: bounds.min.z + 2 }), null, "skylight corner stays open");
+    assert.equal(blockInState(finalState, { x: centre.x, y: centre.y + 1, z: centre.z }), "stairs", "companion places and sits on the seat block");
+    const pet = await coreJson<{ activeAction: string }>(address, "/pet");
+    assert.equal(pet.body.activeAction, "sit", "the resting action is reflected in the pet view");
+  } finally {
+    socket?.close();
+    await host.stop();
+  }
+});
+
+test("a paced build rejects a second proposal and can still be stopped cleanly", async () => {
+  const host = new FangcunHost({ worldId: "house-paced-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 25 });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const proposal = await proposeHouse(address);
+    await decideHouse(address, proposal.proposalId, true);
+    const running = await waitForState(address, (state) => state.build.inProgress && state.build.completedBlocks >= 2, "a running paced build");
+    assert.ok(running.build.completedBlocks < HOUSE_PLAN_BLOCK_COUNT, "the queue is paced, not instant");
+    const second = await coreJson<{ error: string }>(address, "/house/propose", undefined, "POST");
+    assert.equal(second.status, 409);
+    assert.equal(second.body.error, "build_in_progress");
+    assert.equal((await decideHouse(address, proposal.proposalId, true)).status, 404, "the approved proposal is consumed");
+    // Await the queue's completion signal instead of sleeping for the paced duration.
+    const summary = await withTimeout(host.waitForBuildIdle(), 15000, "paced build completion");
+    assert.equal(summary.inProgress, false);
+    assert.equal(summary.completedBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(summary.intervalMs, 25);
+    assert.equal(summary.lastError, null);
+    assert.equal(summary.seatPlaced, true);
+  } finally {
+    await host.stop();
+  }
+});
+
+test("a player edit stops the block-by-block queue with stale_revision", async () => {
+  const host = new FangcunHost({ worldId: "house-stop-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 25 });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const proposal = await proposeHouse(address);
+    await decideHouse(address, proposal.proposalId, true);
+    await waitForState(address, (state) => state.build.inProgress && state.build.completedBlocks >= 2, "a running build");
+    // Retry the player edit if a paced build step lands between reading the revision
+    // and posting the intent (that would be rejected with stale_revision by design).
+    let accepted = false;
+    let seq = 0;
+    let revBeforeEdit = host.revision;
+    while (!accepted && seq < 20) {
+      seq += 1;
+      revBeforeEdit = host.revision;
+      const edit = await coreJson<{ decision: { ack: { accepted: boolean; reason?: string } } }>(address, "/intent", {
+        clientId: "house-editor",
+        seq,
+        baseRev: revBeforeEdit,
+        operation: { type: "place", at: { x: 6, y: 1, z: 6 }, blockId: "stone" },
+      });
+      accepted = edit.body.decision.ack.accepted;
+      if (!accepted) assert.equal(edit.body.decision.ack.reason, "stale_revision", "only a racing build step may reject the edit");
+      else await delay(2);
+    }
+    assert.equal(accepted, true, "the player edit eventually lands between build steps");
+    const stopped = await waitForState(address, (state) => !state.build.inProgress && state.build.lastError !== null, "stale-revision stop");
+    assert.equal(stopped.build.lastError, "stale_revision");
+    assert.ok(stopped.build.completedBlocks < HOUSE_PLAN_BLOCK_COUNT);
+    const summary = await withTimeout(host.waitForBuildIdle(), 5000, "stale-revision stop signal");
+    assert.equal(summary.lastError, "stale_revision");
+    assert.equal(host.revision, revBeforeEdit + 1, "no blocks are committed after the stop");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("revoking the home grant stops the running build with grant_revoked", async () => {
+  const host = new FangcunHost({ worldId: "house-revoke-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, buildIntervalMs: 25 });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const proposal = await proposeHouse(address);
+    await decideHouse(address, proposal.proposalId, true);
+    await waitForState(address, (state) => state.build.inProgress && state.build.completedBlocks >= 2, "a running build");
+    assert.equal(host.revokeHomeGrant(), true);
+    const revoked = await waitForState(address, (state) => !state.build.inProgress && state.build.lastError !== null, "grant-revoked stop");
+    assert.equal(revoked.build.lastError, "grant_revoked");
+    assert.equal(revoked.homeGrantActive, false);
+  } finally {
+    await host.stop();
+  }
+});
+
+test("house proposals expire and a decided id cannot be reused", async () => {
+  let now = Date.parse("2026-11-16T12:00:00.000Z");
+  const host = new FangcunHost({ worldId: "house-expiry-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0, nowMs: () => now });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const proposal = await proposeHouse(address);
+    now += 120_001; // past the 120 s proposal TTL
+    const expired = await decideHouse(address, proposal.proposalId, true);
+    assert.equal(expired.status, 409);
+    assert.equal(expired.body.error, "proposal_expired");
+    assert.equal((await decideHouse(address, proposal.proposalId, true)).status, 404, "an expired proposal is cleared");
+    assert.equal((await hostState(address)).houseProposal, null);
+    // After the expiry a fresh proposal is allowed again.
+    const fresh = await proposeHouse(address);
+    assert.notEqual(fresh.proposalId, proposal.proposalId);
+  } finally {
+    await host.stop();
+  }
+});
+
+test("build pacing defaults to 600 ms and honors FANGCUN_BUILD_INTERVAL_MS", async () => {
+  const defaultHost = new FangcunHost({ worldId: "house-pacing-default", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0 });
+  const defaultAddress = await defaultHost.start();
+  try {
+    assert.equal((await hostState(defaultAddress)).build.intervalMs, 600, "the demo builds one block per 600 ms");
+  } finally {
+    await defaultHost.stop();
+  }
+
+  const previous = process.env.FANGCUN_BUILD_INTERVAL_MS;
+  process.env.FANGCUN_BUILD_INTERVAL_MS = "0";
+  let envHost: FangcunHost;
+  try {
+    envHost = new FangcunHost({ worldId: "house-pacing-env", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0 });
+  } finally {
+    if (previous === undefined) delete process.env.FANGCUN_BUILD_INTERVAL_MS;
+    else process.env.FANGCUN_BUILD_INTERVAL_MS = previous;
+  }
+  const envAddress = await envHost.start();
+  try {
+    assert.equal((await hostState(envAddress)).build.intervalMs, 0, "0 is the fast test/demo override");
+  } finally {
+    await envHost.stop();
+  }
+
+  process.env.FANGCUN_BUILD_INTERVAL_MS = "not-a-number";
+  let fallbackHost: FangcunHost;
+  try {
+    fallbackHost = new FangcunHost({ worldId: "house-pacing-fallback", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 0 });
+  } finally {
+    if (previous === undefined) delete process.env.FANGCUN_BUILD_INTERVAL_MS;
+    else process.env.FANGCUN_BUILD_INTERVAL_MS = previous;
+  }
+  const fallbackAddress = await fallbackHost.start();
+  try {
+    assert.equal((await hostState(fallbackAddress)).build.intervalMs, 600, "a malformed env value falls back to the default");
+  } finally {
+    await fallbackHost.stop();
+  }
+});
+
+test("host shutdown drops an in-flight build queue without resuming it", async () => {
+  const db = tempDb();
+  const first = new FangcunHost({
+    worldId: "house-shutdown-world", port: 0, ownerUserId: "owner-1", dbPath: db.path,
+    autonomyIntervalMs: 0, buildIntervalMs: 30,
+  });
+  const address = await first.start();
+  try {
+    await grantHome(address);
+    const proposal = await proposeHouse(address);
+    await decideHouse(address, proposal.proposalId, true);
+    await waitForState(address, (state) => state.build.inProgress && state.build.completedBlocks >= 2, "a running build");
+  } finally {
+    await first.stop();
+  }
+  const revAtStop = first.revision;
+  assert.ok(revAtStop >= 2, "a partial build was persisted");
+  const second = new FangcunHost({
+    worldId: "house-shutdown-world", port: 0, ownerUserId: "owner-1", dbPath: db.path,
+    autonomyIntervalMs: 0, buildIntervalMs: 0,
+  });
+  const secondAddress = await second.start();
+  try {
+    assert.equal(second.revision, revAtStop, "partial blocks survive, the queue does not resume");
+    await delay(120);
+    assert.equal(second.revision, revAtStop, "no build step runs after restart");
+    const state = await hostState(secondAddress);
+    assert.equal(state.build.inProgress, false);
+    assert.equal(state.houseProposal, null);
+  } finally {
+    await second.stop();
+    db.cleanup();
+  }
+});
+
+
+
+
+
+// ------------------------------------------------------------------------------------
+// Self-driven house proposal loop (autonomy asks on its own)
+// ------------------------------------------------------------------------------------
+
+type AutonomyBody = Readonly<{
+  enabled: boolean;
+  intervalMs: number;
+  lastRunAtMs: number | null;
+  autoHousePropose: boolean;
+  lastHouseProposalAtMs: number | null;
+  houseProposalCooldownUntilMs: number;
+}>;
+
+test("self-driven autonomy proposes a house once and broadcasts the ask", async () => {
+  const host = new FangcunHost({ worldId: "autonomy-house-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40, buildIntervalMs: 0 });
+  const address = await host.start();
+  let socket: WebSocket | undefined;
+  try {
+    await grantHome(address);
+    const paired = await pairTablet(host, address);
+    socket = paired.socket;
+    const proposalFrame = await readUntilType(paired.read, "companion_build_proposal");
+    const validated = validateCompanionBuildProposalMessage(proposalFrame);
+    assert.equal(validated.ok, true);
+    if (!validated.ok) return;
+    assert.equal(validated.value.companionId, "fish-1");
+    assert.equal(validated.value.blockCount, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(validated.value.bounds.maxExclusive.x - validated.value.bounds.min.x, 3);
+
+    const state = await waitForState(address, (current) => current.houseProposal !== null, "self-driven proposal in state");
+    assert.equal(state.houseProposal!.proposalId, validated.value.proposalId);
+    assert.equal(state.companionState, "awaiting_approval");
+    const say = await readUntilType(paired.read, "companion_say");
+    assert.match(String(say.text), /小房子/);
+
+    const firstAutonomy = (await coreJson<AutonomyBody>(address, "/autonomy")).body;
+    assert.equal(firstAutonomy.autoHousePropose, true);
+    assert.equal(typeof firstAutonomy.lastHouseProposalAtMs, "number");
+    assert.equal(firstAutonomy.houseProposalCooldownUntilMs, 0);
+
+    await delay(220); // several autonomy intervals
+    assert.equal((await hostState(address)).houseProposal!.proposalId, validated.value.proposalId, "no re-ask while a proposal is pending");
+    const laterAutonomy = (await coreJson<AutonomyBody>(address, "/autonomy")).body;
+    assert.equal(laterAutonomy.lastHouseProposalAtMs, firstAutonomy.lastHouseProposalAtMs, "only one proposal attempt was made");
+  } finally {
+    socket?.close();
+    await host.stop();
+  }
+});
+
+test("self-driven autonomy searches for a clear footprint when the origin is occupied", async () => {
+  const host = new FangcunHost({ worldId: "autonomy-search-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40, buildIntervalMs: 0 });
+  const address = await host.start();
+  try {
+    await coreJson(address, "/autonomy", { enabled: false }); // hold the timer while preparing
+    const bounds = await grantHome(address);
+    const blocked = await coreJson<{ decision: { ack: { accepted: boolean } } }>(address, "/intent", {
+      clientId: "autonomy-blocker",
+      seq: 1,
+      baseRev: host.revision,
+      operation: { type: "place", at: { x: bounds.min.x, y: bounds.min.y, z: bounds.min.z }, blockId: "stone" },
+    });
+    assert.equal(blocked.body.decision.ack.accepted, true);
+    assert.equal((await coreJson(address, "/autonomy", { enabled: true })).status, 200);
+    const state = await waitForState(address, (current) => current.houseProposal !== null, "self-driven proposal on the searched footprint");
+    assert.deepEqual(state.houseProposal!.bounds.min, { x: bounds.min.x + 1, y: bounds.min.y, z: bounds.min.z });
+    assert.equal(state.world.rev, 1, "the search itself never mutates the world");
+  } finally {
+    await host.stop();
+  }
+});
+
+test("self-driven autonomy backs off 60 s after the owner rejects and asks again afterwards", async () => {
+  let now = Date.parse("2026-11-16T12:00:00.000Z");
+  const host = new FangcunHost({ worldId: "autonomy-cooldown-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40, buildIntervalMs: 0, nowMs: () => now });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const first = await waitForState(address, (current) => current.houseProposal !== null, "first self-driven proposal");
+    const rejected = await decideHouse(address, first.houseProposal!.proposalId, false);
+    assert.equal(rejected.body.approved, false);
+    const rejectedAt = now;
+    const autonomy = (await coreJson<AutonomyBody>(address, "/autonomy")).body;
+    assert.ok(autonomy.houseProposalCooldownUntilMs >= rejectedAt + 60_000, "reject cooldown is at least 60 s");
+    const lastAttemptAfterReject = autonomy.lastHouseProposalAtMs;
+
+    now = rejectedAt + 30_000;
+    await delay(220); // several autonomy intervals inside the cooldown
+    assert.equal((await hostState(address)).houseProposal, null, "no new ask during the reject cooldown");
+    assert.equal((await coreJson<AutonomyBody>(address, "/autonomy")).body.lastHouseProposalAtMs, lastAttemptAfterReject, "no proposal attempt during the cooldown");
+
+    now = rejectedAt + 61_000;
+    const second = await waitForState(address, (current) => current.houseProposal !== null, "proposal after the cooldown");
+    assert.notEqual(second.houseProposal!.proposalId, first.houseProposal!.proposalId);
+  } finally {
+    await host.stop();
+  }
+});
+
+test("self-driven autonomy never proposes a house without a granted plot", async () => {
+  const host = new FangcunHost({ worldId: "autonomy-nogrant-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40 });
+  const address = await host.start();
+  try {
+    await delay(250);
+    assert.equal((await hostState(address)).houseProposal, null);
+    assert.equal((await coreJson<AutonomyBody>(address, "/autonomy")).body.lastHouseProposalAtMs, null);
+  } finally {
+    await host.stop();
+  }
+});
+
+test("self-driven proposing is skipped during a build and waits out the post-build cooldown", async () => {
+  const host = new FangcunHost({ worldId: "autonomy-build-world", port: 0, ownerUserId: "owner-1", autonomyIntervalMs: 40, buildIntervalMs: 25 });
+  const address = await host.start();
+  try {
+    await grantHome(address);
+    const proposed = await waitForState(address, (current) => current.houseProposal !== null, "self-driven proposal");
+    const firstAttemptAt = (await coreJson<AutonomyBody>(address, "/autonomy")).body.lastHouseProposalAtMs;
+    await decideHouse(address, proposed.houseProposal!.proposalId, true);
+    const running = await waitForState(address, (current) => current.build.inProgress && current.build.completedBlocks >= 1, "a running build");
+    assert.equal(running.houseProposal, null, "the approved proposal is consumed");
+    const during = (await coreJson<AutonomyBody>(address, "/autonomy")).body;
+    assert.equal(during.lastHouseProposalAtMs, firstAttemptAt, "no propose attempt while building");
+
+    const done = await withTimeout(host.waitForBuildIdle(), 10000, "self-driven build completion");
+    assert.equal(done.completedBlocks, HOUSE_PLAN_BLOCK_COUNT);
+    assert.equal(done.seatPlaced, true);
+    await delay(220); // several autonomy intervals after completion
+    assert.equal((await hostState(address)).houseProposal, null, "post-build cooldown prevents an immediate re-ask");
+    const after = (await coreJson<AutonomyBody>(address, "/autonomy")).body;
+    assert.equal(after.lastHouseProposalAtMs, firstAttemptAt, "no new proposal attempt after the build");
+    assert.ok(after.houseProposalCooldownUntilMs > 0, "the post-build cooldown was armed");
+  } finally {
+    await host.stop();
+  }
+});

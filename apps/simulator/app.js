@@ -29,6 +29,8 @@ const COLORS = {
   lantern: { top: "#f2c96b", x: "#9a6a2b", z: "#c2913f" },
   pumpkin: { top: "#e08b3c", x: "#a45a24", z: "#c4722e" },
   flower: { top: "#e3a4b6", x: "#5d7f46", z: "#7d9c5c" },
+  // v0 seat block: warm oak tones so a companion sitting on it reads apart from walls.
+  stairs: { top: "#c49a68", x: "#7d5734", z: "#98683f" },
 };
 const BUILD_MIN_Y = WORLD_SPEC.terrainTopY;
 const BUILD_MAX_Y = WORLD_SPEC.size.y - 1;

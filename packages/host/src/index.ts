@@ -1,12 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
-import { BLOCK_IDS, WORLD_SPEC } from "@fangcun/world-schema";
-import { worldStateToObject } from "@fangcun/voxel-core";
-import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type CompanionActionId, type CompanionStateName, type ServerMessage } from "@fangcun/protocol";
+import { BLOCK_IDS, WORLD_SPEC, type Coord } from "@fangcun/world-schema";
+import { worldStateToObject, type WorldState } from "@fangcun/voxel-core";
+import { validateClientIntent, validateClientMessage, type ClientIntent, type CommitMessage, type CompanionActionId, type CompanionStateName, type IntentOperation, type ServerMessage } from "@fangcun/protocol";
 import { WorldAuthority, type CompanionTickDecision } from "@fangcun/worldd";
-import { findHomeCandidates, type HomeCandidate } from "@fangcun/companion-runtime";
-import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
+import { canBuildHousePlan, findHouseBuildPlan, findHomeCandidates, HOUSE_SEAT_BLOCK_ID, type HomeCandidate, type HouseBuildPlan } from "@fangcun/companion-runtime";
+import { isGrantActive, validateHomePlotGrant, type CompanionInstance, type HomePlotGrant } from "@fangcun/companion-schema";
 import { HostStore } from "./persistence.ts";
 import {
   COMPANION_ACTION_TTL_MS,
@@ -39,6 +39,11 @@ import {
   CHAT_MAX_TEXT_LENGTH,
   COMPANION_HOME_GRANTED_LINE,
   COMPANION_HOME_PROPOSAL_LINE,
+  COMPANION_HOUSE_DONE_LINE,
+  COMPANION_HOUSE_PROPOSAL_LINE,
+  COMPANION_HOUSE_REJECTED_LINE,
+  COMPANION_HOUSE_START_LINE,
+  COMPANION_HOUSE_STOPPED_LINE,
   COMPANION_SAY_MAX_TEXT_LENGTH,
   composeCompanionReply,
   idleLine,
@@ -72,6 +77,26 @@ const DEFAULT_AUTONOMY_INTERVAL_MS = 20_000;
 const CHAT_HISTORY_LIMIT = 30;
 /** Idle chatter is "occasional": one line every third idle interval, not every tick. */
 const AUTONOMY_SAY_EVERY_STEPS = 3;
+/** Block-by-block home build pacing; `FANGCUN_BUILD_INTERVAL_MS` overrides it (0 = as fast as possible). */
+const DEFAULT_BUILD_INTERVAL_MS = 600;
+const HOUSE_PROPOSAL_TTL_MS = 120_000;
+/** Self-driven house proposal cadence and backoffs (in-memory only, never persisted). */
+const AUTO_HOUSE_PROPOSAL_INTERVAL_MS = 45_000;
+const HOUSE_PROPOSAL_REJECT_COOLDOWN_MS = 60_000;
+const HOUSE_PROPOSAL_BLOCKED_COOLDOWN_MS = 120_000;
+const HOUSE_PROPOSAL_POST_BUILD_COOLDOWN_MS = 120_000;
+/**
+ * Ports that clients built on undici/Chromium refuse to connect to ("bad port").
+ * When the Host is asked for an ephemeral port (`0`), retry rather than hand a test or
+ * a browser a URL it can never use.
+ */
+const CLIENT_BLOCKED_PORTS: ReadonlySet<number> = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95,
+  101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179,
+  389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601,
+  636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566,
+  6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+]);
 
 const WORLD_SCHEMA_HASH = `sha256:${createHash("sha256").update(JSON.stringify(WORLD_SPEC)).digest("hex")}`;
 const BLOCK_CATALOG_HASH = `sha256:${createHash("sha256").update(BLOCK_IDS.join(",")).digest("hex")}`;
@@ -84,6 +109,51 @@ type Session = {
 };
 
 type TickOutcome = Readonly<{ result: CompanionTickDecision; world: unknown }>;
+
+/** A companion-highlighted build area waiting for the owner's accept/reject decision. */
+type PendingHouseProposal = Readonly<{
+  proposalId: string;
+  companionId: string;
+  bounds: Readonly<{ min: Coord; maxExclusive: Coord }>;
+  planBlockCount: number;
+  expiresAtMs: number;
+}>;
+
+/** In-memory block-by-block queue; dropped on Host shutdown (never resumed). */
+type BuildQueueState = {
+  companionId: string;
+  proposalId: string;
+  plotId: string;
+  grantId: string;
+  grantRev: number;
+  ops: readonly Extract<IntentOperation, { type: "place" }>[];
+  seat: Coord;
+  index: number;
+  completedBlocks: number;
+  expectedRev: number;
+  /** Cancels the scheduled next step (setTimeout clear, or a no-op for a manual scheduler). */
+  timer: (() => void) | null;
+};
+
+type BuildSummary = Readonly<{
+  inProgress: boolean;
+  completedBlocks: number;
+  totalBlocks: number;
+  /** Configured pacing; 0 means "as fast as possible". */
+  intervalMs: number;
+  lastError: string | null;
+  seatPlaced: boolean;
+  seatError: string | null;
+}>;
+
+/** Demo-only record of the one-time startup grant migration (in memory for this process). */
+type GrantMigration = Readonly<{
+  at: number;
+  grantId: string;
+  from: Readonly<{ min: Coord; maxExclusive: Coord }>;
+  to: Readonly<{ min: Coord; maxExclusive: Coord }>;
+  reason: "widened_for_clear_footprint" | "relocated_to_clear_site";
+}>;
 
 export type PairingCode = Readonly<{ code: string; expiresAtMs: number }>;
 export type HostOptions = Readonly<{
@@ -98,6 +168,19 @@ export type HostOptions = Readonly<{
   autonomyIntervalMs?: number;
   /** Demo-only readiness probe; production binds this to a fresh authenticated device lease. */
   trackingReady?: () => boolean;
+  /** Block-by-block build pacing in ms; 0 builds as fast as possible (tests). */
+  buildIntervalMs?: number;
+  /**
+   * Test seam: drives build-step scheduling. Defaults to setTimeout; tests pass a
+   * manual queue so the block sequence does not depend on wall-clock timers.
+   */
+  buildStepScheduler?: (run: () => void, delayMs: number) => () => void;
+  /**
+   * Demo-only opt-in: `FANGCUN_DEMO_RELOCATE_GRANT=1` (default off). When on and the
+   * grant-wide 3x3 scan finds nothing, startup may widen/relocate the single active
+   * grant once so the video demo can still propose. Never production behaviour.
+   */
+  demoRelocateGrant?: boolean;
 }>;
 export type HostAddress = Readonly<{ host: string; port: number; worldId: string }>;
 
@@ -135,6 +218,25 @@ export class FangcunHost {
   #companionState: CompanionStateName = "idle";
   #lastTick: CompanionTickDecision | null = null;
   #grant: HomePlotGrant | null = null;
+  /** Pending house-build proposal (in memory; not persisted). */
+  #pendingHouseProposal: PendingHouseProposal | null = null;
+  /** Deterministic plan captured with the pending proposal; reused on approval. */
+  #pendingHousePlan: HouseBuildPlan | null = null;
+  /** Active block-by-block build queue; at most one at a time. */
+  #buildQueue: BuildQueueState | null = null;
+  #lastBuild: BuildSummary = Object.freeze({
+    inProgress: false, completedBlocks: 0, totalBlocks: 0, intervalMs: 0, lastError: null, seatPlaced: false, seatError: null,
+  });
+  /** Self-driven proposal bookkeeping (in memory; documented as non-persistent). */
+  #lastHouseProposalAttemptAtMs: number | null = null;
+  #houseProposalCooldownUntilMs = 0;
+  /** Demo-only opt-in; see {@link HostOptions.demoRelocateGrant}. */
+  #demoRelocateGrant: boolean;
+  /** The one startup migration this process performed, if any (demo-only visibility). */
+  #grantMigration: GrantMigration | null = null;
+  #buildIntervalMs: number;
+  #buildStepScheduler: (run: () => void, delayMs: number) => () => void;
+  #buildIdleWaiters: Array<(summary: BuildSummary) => void> = [];
   /** Per-companion in-memory chat logs; unknown ids are rejected before use. */
   #chats = new Map<string, ChatMessage[]>();
   #lineIndex = 0;
@@ -164,6 +266,21 @@ export class FangcunHost {
       ? configuredInterval
       : DEFAULT_AUTONOMY_INTERVAL_MS;
     this.#autonomyEnabled = this.#autonomyIntervalMs > 0;
+    // 0 is a valid pacing override ("build as fast as possible", used by tests); a
+    // malformed env value falls back to the default instead of stalling the queue.
+    const configuredBuildInterval = options.buildIntervalMs ?? Number(process.env.FANGCUN_BUILD_INTERVAL_MS ?? DEFAULT_BUILD_INTERVAL_MS);
+    this.#buildIntervalMs = Number.isSafeInteger(configuredBuildInterval) && configuredBuildInterval >= 0
+      ? configuredBuildInterval
+      : DEFAULT_BUILD_INTERVAL_MS;
+    this.#buildStepScheduler = options.buildStepScheduler ?? ((run, delayMs) => {
+      const timer = setTimeout(run, Math.max(0, delayMs));
+      (timer as { unref?: () => void }).unref?.();
+      return () => clearTimeout(timer);
+    });
+    // Until the first queue runs, the idle summary still reports the configured pacing.
+    this.#lastBuild = Object.freeze({ ...this.#lastBuild, intervalMs: this.#buildIntervalMs });
+    // Demo-only opt-in; default OFF so a blocked plot stays plot_not_clear and nothing moves.
+    this.#demoRelocateGrant = options.demoRelocateGrant ?? process.env.FANGCUN_DEMO_RELOCATE_GRANT === "1";
     this.#companion = Object.freeze({
       schemaVersion: 1,
       companionId: "fish-1",
@@ -211,7 +328,23 @@ export class FangcunHost {
       this.#companion = storedCompanions[0]!;
       if (!this.#authority.registerCompanion(this.#companion)) throw new Error("failed to restore companion");
     }
-    for (const grant of store.loadGrants()) {
+    const storedGrants = store.loadGrants();
+    const demoGrantMigrationApplied = store.loadDemoGrantMigrated();
+    for (const storedGrant of storedGrants) {
+      // Demo migration: existing grants get the v0 seat block added to their allowlist
+      // once, so an upgraded live world can place the seat after a house build.
+      let grant = this.#grantWithSeatAllowlist(storedGrant);
+      // DEMO-ONLY opt-in migration (FANGCUN_DEMO_RELOCATE_GRANT=1, default off): the
+      // grant-wide scan runs first; if the world truly has no clear 3x3, widen/relocate
+      // the single active grant once. Never repeats (persisted marker), never moves blocks.
+      if (this.#demoRelocateGrant && !demoGrantMigrationApplied && storedGrants.length === 1) {
+        const migrated = this.#grantWithHouseRoom(grant, world);
+        if (migrated !== grant) {
+          grant = migrated;
+          store.saveDemoGrantMigrated();
+        }
+      }
+      if (grant !== storedGrant) store.saveGrant(grant);
       if (!this.#authority.restoreHomeGrant(grant)) throw new TypeError(`failed to restore grant ${grant.grantId}`);
       this.#grant = grant;
     }
@@ -256,22 +389,38 @@ export class FangcunHost {
     });
     server.on("upgrade", (request, socket, head) => this.#handleUpgrade(request, socket, head));
     this.#server = server;
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(this.#port, this.#host, () => {
-        server.off("error", reject);
-        resolve();
+    // Ephemeral ports assigned by the OS can fall on ports that browsers/undici refuse
+    // ("bad port"); retry so a loopback demo URL is always client-usable.
+    const requestedPort = this.#port;
+    let portAttempts = 0;
+    for (;;) {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(requestedPort === 0 ? 0 : requestedPort, this.#host, () => {
+          server.off("error", reject);
+          resolve();
+        });
       });
-    });
-    const address = server.address();
-    if (address === null || typeof address === "string") throw new Error("unexpected server address");
-    this.#port = address.port;
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("unexpected server address");
+      if (requestedPort === 0 && CLIENT_BLOCKED_PORTS.has(address.port) && portAttempts < 10) {
+        portAttempts += 1;
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        continue;
+      }
+      this.#port = address.port;
+      break;
+    }
     this.#syncAutonomyTimer();
     return Object.freeze({ host: this.#host, port: this.#port, worldId: this.#worldId });
   }
 
   async stop(): Promise<void> {
     this.#stopAutonomyTimer();
+    // Block-by-block builds are in-memory only: drop them on shutdown (no resume).
+    this.#dropBuildQueue();
+    this.#settleBuildIdle();
+    this.#clearHouseProposal();
     for (const session of this.#sessions) session.connection.close(1001);
     this.#sessions.clear();
     const server = this.#server;
@@ -408,6 +557,22 @@ export class FangcunHost {
       return send(outcome.approved ? 200 : 409, outcome.body);
     }
 
+    // Companion house proposal flow: propose highlights a 3x3 plot inside the granted
+    // home and asks the owner; decide starts (or cancels) the block-by-block build.
+    if (request.method === "POST" && path === "/api/core/house/propose") {
+      const outcome = this.#proposeHouse();
+      return send(outcome.status, outcome.body);
+    }
+
+    if (request.method === "POST" && path === "/api/core/house/decide") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const parsed = this.#parseHouseDecision(body.value);
+      if (!parsed.ok) return send(parsed.status, { error: parsed.error });
+      const outcome = this.#decideHouse(parsed.value.proposalId, parsed.value.approve);
+      return send(outcome.status, outcome.body);
+    }
+
     if (request.method === "GET" && path === "/api/core/chat") {
       const requested = url.searchParams.get("companionId");
       const companionId = requested ?? this.#companion.companionId;
@@ -486,7 +651,9 @@ export class FangcunHost {
       }
       const profile = this.#findCompanion(companionId);
       if (!profile) return send(404, { error: "companion_not_found" });
-      if (request.method === "GET") return send(200, this.#view(profile));
+      if (request.method === "GET") {
+        return send(200, this.#companionDetailView(profile));
+      }
       if (request.method !== "PATCH") return send(405, { error: "method_not_allowed" });
       if (profile.ownerUserId !== this.#ownerUserId) return send(403, { error: "not_owner" });
       const body = await this.#readJson(request, MAX_COMPANION_PATCH_BODY_BYTES);
@@ -528,8 +695,15 @@ export class FangcunHost {
    * after the world moved, and approving it could never succeed.
    */
   #currentCandidate(): HomeCandidate | null {
-    if (this.#grant) return null;
+    if (this.#activeGrant()) return null;
     return findHomeCandidates(this.#authority.snapshot)[0] ?? null;
+  }
+
+  /** The current home grant only when it is still usable (not revoked/expired). */
+  #activeGrant(): HomePlotGrant | null {
+    const grant = this.#grant;
+    if (!grant || grant.revokedAt || !isGrantActive(grant, this.#now())) return null;
+    return grant;
   }
 
   #coreState(): unknown {
@@ -538,7 +712,13 @@ export class FangcunHost {
       ownerUserId: this.#ownerUserId,
       companion: this.#companion,
       candidate: this.#currentCandidate() ?? undefined,
-      homeGrantActive: this.#grant !== null,
+      homeGrantActive: this.#activeGrant() !== null,
+      /** Runtime companion state (idle / building / awaiting_approval …) for the PC panel. */
+      companionState: this.#companionState,
+      houseProposal: this.#currentHouseProposal(),
+      /** Demo-only: one startup grant migration, when FANGCUN_DEMO_RELOCATE_GRANT=1 ran it. */
+      grantMigration: this.#grantMigration,
+      build: this.#buildInfo(),
     };
   }
 
@@ -607,7 +787,7 @@ export class FangcunHost {
       scale: this.#petScale,
       actions: PET_ACTIONS,
       activeAction: primary.activeAction,
-      homeGrantActive: this.#grant !== null,
+      homeGrantActive: this.#activeGrant() !== null,
       companionId: primary.companionId,
     });
   }
@@ -825,6 +1005,10 @@ export class FangcunHost {
       // instead of mutating the in-memory authority.
       return { result: { status: "paused", intents: [], reason: "host_stopping" }, world: worldStateToObject(this.#authority.snapshot) };
     }
+    if (this.#buildQueue) {
+      // The block-by-block queue owns the companion; an instant tick would interleave.
+      return { result: { status: "paused", intents: [], reason: "build_in_progress" }, world: worldStateToObject(this.#authority.snapshot) };
+    }
     this.#setCompanionState("planning");
     const result = await this.#authority.runCompanionTick({ authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: this.#trackingReady() });
     this.#lastTick = result;
@@ -845,11 +1029,21 @@ export class FangcunHost {
     return { result, world: worldStateToObject(this.#authority.snapshot) };
   }
 
-  #autonomyStatus(): Readonly<{ enabled: boolean; intervalMs: number; lastRunAtMs: number | null }> {
+  #autonomyStatus(): Readonly<{
+    enabled: boolean;
+    intervalMs: number;
+    lastRunAtMs: number | null;
+    autoHousePropose: boolean;
+    lastHouseProposalAtMs: number | null;
+    houseProposalCooldownUntilMs: number;
+  }> {
     return Object.freeze({
       enabled: this.#autonomyEnabled && this.#autonomyIntervalMs > 0,
       intervalMs: this.#autonomyIntervalMs,
       lastRunAtMs: this.#autonomyLastRunAtMs,
+      autoHousePropose: true,
+      lastHouseProposalAtMs: this.#lastHouseProposalAttemptAtMs,
+      houseProposalCooldownUntilMs: this.#houseProposalCooldownUntilMs,
     });
   }
 
@@ -874,13 +1068,16 @@ export class FangcunHost {
   }
 
   /**
-   * One self-driving behaviour per interval. Priority: propose a home while none is
-   * granted (and none is pending owner approval), then build inside the grant,
-   * otherwise just talk. Every world decision is delegated to WorldAuthority;
-   * this scheduler never writes the world itself.
+   * One self-driving behaviour per interval. Priority: while no home is granted,
+   * propose a home candidate; while a home grant is active, self-drive a house
+   * proposal (highlight a clear 3x3 spot + ask) and only fall back to the legacy
+   * instant starter-home tick when proposing is not possible. Every world decision is
+   * delegated to WorldAuthority; this scheduler never writes the world itself.
    */
   async #autonomyStep(): Promise<void> {
     if (!this.#autonomyEnabled || this.#autonomyIntervalMs <= 0 || this.#server === null) return;
+    // The block-by-block queue owns the companion while it runs.
+    if (this.#buildQueue) return;
     // A manual tick or a previous slow step still owns the companion; skipping
     // keeps two ticks from ever overlapping.
     if (this.#tickCount > 0) return;
@@ -888,7 +1085,7 @@ export class FangcunHost {
     this.#autonomyLastRunAtMs = this.#now();
     if (!this.#companion.autonomyEnabled) return;
     try {
-      if (!this.#grant) {
+      if (!this.#activeGrant()) {
         if (this.#lastTick?.status === "home_approval_required" && this.#lastTick.candidate) {
           this.#maybeAutonomySay();
           return;
@@ -896,11 +1093,41 @@ export class FangcunHost {
         await this.#runTick();
         return;
       }
-      const outcome = await this.#runTick();
-      if (outcome.result.status !== "committed") this.#maybeAutonomySay();
+      // Self-driven house proposal first: the demo expects 小鱼 to ask on its own.
+      if (this.#maybeAutoProposeHouse()) return;
+      // The house flow owns an actively granted plot: never fall back to the legacy
+      // instant starter-home commit while a proposal is pending, cooling down, or a
+      // build is queued. Idle chatter keeps the bubble alive between attempts.
+      if (this.#companionState !== "awaiting_approval") this.#maybeAutonomySay();
     } catch {
       // A best-effort step must never take the Host down; the next interval retries.
     }
+  }
+
+  /**
+   * Self-driven house proposal: highlight a clear footprint inside the granted plot
+   * and ask the owner. In-memory cadence only: at most one attempt per
+   * {@link AUTO_HOUSE_PROPOSAL_INTERVAL_MS}; a user rejection backs off 60 s and a
+   * blocked plot backs off 120 s. Returns true when this cycle was consumed by the
+   * proposal attempt (success or failure) so the legacy tick does not double-act.
+   */
+  #maybeAutoProposeHouse(): boolean {
+    if (this.#buildQueue) return false;
+    if (!this.#activeGrant()) return false;
+    if (this.#companionState === "awaiting_approval") return false;
+    if (this.#currentHouseProposal()) return false;
+    const now = this.#now();
+    if (this.#lastHouseProposalAttemptAtMs !== null
+      && now - this.#lastHouseProposalAttemptAtMs < AUTO_HOUSE_PROPOSAL_INTERVAL_MS) return false;
+    if (now < this.#houseProposalCooldownUntilMs) return false;
+    const outcome = this.#proposeHouse();
+    this.#lastHouseProposalAttemptAtMs = now;
+    if (outcome.status === 200) return true;
+    const error = (outcome.body as { error?: unknown }).error;
+    if (error === "plot_not_clear" || error === "no_safe_plan") {
+      this.#houseProposalCooldownUntilMs = now + HOUSE_PROPOSAL_BLOCKED_COOLDOWN_MS;
+    }
+    return true;
   }
 
   #maybeAutonomySay(): void {
@@ -927,7 +1154,7 @@ export class FangcunHost {
       approvedByUserId: this.#ownerUserId,
       companionId: this.#companion.companionId,
       bounds: candidate.bounds,
-      allowedBlockIds: Object.freeze(["planks", "glass"] as const),
+      allowedBlockIds: Object.freeze(["planks", "glass", HOUSE_SEAT_BLOCK_ID] as const),
       maxBlocksPerPlan: 32,
       maxBlocksPerDay: 128,
       createdAt: now.toISOString(),
@@ -941,6 +1168,399 @@ export class FangcunHost {
       this.#say(COMPANION_HOME_GRANTED_LINE);
     }
     return { approved, body: { approved, world: worldStateToObject(this.#authority.snapshot) } };
+  }
+
+  /** One-time demo migration: make the v0 seat block placeable on an existing grant. */
+  #grantWithSeatAllowlist(grant: HomePlotGrant): HomePlotGrant {
+    if (grant.revokedAt || grant.allowedBlockIds.includes(HOUSE_SEAT_BLOCK_ID) || grant.allowedBlockIds.length >= 8) return grant;
+    return Object.freeze({ ...grant, allowedBlockIds: Object.freeze([...grant.allowedBlockIds, HOUSE_SEAT_BLOCK_ID]) });
+  }
+
+  /**
+   * DEMO-ONLY (opt-in): make a cramped active grant usable for the cottage flow. The
+   * grant-wide 3x3 scan is always the primary path; this only runs when that scan finds
+   * nothing. Widen first (≤6x6, the schema maximum) inside the island footprint; if even
+   * that cannot host a clear 3x3, relocate once to the nearest clear 4x4x4 site.
+   * Caller gates on FANGCUN_DEMO_RELOCATE_GRANT and the persisted one-time marker.
+   */
+  #grantWithHouseRoom(grant: HomePlotGrant, world: WorldState): HomePlotGrant {
+    if (grant.revokedAt || !isGrantActive(grant, this.#now())) return grant;
+    if (findHouseBuildPlan(world, grant) !== null) return grant;
+    for (const bounds of this.#expandedGrantBounds(grant.bounds)) {
+      const candidate: HomePlotGrant = Object.freeze({ ...grant, bounds });
+      if (!validateHomePlotGrant(candidate).ok) continue;
+      if (findHouseBuildPlan(world, candidate) !== null) return this.#recordGrantMigration(grant, candidate, "widened_for_clear_footprint");
+    }
+    // Last resort: relocate to a clear plot-sized site on the island. The world only
+    // needs the 3x3x3 cottage volume, so a clear 4x4x4 candidate guarantees room.
+    const site = findHomeCandidates(world, { width: 4, depth: 4, height: 4, maxResults: 1 })[0];
+    if (site) {
+      const relocated: HomePlotGrant = Object.freeze({ ...grant, bounds: site.bounds });
+      if (validateHomePlotGrant(relocated).ok && findHouseBuildPlan(world, relocated) !== null) {
+        return this.#recordGrantMigration(grant, relocated, "relocated_to_clear_site");
+      }
+    }
+    return grant;
+  }
+
+  #recordGrantMigration(
+    from: HomePlotGrant,
+    to: HomePlotGrant,
+    reason: GrantMigration["reason"],
+  ): HomePlotGrant {
+    this.#grantMigration = Object.freeze({
+      at: this.#now(),
+      grantId: from.grantId,
+      from: from.bounds,
+      to: to.bounds,
+      reason,
+    });
+    // Loud, identifiable demo-only line: grant id, old → new bounds and why.
+    console.log(`[fangcun][DEMO][grant-migration] ${from.grantId}: bounds ${JSON.stringify(from.bounds)} -> ${JSON.stringify(to.bounds)} reason=${reason} (FANGCUN_DEMO_RELOCATE_GRANT=1, demo-only, world blocks untouched)`);
+    return to;
+  }
+
+  /** Deterministic expansion options for a grant AABB (bounds max 6x6 inside x,z ∈ [-7,7)). */
+  #expandedGrantBounds(bounds: HomePlotGrant["bounds"]): readonly HomePlotGrant["bounds"][] {
+    const { min, maxExclusive } = bounds;
+    const options: HomePlotGrant["bounds"][] = [];
+    const push = (minX: number, minZ: number, maxX: number, maxZ: number): void => {
+      if (minX < -7 || minZ < -7 || maxX > 7 || maxZ > 7) return;
+      if (maxX - minX < 3 || maxZ - minZ < 3 || maxX - minX > 6 || maxZ - minZ > 6) return;
+      options.push(Object.freeze({
+        min: Object.freeze({ x: minX, y: min.y, z: minZ }),
+        maxExclusive: Object.freeze({ x: maxX, y: maxExclusive.y, z: maxZ }),
+      }));
+    };
+    // 1) symmetric one-cell growth (the live 4x4 → 6x6 case).
+    push(min.x - 1, min.z - 1, maxExclusive.x + 1, maxExclusive.z + 1);
+    // 2) grow a single axis by one cell on each side.
+    push(min.x - 1, min.z, maxExclusive.x + 1, maxExclusive.z);
+    push(min.x, min.z - 1, maxExclusive.x, maxExclusive.z + 1);
+    // 3) grow each axis up to 6 cells, extending whichever side has room.
+    const grow = (lo: number, hi: number): readonly [number, number] | null => {
+      let left = lo;
+      let right = hi;
+      while (right - left < 6) {
+        if (left - 1 >= -7) left -= 1;
+        else if (right + 1 <= 7) right += 1;
+        else break;
+      }
+      return right - left >= 3 ? [left, right] : null;
+    };
+    const grownX = grow(min.x, maxExclusive.x);
+    const grownZ = grow(min.z, maxExclusive.z);
+    if (grownX && grownZ) push(grownX[0], grownZ[0], grownX[1], grownZ[1]);
+    if (grownX) push(grownX[0], min.z, grownX[1], maxExclusive.z);
+    if (grownZ) push(min.x, grownZ[0], maxExclusive.x, grownZ[1]);
+    return Object.freeze(options);
+  }
+
+  /** Single-companion view plus its pending house proposal (null when none applies). */
+  #companionDetailView(profile: CompanionProfile): Readonly<CompanionView & { houseProposal: PendingHouseProposal | null }> {
+    const pending = this.#currentHouseProposal();
+    return Object.freeze({
+      ...this.#view(profile),
+      houseProposal: pending && pending.companionId === profile.companionId ? pending : null,
+    });
+  }
+
+  /** The pending proposal, or null when none/expired (expired records stay until decided). */
+  #currentHouseProposal(): PendingHouseProposal | null {
+    const pending = this.#pendingHouseProposal;
+    if (!pending) return null;
+    return this.#now() < pending.expiresAtMs ? pending : null;
+  }
+
+  #clearHouseProposal(): void {
+    this.#pendingHouseProposal = null;
+    this.#pendingHousePlan = null;
+  }
+
+  #buildInfo(): BuildSummary {
+    const queue = this.#buildQueue;
+    if (!queue) return this.#lastBuild;
+    return Object.freeze({
+      inProgress: true,
+      completedBlocks: queue.completedBlocks,
+      totalBlocks: queue.ops.length,
+      intervalMs: this.#buildIntervalMs,
+      lastError: null,
+      seatPlaced: false,
+      seatError: null,
+    });
+  }
+
+  /**
+   * Resolves when the current build queue finishes or stops (immediately when idle).
+   * Tests use this instead of sleeping; PC/DSH callers may poll `build` in the state too.
+   */
+  waitForBuildIdle(): Promise<BuildSummary> {
+    if (!this.#buildQueue) return Promise.resolve(this.#lastBuild);
+    return new Promise((resolve) => { this.#buildIdleWaiters.push(resolve); });
+  }
+
+  #settleBuildIdle(): void {
+    const waiters = this.#buildIdleWaiters;
+    this.#buildIdleWaiters = [];
+    for (const resolve of waiters) resolve(this.#lastBuild);
+  }
+
+  #parseHouseDecision(value: unknown): { ok: true; value: Readonly<{ proposalId: string; approve: boolean }> } | { ok: false; status: number; error: string } {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return { ok: false, status: 400, error: "invalid_house_decision" };
+    const input = value as Record<string, unknown>;
+    if (Object.keys(input).length !== 2 || !Object.hasOwn(input, "proposalId") || !Object.hasOwn(input, "approve")) {
+      return { ok: false, status: 400, error: "invalid_house_decision" };
+    }
+    const proposalId = input.proposalId;
+    if (typeof proposalId !== "string" || proposalId.length < 1 || proposalId.length > 128) {
+      return { ok: false, status: 400, error: "invalid_house_decision" };
+    }
+    if (typeof input.approve !== "boolean") return { ok: false, status: 400, error: "invalid_house_decision" };
+    return { ok: true, value: Object.freeze({ proposalId, approve: input.approve }) };
+  }
+
+  /**
+   * Highlights a clear 3x3x3 cottage area somewhere inside the granted plot and asks
+   * the owner. No world write happens here; the proposal is in-memory and expires.
+   */
+  #proposeHouse(): { status: number; body: unknown } {
+    if (this.#buildQueue) return { status: 409, body: { error: "build_in_progress" } };
+    const pending = this.#pendingHouseProposal;
+    if (pending && this.#now() < pending.expiresAtMs) return { status: 409, body: { error: "proposal_pending" } };
+    if (pending) this.#clearHouseProposal();
+    const grant = this.#grant;
+    if (!grant || grant.revokedAt || !isGrantActive(grant, this.#now())
+      || grant.companionId !== this.#companion.companionId) {
+      return { status: 409, body: { error: "grant_missing" } };
+    }
+    // Search the whole grant for a clear footprint: the live demo world already has a
+    // house/player blocks near the plot origin. `plot_not_clear` means no slot at all.
+    if (!canBuildHousePlan(grant)) return { status: 409, body: { error: "no_safe_plan" } };
+    const plan = findHouseBuildPlan(this.#authority.snapshot, grant);
+    if (!plan) return { status: 409, body: { error: "plot_not_clear" } };
+    const proposalId = `house:${this.#idFactory()}`.slice(0, 128);
+    const proposal: PendingHouseProposal = Object.freeze({
+      proposalId,
+      companionId: this.#companion.companionId,
+      bounds: plan.bounds,
+      planBlockCount: plan.blockCount,
+      expiresAtMs: this.#now() + HOUSE_PROPOSAL_TTL_MS,
+    });
+    this.#pendingHouseProposal = proposal;
+    this.#pendingHousePlan = plan;
+    // Frame first: tablets render the highlighted plot, then the speech/state updates.
+    this.#broadcast({
+      protocolVersion: 1,
+      type: "companion_build_proposal",
+      worldId: this.#worldId,
+      companionId: proposal.companionId,
+      proposalId: proposal.proposalId,
+      bounds: proposal.bounds,
+      blockCount: proposal.planBlockCount,
+      expiresAtMs: proposal.expiresAtMs,
+    });
+    this.#setCompanionState("awaiting_approval");
+    this.#say(COMPANION_HOUSE_PROPOSAL_LINE);
+    return { status: 200, body: { proposal } };
+  }
+
+  #decideHouse(proposalId: string, approve: boolean): { status: number; body: unknown } {
+    const pending = this.#pendingHouseProposal;
+    if (!pending || pending.proposalId !== proposalId) {
+      return { status: 404, body: { error: "proposal_not_found" } };
+    }
+    if (this.#now() >= pending.expiresAtMs) {
+      this.#clearHouseProposal();
+      this.#setCompanionState("idle");
+      return { status: 409, body: { error: "proposal_expired" } };
+    }
+    const plan = this.#pendingHousePlan;
+    this.#clearHouseProposal();
+    if (!approve) {
+      // Respect the user's "no": do not ask again for the reject cooldown window.
+      this.#houseProposalCooldownUntilMs = this.#now() + HOUSE_PROPOSAL_REJECT_COOLDOWN_MS;
+      this.#setCompanionState("idle");
+      this.#say(COMPANION_HOUSE_REJECTED_LINE);
+      return { status: 200, body: { approved: false, proposalId } };
+    }
+    if (!plan || !this.#grant || this.#grant.revokedAt) {
+      this.#setCompanionState("idle");
+      return { status: 409, body: { error: "grant_missing" } };
+    }
+    this.#startBuildQueue(plan, proposalId);
+    return { status: 200, body: { approved: true, proposalId, planBlockCount: plan.blockCount } };
+  }
+
+  /** Starts the one-block-per-interval queue; the HTTP response returns immediately. */
+  #startBuildQueue(plan: HouseBuildPlan, proposalId: string): void {
+    const grant = this.#grant;
+    if (!grant) return;
+    this.#buildQueue = {
+      companionId: this.#companion.companionId,
+      proposalId,
+      plotId: grant.plotId,
+      grantId: grant.grantId,
+      grantRev: grant.grantRev,
+      ops: plan.operations,
+      seat: plan.seat,
+      index: 0,
+      completedBlocks: 0,
+      expectedRev: this.#authority.snapshot.rev,
+      timer: null,
+    };
+    this.#setCompanionState("building");
+    this.#say(COMPANION_HOUSE_START_LINE);
+    this.#scheduleBuildStep(0);
+  }
+
+  #scheduleBuildStep(delayMs: number): void {
+    const queue = this.#buildQueue;
+    if (!queue) return;
+    queue.timer = this.#buildStepScheduler(() => this.#runBuildStep(), Math.max(0, delayMs));
+  }
+
+  /** Commits exactly one planned block, then schedules the next step. */
+  #runBuildStep(): void {
+    const queue = this.#buildQueue;
+    if (!queue) return;
+    queue.timer = null;
+    if (this.#store === null) {
+      this.#stopBuild("host_stopping");
+      return;
+    }
+    if (queue.index >= queue.ops.length) {
+      this.#finishBuild(queue);
+      return;
+    }
+    const grant = this.#grant;
+    if (!grant || grant.revokedAt || grant.grantId !== queue.grantId || grant.grantRev !== queue.grantRev) {
+      this.#stopBuild("grant_revoked");
+      return;
+    }
+    // Re-check before each step: a player edit (or any commit) invalidates the queue.
+    if (this.#authority.snapshot.rev !== queue.expectedRev) {
+      this.#stopBuild("stale_revision");
+      return;
+    }
+    const operation = queue.ops[queue.index];
+    if (!operation) {
+      this.#stopBuild("invalid_step");
+      return;
+    }
+    const decision = this.#authority.commitHomeStep({
+      plotId: queue.plotId,
+      companionId: queue.companionId,
+      grantRev: queue.grantRev,
+      baseRev: queue.expectedRev,
+      operation,
+    }, { authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: this.#trackingReady() });
+    if (!decision.accepted || !decision.commit) {
+      this.#stopBuild(decision.reason ?? "build_step_rejected");
+      return;
+    }
+    if (!this.#commitAndBroadcast(decision.commit)) {
+      this.#stopBuild("commit_persist_failed");
+      return;
+    }
+    queue.index += 1;
+    queue.completedBlocks += 1;
+    queue.expectedRev = decision.world.rev;
+    this.#scheduleBuildStep(this.#buildIntervalMs);
+  }
+
+  /** Stops the queue with an honest reason; partial blocks stay committed on purpose. */
+  #stopBuild(reason: string): void {
+    const queue = this.#buildQueue;
+    if (!queue) return;
+    this.#dropBuildQueue();
+    this.#lastBuild = Object.freeze({
+      inProgress: false,
+      completedBlocks: queue.completedBlocks,
+      totalBlocks: queue.ops.length,
+      intervalMs: this.#buildIntervalMs,
+      lastError: reason,
+      seatPlaced: false,
+      seatError: null,
+    });
+    this.#settleBuildIdle();
+    this.#setCompanionState("idle");
+    this.#say(COMPANION_HOUSE_STOPPED_LINE);
+  }
+
+  /**
+   * Queue finished: try one last seat placement (best effort), announce the sit
+   * expression, and leave the companion idle at rest.
+   */
+  #finishBuild(queue: BuildQueueState): void {
+    this.#dropBuildQueue();
+    let seatPlaced = false;
+    let seatError: string | null = null;
+    const grant = this.#grant;
+    if (grant && !grant.revokedAt && this.#authority.snapshot.rev === queue.expectedRev) {
+      const seatDecision = this.#authority.commitHomeStep({
+        plotId: queue.plotId,
+        companionId: queue.companionId,
+        grantRev: queue.grantRev,
+        baseRev: queue.expectedRev,
+        operation: Object.freeze({ type: "place", at: queue.seat, blockId: HOUSE_SEAT_BLOCK_ID }),
+      }, { authenticatedOwnerUserId: this.#ownerUserId }, { trackingReady: this.#trackingReady() });
+      if (seatDecision.accepted && seatDecision.commit) {
+        if (this.#commitAndBroadcast(seatDecision.commit)) seatPlaced = true;
+        else seatError = "commit_persist_failed";
+      } else {
+        seatError = seatDecision.reason ?? "seat_rejected";
+      }
+    } else if (!grant || grant.revokedAt) {
+      seatError = "grant_revoked";
+    } else {
+      seatError = "stale_revision";
+    }
+    this.#lastBuild = Object.freeze({
+      inProgress: false,
+      completedBlocks: queue.completedBlocks,
+      totalBlocks: queue.ops.length,
+      intervalMs: this.#buildIntervalMs,
+      lastError: null,
+      seatPlaced,
+      seatError,
+    });
+    this.#settleBuildIdle();
+    // Do not immediately ask to build another house right after finishing one.
+    this.#houseProposalCooldownUntilMs = this.#now() + HOUSE_PROPOSAL_POST_BUILD_COOLDOWN_MS;
+    this.#setCompanionState("idle");
+    this.#say(COMPANION_HOUSE_DONE_LINE);
+    // Reuse the existing companion_action "sit" signal; no new expression frame.
+    this.#broadcastCompanionAction("sit");
+    const primary = this.#findCompanion(this.#companion.companionId);
+    if (primary && primary.activeAction !== "sit") {
+      const nextProfiles = this.#replaceIn(primary.companionId, Object.freeze({ ...primary, activeAction: "sit" as const }));
+      if (this.#saveSocial(nextProfiles)) this.#companionProfiles = nextProfiles;
+    }
+  }
+
+  #dropBuildQueue(): void {
+    const queue = this.#buildQueue;
+    this.#buildQueue = null;
+    queue?.timer?.();
+  }
+
+  /**
+   * Revokes the current home grant (loopback/demo helper for the PC panel and tests).
+   * A running build queue stops on its next step with `grant_revoked`.
+   */
+  revokeHomeGrant(): boolean {
+    const grant = this.#grant;
+    const store = this.#store;
+    if (!grant || grant.revokedAt || !store) return false;
+    if (!this.#authority.revokeHomeGrant(grant.plotId, { authenticatedOwnerUserId: this.#ownerUserId })) return false;
+    const revokedGrant: HomePlotGrant = Object.freeze({ ...grant, revokedAt: new Date(this.#now()).toISOString() });
+    store.saveGrant(revokedGrant);
+    this.#grant = revokedGrant;
+    this.#clearHouseProposal();
+    if (this.#buildQueue) this.#stopBuild("grant_revoked");
+    this.#setCompanionState("idle");
+    return true;
   }
 
   #handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {

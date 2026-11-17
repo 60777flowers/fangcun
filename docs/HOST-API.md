@@ -200,6 +200,17 @@ item 规则（v0）：catalog 是冻结常量，共 3 件且顺序稳定 —— 
 
 聊天按宠物隔离：`GET /api/core/chat?companionId=...` → `{messages, companionId}`；`POST /api/core/chat {companionId?, text}` → `{reply, state, companionId}`。省略 `companionId` 时仍指向主 companion（`fish-1`），旧 UI/测试行为不变；未知 `companionId` → `404 companion_not_found`；聊天仅内存保存（每宠物 30 条），不持久化。
 
+**房子建造提案 + 逐块建造（视频演示流程）**
+
+- `POST /api/core/house/propose`（无 body）：在已授权 home plot 的 AABB 内**搜索**一个 3×3 footprint（按 x/z 步进 1，优先靠近 plot 中心，距离相同按 z→x 确定性 tie-break；最多 (w−2)(d−2) ≤ 36 个候选），要求计划会写入的格子（地板/墙/屋顶 + 座位格）全部为空；origin 被旧建筑/玩家方块占用时自动换到其它空位。找到后生成 24 块小屋脚本并保存**内存** pending 提案（TTL **120 s**）；广播新的 `companion_build_proposal` 帧（`bounds` 指向被选中的 footprint）、`companion_state{state:"awaiting_approval"}`，并让 companion 说“我可以在这里盖个小房子吗？”。响应 `{proposal:{proposalId,companionId,bounds,planBlockCount,expiresAtMs}}`。失败码：`409 grant_missing`（无有效 grant）、`409 build_in_progress`、`409 proposal_pending`、`409 no_safe_plan`（grant 太小/材料不允许）、`409 plot_not_clear`（**所有**候选 footprint 都不可用）。
+- `POST /api/core/house/decide {proposalId, approve}`（严格 body，未知字段拒绝）：`approve:true` → 立即返回 `{approved:true,proposalId,planBlockCount}` 并启动逐块队列；`approve:false` → 清空提案、companion 说一句、回到 idle，**世界不变**。失败码：`404 proposal_not_found`（未知/已消费/不匹配）、`409 proposal_expired`（超过 120 s TTL）、`400 invalid_house_decision`。
+- 逐块节奏：默认**每 ~600 ms 提交 1 块**（`FANGCUN_BUILD_INTERVAL_MS` 覆盖，`0` = 尽快，用于测试/演示加速）。每一步都经 `WorldAuthority.commitHomeStep` 重新校验 grant/allowlist/AABB/baseRev/占用/当日预算，成功后持久化并广播**普通 `commit`**（`actor:"ai"`，每帧恰好 1 个 place op）；队列运行期间 `companion_state=building`，完成后 `idle`。24 块顺序：地板 9 → 墙 7（留门洞、1 块玻璃窗）→ 屋顶 8（留天窗角），材料仅 planks/glass。
+- 收尾：在屋内中心上方尝试放 1 块 `stairs` 作为**座位**（座位是 companion 行为概念，`stairs` 只是普通可放置方块）；随后广播 `companion_action{actionId:"sit"}` + `companion_say` 收尾（复用现有帧，不新增表情协议），并把手势状态同步到 pet 视图。座位放置失败不影响整次建造成功，原因记录在 `build.seatError`。
+- 竞态与失败：全局只允许一个队列（建造中再次 propose → `409 build_in_progress`）。每一步前复查 world rev 与 grant：玩家编辑导致 rev 变化 → 停止并记 `stale_revision`；grant 撤销 → 停止并记 `grant_revoked`；其它单步拒绝码原样记录（如 `occupied`/`outside_plot`/`block_not_allowed`/`daily_budget`）。**Host 关闭即丢弃队列（不恢复）**，已提交的块保留。
+- 自驱动提案（视频演示的“小鱼主动问”）：autonomy tick 在 **grant 有效 + 无 pending 提案 + 无建造队列 + 当前不是 awaiting_approval + plot 内存在可用 3×3（即新的全 plot 搜索）+ 距上次尝试 >45 s + 不在冷却期** 时调用与 `POST /house/propose` 相同的路径，广播 `companion_build_proposal` + `companion_state awaiting_approval` + “我可以在这里盖个小房子吗？”。冷却规则（仅内存，不落库）：主人拒绝 → 60 s 内不再问；`plot_not_clear` / `no_safe_plan` → 120 s 退避；一次小屋建完 → 120 s 内不立刻再问。grant 有效期间 autonomy 不再走旧的“一次性 12 块”提交路径（手动 `POST /companion/tick` 仍保留旧行为以兼容测试）。
+- **演示迁移（opt-in，仅本地 demo）**：旧流程在 4×4 grant 原点盖过 2×2 starter home，会挡死该 grant 内**所有** 3×3 候选；live 世界还可能散布玩家方块。默认**关闭**：scan 找不到 3×3 时仍返回 `plot_not_clear`，不做任何迁移。仅当启动环境变量 `FANGCUN_DEMO_RELOCATE_GRANT=1` 且单一 active grant 的 scan 找不到可用 3×3 时：先把 grant 放大到 ≤6×6，仍不行则把 grant 移到最近的空 4×4×4 site；**不删除、不移动任何世界方块**（旧房子原样保留），revoked/多 grant 存档不动，并且在 `meta['demoGrantMigrated']` 打一次性标记，重启不会重复迁移。迁移发生时会打印一条显眼的 `[fangcun][DEMO][grant-migration]` 日志（grant id、旧→新 bounds、原因），并在 `GET /api/core/state` 的 `grantMigration:{at,grantId,from,to,reason}` 中暴露一次。**这不是生产行为**：真实产品移动用户地块前必须征求 owner 同意，故用显式 demo 开关隔离。
+- 状态暴露：`GET /api/core/state` 增加 `houseProposal`、`companionState`、`grantMigration` 与 `build:{inProgress,completedBlocks,totalBlocks,intervalMs,lastError,seatPlaced,seatError}`（PC 面板可用 `companionState === "awaiting_approval" && houseProposal != null` 显示“等待主人同意盖房”）；`GET /api/core/autonomy` 增加 `autoHousePropose:true`、`lastHouseProposalAtMs`、`houseProposalCooldownUntilMs`。`GET /api/core/companions/{id}` 也带 `houseProposal`。提案与队列均为内存态，不落库。
+
 ### 4.4 MCP（本机）
 
 - 默认 stdio：`node packages/mcp-adapter/dist/server.js --host-url http://127.0.0.1:4174 --token-file <path>`。
@@ -214,9 +225,10 @@ item 规则（v0）：catalog 是冻结常量，共 3 件且顺序稳定 —— 
 
 ```ts
 type Coord = { x: number; y: number; z: number };          // 整数，WorldSpec v1 范围
-// 基础 8 个保持原顺序；装饰 8 个只允许在末尾追加（存档方块序号 index+1 因而稳定）。
+// 基础 8 个保持原顺序；其余 9 个只允许在末尾追加（存档方块序号 index+1 因而稳定）。
 type BlockId = "grass" | "dirt" | "stone" | "planks" | "log" | "leaves" | "sand" | "glass"
-             | "brick" | "tile" | "wool_white" | "wool_red" | "bookshelf" | "lantern" | "pumpkin" | "flower";
+             | "brick" | "tile" | "wool_white" | "wool_red" | "bookshelf" | "lantern" | "pumpkin" | "flower"
+             | "stairs";
 type Operation =
   | { type: "place"; at: Coord; blockId: BlockId }
   | { type: "break"; at: Coord; expectedBlock: BlockId };
@@ -228,7 +240,7 @@ type Actor = "player" | "ai" | "system";
 
 - 数据域 `16×16×16`，`origin=[-8,0,-8]`，合法 `x,z∈[-8,8)`、`y∈[0,16)`。
 - 每格 3 cm；footprint `x,z∈[-7,7)`；地形 `y∈[0,1)`（单层）；建造从 `y≥1` 开始。
-- 方块 ID 为稳定字符串（当前 16 个：8 基础 + 8 装饰，规范顺序以 `BLOCK_IDS` 为准）；未知 ID 在**权威协议/存档加载**处 fail closed。
+- 方块 ID 为稳定字符串（当前 17 个：8 基础 + 8 装饰 + 1 座位块 `stairs`，规范顺序以 `BLOCK_IDS` 为准；`stairs` 是普通可放置方块，“座位”只是 companion 行为语义）；未知 ID 在**权威协议/存档加载**处 fail closed。
 - 单笔事务最多 256 个 op；世界最多 4096 个非空块。
 
 ### 5.2 错误码
@@ -315,7 +327,8 @@ type Actor = "player" | "ai" | "system";
 | `plot_revoked` | `grantId, revokedAtMs, reason?` | 收回 |
 | `companion_state` | `companionId, state, currentPlanId?, bubbleText?, updatedAtMs` | `idle/observing/planning/awaiting_approval/building/cooldown/paused`；实现中也作为 pet/背包变更后的轻量刷新信号（state 可不变） |
 | `companion_say` | `companionId, text, expiresAtMs` | ≤80 字；不含 TTS |
-| `companion_action` | `companionId, actionId, expiresAtMs` | 桌宠一次性动作；`actionId ∈ {stand, sit, lie, wave, jump, look_around}`，客户端播放/保持到 `expiresAtMs`；由 `PATCH\|POST /api/core/pet` 的 `action` 字段触发（未知 id 被 Host 拒绝）；名称/persona/scale 变更不新增消息，只重新广播 `companion_state` |
+| `companion_action` | `companionId, actionId, expiresAtMs` | 桌宠一次性动作；`actionId ∈ {stand, sit, lie, wave, jump, look_around}`，客户端播放/保持到 `expiresAtMs`；由 `PATCH\|POST /api/core/pet` 的 `action` 字段触发（未知 id 被 Host 拒绝）；房子建完后也用它发 `sit` 作为坐下/爱心/💤 表情信号 |
+| `companion_build_proposal` | `companionId, proposalId, bounds{min,maxExclusive}, blockCount, expiresAtMs` | companion 高亮一块待批准的小屋建造区；`POST /api/core/house/propose` 触发，TTL 120 s；客户端随后经 `POST /api/core/house/decide` 批/拒。批准后逐块 `commit`（每帧 1 op） |
 | `undo_result` | `requestId, accepted, code?, rev?` | 撤销结果；成功时另有 `commit` |
 | `error` | `code, message, retryable, detail?` | 协议级错误；可能随后关闭连接 |
 
@@ -405,7 +418,8 @@ CREATE TABLE meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ); -- schemaVersion, worldId, createdAt, worldSchemaHash, blockCatalogHash,
-   -- companionProfiles, userInventory, petScale, warehouseSeedVersion
+   -- companionProfiles, userInventory, petScale, warehouseSeedVersion,
+   -- demoGrantMigrated（仅 FANGCUN_DEMO_RELOCATE_GRANT=1 的一次性 demo 迁移标记）
    --（旧版 petProfile 仅迁移时读）
 
 CREATE TABLE world (

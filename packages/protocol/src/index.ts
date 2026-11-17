@@ -88,8 +88,27 @@ export type CompanionActionMessage = Readonly<{
   expiresAtMs: number;
 }>;
 
+/** Half-open voxel AABB used by the house-proposal flow (same shape as the grant bounds). */
+export type CellBounds = Readonly<{ min: Coord; maxExclusive: Coord }>;
+
+/**
+ * The companion highlights a build area inside the granted home plot and asks the
+ * owner to approve it. The tablet renders the highlighted plot and can send the
+ * decision through the Host's loopback endpoints.
+ */
+export type CompanionBuildProposalMessage = Readonly<{
+  protocolVersion: typeof PROTOCOL_VERSION;
+  type: "companion_build_proposal";
+  worldId: string;
+  companionId: string;
+  proposalId: string;
+  bounds: CellBounds;
+  blockCount: number;
+  expiresAtMs: number;
+}>;
+
 export type ClientMessage = ClientIntent | HelloMessage | ResyncMessage | ApprovePlanMessage | PingMessage;
-export type ServerMessage = WelcomeMessage | ServerAck | CommitMessage | PongMessage | ApprovalGrantedMessage | CompanionStateMessage | CompanionSayMessage | CompanionActionMessage;
+export type ServerMessage = WelcomeMessage | ServerAck | CommitMessage | PongMessage | ApprovalGrantedMessage | CompanionStateMessage | CompanionSayMessage | CompanionActionMessage | CompanionBuildProposalMessage;
 
 export type CommitMessage = Readonly<{
   protocolVersion: typeof PROTOCOL_VERSION;
@@ -252,6 +271,52 @@ export function validateCompanionActionMessage(value: unknown): ValidationResult
   };
 }
 
+export function validateCompanionBuildProposalMessage(value: unknown): ValidationResult<CompanionBuildProposalMessage> {
+  if (!isRecord(value) || value.protocolVersion !== PROTOCOL_VERSION || value.type !== "companion_build_proposal") {
+    return { ok: false, error: "unsupported_message" };
+  }
+  if (!hasExactKeys(value, ["protocolVersion", "type", "worldId", "companionId", "proposalId", "bounds", "blockCount", "expiresAtMs"])) {
+    return { ok: false, error: "invalid_message_shape" };
+  }
+  if (!isNonEmptyString(value.worldId) || !isNonEmptyString(value.companionId) || !isNonEmptyString(value.proposalId)) {
+    return { ok: false, error: "invalid_message_identity" };
+  }
+  if (!isRecord(value.bounds) || !hasExactKeys(value.bounds, ["min", "maxExclusive"])
+    || !isCoord(value.bounds.min) || !isCoord(value.bounds.maxExclusive)) {
+    return { ok: false, error: "invalid_proposal_bounds" };
+  }
+  const min = value.bounds.min;
+  const maxExclusive = value.bounds.maxExclusive;
+  if (maxExclusive.x <= min.x || maxExclusive.y <= min.y || maxExclusive.z <= min.z) return { ok: false, error: "invalid_proposal_bounds" };
+  try {
+    coordToIndex(min);
+  } catch {
+    return { ok: false, error: "invalid_proposal_bounds" };
+  }
+  if (!Number.isSafeInteger(value.blockCount) || (value.blockCount as number) < 1 || (value.blockCount as number) > 64) {
+    return { ok: false, error: "invalid_proposal_block_count" };
+  }
+  if (!Number.isSafeInteger(value.expiresAtMs) || (value.expiresAtMs as number) < 0) {
+    return { ok: false, error: "invalid_proposal_expiry" };
+  }
+  return {
+    ok: true,
+    value: Object.freeze({
+      protocolVersion: PROTOCOL_VERSION,
+      type: "companion_build_proposal",
+      worldId: value.worldId,
+      companionId: value.companionId,
+      proposalId: value.proposalId,
+      bounds: Object.freeze({
+        min: Object.freeze({ x: min.x, y: min.y, z: min.z }),
+        maxExclusive: Object.freeze({ x: maxExclusive.x, y: maxExclusive.y, z: maxExclusive.z }),
+      }),
+      blockCount: value.blockCount as number,
+      expiresAtMs: value.expiresAtMs as number,
+    }),
+  };
+}
+
 export function validateServerMessage(value: unknown): ValidationResult<ServerMessage> {
   if (!isRecord(value)) return { ok: false, error: "invalid_message" };
   if (value.type === "ack") return validateServerAck(value);
@@ -262,6 +327,7 @@ export function validateServerMessage(value: unknown): ValidationResult<ServerMe
   if (value.type === "companion_state") return validateCompanionStateMessage(value);
   if (value.type === "companion_say") return validateCompanionSayMessage(value);
   if (value.type === "companion_action") return validateCompanionActionMessage(value);
+  if (value.type === "companion_build_proposal") return validateCompanionBuildProposalMessage(value);
   return { ok: false, error: "unsupported_message" };
 }
 

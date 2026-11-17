@@ -73,6 +73,11 @@ const IDLE_LINES: readonly string[] = Object.freeze([
 
 export const COMPANION_HOME_PROPOSAL_LINE = "我想住这块地，可以吗？";
 export const COMPANION_HOME_GRANTED_LINE = "这块地归我啦！";
+export const COMPANION_HOUSE_PROPOSAL_LINE = "我可以在这里盖个小房子吗？";
+export const COMPANION_HOUSE_REJECTED_LINE = "好吧，那我再等等～";
+export const COMPANION_HOUSE_START_LINE = "开工啦！一块一块慢慢来～";
+export const COMPANION_HOUSE_DONE_LINE = "房子盖好啦，我坐这儿陪你～💤";
+export const COMPANION_HOUSE_STOPPED_LINE = "这里好像放不下了，我先停一下。";
 
 /** FNV-1a display hash: stable across runs and cheap enough for a chat turn. */
 function stableIndex(seed: string, length: number): number {

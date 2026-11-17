@@ -59,9 +59,11 @@ Android 端按 `tileSize/columns/rows` 换算 UV 即可。
   只提交 mapping，避免版权素材进入仓库。
 - 缺图会**构建失败并报出具体文件名**，不会静默使用占位色。
 
-## 当前映射（16 个方块）
+## 当前映射（17 个方块）
 
 grass / dirt / stone / planks / log / leaves / sand / glass /
-brick / tile / wool_white / wool_red / bookshelf / lantern / pumpkin / flower
+brick / tile / wool_white / wool_red / bookshelf / lantern / pumpkin / flower / stairs
+
+`stairs` 是 v0 座位块，复用 `planks_oak` 三个面；companion 建完小屋后会把它放在屋内中心当作座位。
 
 未在 mapping 中声明的方块 id 会由 Android 端回退为纯色方块（防止新方块导致崩溃）。

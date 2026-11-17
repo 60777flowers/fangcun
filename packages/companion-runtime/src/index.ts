@@ -243,6 +243,132 @@ export type HomeAutoCommitContext = Readonly<{
   nowMs: number;
 }>;
 
+/** Footprint of the v0 readable cottage in world cells (floor is footprint²). */
+export const HOUSE_FOOTPRINT = 3;
+/** Total plan blocks: 9 floor + 7 wall/door/window + 8 roof = 24 (≤ the 24-block demo budget). */
+export const HOUSE_PLAN_BLOCK_COUNT = 24;
+/** Seat block the companion places after the queue finishes (one extra placement, not part of the 24). */
+export const HOUSE_SEAT_BLOCK_ID = "stairs" as const;
+
+export type HouseBuildPlan = Readonly<{
+  origin: Coord;
+  bounds: Readonly<{ min: Coord; maxExclusive: Coord }>;
+  /** Ordered floor → walls (door gap) → roof; one place op per step. */
+  operations: readonly Extract<IntentOperation, { type: "place" }>[];
+  blockCount: number;
+  /** Interior cell above the floor centre: where the seat block goes. */
+  seat: Coord;
+  /** Ground-floor centre the companion walks to before sitting. */
+  centre: Coord;
+}>;
+
+/**
+ * Deterministic v0 cottage script on a 3x3 footprint anchored at `origin` (defaults
+ * to the grant origin). Pure and side-effect free.
+ */
+export function buildHousePlan(grant: HomePlotGrant, origin?: Coord): HouseBuildPlan | null {
+  if (!grant || !grant.bounds || !grant.bounds.min || !grant.bounds.maxExclusive) return null;
+  const { min, maxExclusive } = grant.bounds;
+  if (maxExclusive.x - min.x < HOUSE_FOOTPRINT || maxExclusive.z - min.z < HOUSE_FOOTPRINT
+    || maxExclusive.y - min.y < HOUSE_FOOTPRINT) return null;
+  const x = origin?.x ?? min.x;
+  const y = origin?.y ?? min.y;
+  const z = origin?.z ?? min.z;
+  // The footprint must fit inside the grant AABB and start on/above the build layer.
+  if (x < min.x || z < min.z || y < min.y || y < WORLD_SPEC.terrainTopY
+    || x + HOUSE_FOOTPRINT > maxExclusive.x || z + HOUSE_FOOTPRINT > maxExclusive.z
+    || y + HOUSE_FOOTPRINT > maxExclusive.y) return null;
+  const allowed = new Set(grant.allowedBlockIds);
+  const place = (px: number, py: number, pz: number, blockId: BlockId): Extract<IntentOperation, { type: "place" }> =>
+    Object.freeze({ type: "place", at: Object.freeze({ x: px, y: py, z: pz }), blockId });
+  const operations: Array<Extract<IntentOperation, { type: "place" }>> = [];
+  // 1) Floor 3x3 at the plot's first buildable layer.
+  for (let dz = 0; dz < HOUSE_FOOTPRINT; dz += 1) {
+    for (let dx = 0; dx < HOUSE_FOOTPRINT; dx += 1) operations.push(place(x + dx, y, z + dz, "planks"));
+  }
+  // 2) Walls at floor+1: a clockwise ring with a front-centre door gap and one glass window.
+  const ring = [[0, 0], [1, 0], [2, 0], [2, 1], [2, 2], [1, 2], [0, 2], [0, 1]] as const;
+  for (const [dx, dz] of ring) {
+    if (dx === 1 && dz === 0) continue; // door gap
+    const isWindow = dx === 2 && dz === 1;
+    operations.push(place(x + dx, y + 1, z + dz, isWindow ? "glass" : "planks"));
+  }
+  // 3) Roof at floor+2: 3x3 minus one skylight corner.
+  for (let dz = 0; dz < HOUSE_FOOTPRINT; dz += 1) {
+    for (let dx = 0; dx < HOUSE_FOOTPRINT; dx += 1) {
+      if (dx === 0 && dz === HOUSE_FOOTPRINT - 1) continue; // skylight
+      operations.push(place(x + dx, y + 2, z + dz, "planks"));
+    }
+  }
+  if (operations.length !== HOUSE_PLAN_BLOCK_COUNT) return null;
+  // Every planned block must be inside the plot and inside the grant allowlist.
+  for (const op of operations) {
+    if (!isInsidePlot(grant, op.at) || op.at.y < WORLD_SPEC.terrainTopY || !allowed.has(op.blockId)) return null;
+  }
+  const frozenOperations = Object.freeze(operations);
+  return Object.freeze({
+    origin: Object.freeze({ x, y, z }),
+    bounds: Object.freeze({
+      min: Object.freeze({ x, y, z }),
+      maxExclusive: Object.freeze({
+        x: x + HOUSE_FOOTPRINT,
+        y: y + HOUSE_FOOTPRINT,
+        z: z + HOUSE_FOOTPRINT,
+      }),
+    }),
+    operations: frozenOperations,
+    blockCount: frozenOperations.length,
+    seat: Object.freeze({ x: x + 1, y: y + 1, z: z + 1 }),
+    centre: Object.freeze({ x: x + 1, y, z: z + 1 }),
+  });
+}
+
+/** True when the grant could host a cottage at all (size + allowlist), ignoring occupancy. */
+export function canBuildHousePlan(grant: HomePlotGrant): boolean {
+  return buildHousePlan(grant) !== null;
+}
+
+/** Half-open world cell AABB of every cell the plan will write (walls/roof/floor + seat). */
+function planCells(plan: HouseBuildPlan): readonly Coord[] {
+  return [...plan.operations.map((operation) => operation.at), plan.seat];
+}
+
+/**
+ * Scans the grant for a cottage footprint instead of assuming the plot origin: the
+ * live demo world already has a house/player blocks near the origin. Candidate
+ * origins step by 1 in x/z (≤ (width-2)×(depth-2) ≤ 36 for a v1 grant), ordered by
+ * distance to the plot centre with a deterministic z-then-x tie-break; the first
+ * candidate whose planned cells and seat cell are all empty wins.
+ */
+export function findHouseBuildPlan(world: WorldState, grant: HomePlotGrant): HouseBuildPlan | null {
+  if (!world || !world.blocks || world.blocks.length !== WORLD_SPEC.maxBlocks || !grant) return null;
+  if (!canBuildHousePlan(grant)) return null;
+  const { min, maxExclusive } = grant.bounds;
+  const maxDx = maxExclusive.x - min.x - HOUSE_FOOTPRINT;
+  const maxDz = maxExclusive.z - min.z - HOUSE_FOOTPRINT;
+  if (maxDx < 0 || maxDz < 0) return null;
+  const centre2X = min.x + maxExclusive.x;
+  const centre2Z = min.z + maxExclusive.z;
+  const candidates: Array<{ origin: Coord; distance: number }> = [];
+  for (let dz = 0; dz <= maxDz; dz += 1) {
+    for (let dx = 0; dx <= maxDx; dx += 1) {
+      const origin = Object.freeze({ x: min.x + dx, y: min.y, z: min.z + dz });
+      const centre2CandidateX = 2 * origin.x + HOUSE_FOOTPRINT;
+      const centre2CandidateZ = 2 * origin.z + HOUSE_FOOTPRINT;
+      const distance = (centre2CandidateX - centre2X) ** 2 + (centre2CandidateZ - centre2Z) ** 2;
+      candidates.push({ origin, distance });
+    }
+  }
+  candidates.sort((a, b) => a.distance - b.distance || a.origin.z - b.origin.z || a.origin.x - b.origin.x);
+  for (const candidate of candidates) {
+    const plan = buildHousePlan(grant, candidate.origin);
+    if (!plan) continue;
+    const clear = planCells(plan).every((cell) => world.blocks[coordToIndex(cell)] === null);
+    if (clear) return plan;
+  }
+  return null;
+}
+
 /** Preflight only. This never authorizes/persists a commit; worldd must recheck and spend quota atomically. */
 export async function checkHomeAutoCommitEligibility(world: WorldState, companion: CompanionInstance, grant: HomePlotGrant, plan: HomeBuildPlan, context: HomeAutoCommitContext, hashCanonicalDiff: HashCanonicalDiff = sha256CanonicalDiff): Promise<CheckResult> {
   if (!context.trustedGrant || context.authenticatedOwnerUserId !== grant.ownerUserId) return { ok: false, code: "grant_missing" };
