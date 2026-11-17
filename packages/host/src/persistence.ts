@@ -3,7 +3,22 @@ import { BLOCK_IDS, WORLD_CELL_COUNT, type BlockId } from "@fangcun/world-schema
 import { createSeedWorld, worldStateFromObject, type WorldState } from "@fangcun/voxel-core";
 import type { CommitMessage } from "@fangcun/protocol";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
-import { parseStoredPetProfile, type PetProfile } from "./pet.ts";
+import {
+  companionProfilesDocument,
+  parseStoredCompanionProfiles,
+  type CompanionProfile,
+} from "./companions.ts";
+import {
+  parseStoredUserInventory,
+  userInventoryDocument,
+  type UserInventoryEntry,
+} from "./items.ts";
+import {
+  parseLegacyPetProfile,
+  parseStoredPetScale,
+  petScaleDocument,
+  type LegacyPetProfile,
+} from "./pet.ts";
 
 /**
  * Durable Host storage. The world snapshot, the commit log and the companion
@@ -192,28 +207,73 @@ export class HostStore {
   }
 
   /**
-   * The desktop-pet profile is stored in the generic `meta` table so the companion
-   * row schema (shared with the world authority) stays stable across this feature.
+   * Multi-companion social state lives in the generic `meta` table so the companion
+   * row schema (shared with the world authority) stays stable. The three keys are
+   * written in one SQLite transaction by {@link saveSocialState}: a transfer must never
+   * persist a decremented inventory without its companion item (or vice versa).
    */
-  savePetProfile(profile: PetProfile): void {
-    this.#db
-      .prepare("INSERT INTO meta(key, value) VALUES ('petProfile', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-      .run(JSON.stringify(profile));
+  saveSocialState(
+    companions: readonly CompanionProfile[],
+    inventory: readonly UserInventoryEntry[],
+    petScale: number,
+  ): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#writeMeta("companionProfiles", JSON.stringify(companionProfilesDocument(companions)));
+      this.#writeMeta("userInventory", JSON.stringify(userInventoryDocument(inventory)));
+      this.#writeMeta("petScale", JSON.stringify(petScaleDocument(petScale)));
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
-  loadPetProfile(): PetProfile | null {
-    const row = this.#db.prepare("SELECT value FROM meta WHERE key = 'petProfile'").get() as { value?: string } | undefined;
-    if (row?.value === undefined) return null;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(row.value);
-    } catch {
-      throw new TypeError("corrupt stored pet profile: invalid JSON");
-    }
-    return parseStoredPetProfile(parsed);
+  loadCompanionProfiles(): readonly CompanionProfile[] | null {
+    const raw = this.#readMeta("companionProfiles");
+    return raw === null ? null : parseStoredCompanionProfiles(parseJsonMeta(raw, "companion profiles"));
+  }
+
+  loadUserInventory(): readonly UserInventoryEntry[] | null {
+    const raw = this.#readMeta("userInventory");
+    return raw === null ? null : parseStoredUserInventory(parseJsonMeta(raw, "user inventory"));
+  }
+
+  loadPetScale(): number | null {
+    const raw = this.#readMeta("petScale");
+    return raw === null ? null : parseStoredPetScale(parseJsonMeta(raw, "pet scale"));
+  }
+
+  /**
+   * Legacy single-pet row written before the multi-companion model. Read once at
+   * startup to migrate `name/personaId/activeAction/scale` into the new keys; never
+   * written again.
+   */
+  loadLegacyPetProfile(): LegacyPetProfile | null {
+    const raw = this.#readMeta("petProfile");
+    return raw === null ? null : parseLegacyPetProfile(parseJsonMeta(raw, "pet profile"));
+  }
+
+  #readMeta(key: string): string | null {
+    const row = this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value?: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  #writeMeta(key: string, value: string): void {
+    this.#db
+      .prepare("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(key, value);
   }
 
   close(): void {
     this.#db.close();
+  }
+}
+
+function parseJsonMeta(raw: string, label: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new TypeError(`corrupt stored ${label}: invalid JSON`);
   }
 }

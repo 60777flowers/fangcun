@@ -10,13 +10,27 @@ import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema
 import { HostStore } from "./persistence.ts";
 import {
   COMPANION_ACTION_TTL_MS,
-  defaultPetProfile,
+  DEFAULT_PET_NAME,
   PET_ACTIONS,
   validatePetPatch,
   type PetAction,
   type PetPatch,
-  type PetProfile,
 } from "./pet.ts";
+import {
+  companionView,
+  seedCompanionProfiles,
+  validateCompanionPatch,
+  type CompanionPatch,
+  type CompanionProfile,
+  type CompanionView,
+} from "./companions.ts";
+import {
+  addItemToCompanion,
+  ITEM_CATALOG,
+  seedUserInventory,
+  validateGiveRequest,
+  type UserInventoryEntry,
+} from "./items.ts";
 import {
   buildLine,
   CHAT_MAX_TEXT_LENGTH,
@@ -103,11 +117,17 @@ export class FangcunHost {
   #tokens = new Map<string, { clientId: string; expiresAtMs: number }>();
   #pairing: PairingCode | null = null;
   #companion: CompanionInstance;
-  #pet: PetProfile;
+  /** Durable multi-companion list; N entries, seeded with the owner pet + one demo friend. */
+  #companionProfiles: readonly CompanionProfile[];
+  /** Primary pet appearance scale (the other profile fields live on the profile). */
+  #petScale: number;
+  /** Host user's item stacks; companion bags live on their profiles. */
+  #userItems: Map<string, number>;
   #companionState: CompanionStateName = "idle";
   #lastTick: CompanionTickDecision | null = null;
   #grant: HomePlotGrant | null = null;
-  #chat: ChatMessage[] = [];
+  /** Per-companion in-memory chat logs; unknown ids are rejected before use. */
+  #chats = new Map<string, ChatMessage[]>();
   #lineIndex = 0;
   #idleLineIndex = 0;
   #trackingReady: () => boolean;
@@ -145,7 +165,13 @@ export class FangcunHost {
       autonomyEnabled: true,
       createdAt: new Date(this.#now()).toISOString(),
     });
-    this.#pet = defaultPetProfile(this.#companion.personaId, this.#now());
+    this.#companionProfiles = seedCompanionProfiles(this.#ownerUserId, {
+      name: DEFAULT_PET_NAME,
+      personaId: this.#companion.personaId,
+      activeAction: "stand",
+    });
+    this.#petScale = 1;
+    this.#userItems = new Map(seedUserInventory().map((entry) => [entry.itemId, entry.count] as const));
   }
 
   get worldId(): string { return this.#worldId; }
@@ -181,14 +207,33 @@ export class FangcunHost {
       this.#grant = grant;
     }
 
-    // Pet profile: durable across restart. A store written before this feature has no
-    // row, so seed the defaults once; a corrupt row fails closed in loadPetProfile().
-    const storedPet = store.loadPetProfile();
-    if (storedPet) {
-      this.#pet = storedPet;
-    } else {
-      this.#pet = defaultPetProfile(this.#companion.personaId, this.#now());
-      store.savePetProfile(this.#pet);
+    // Multi-companion social state: durable in the meta keys companionProfiles /
+    // userInventory / petScale. A store written before this model (single legacy
+    // meta['petProfile'] row) is migrated once; corrupt rows fail closed in the store.
+    const legacyPet = store.loadLegacyPetProfile();
+    const storedProfiles = store.loadCompanionProfiles();
+    const storedInventory = store.loadUserInventory();
+    const storedScale = store.loadPetScale();
+    const resolvedProfiles = storedProfiles ?? seedCompanionProfiles(this.#ownerUserId, {
+      name: legacyPet?.name ?? DEFAULT_PET_NAME,
+      personaId: legacyPet?.personaId ?? this.#companion.personaId,
+      activeAction: legacyPet?.activeAction ?? "stand",
+    });
+    const resolvedInventory = storedInventory ?? seedUserInventory();
+    const resolvedScale = storedScale ?? legacyPet?.scale ?? 1;
+    if (!storedProfiles || !storedInventory || storedScale === null) {
+      store.saveSocialState(resolvedProfiles, resolvedInventory, resolvedScale);
+    }
+    this.#companionProfiles = resolvedProfiles;
+    this.#userItems = new Map(resolvedInventory.map((entry) => [entry.itemId, entry.count] as const));
+    this.#petScale = resolvedScale;
+    if (!this.#companionProfiles.some((profile) => profile.companionId === this.#companion.companionId)) {
+      throw new TypeError(`stored companions are missing the primary companion ${this.#companion.companionId}`);
+    }
+    // `state` is a runtime display field: always start the primary companion idle.
+    const storedPrimary = this.#findCompanion(this.#companion.companionId);
+    if (storedPrimary && storedPrimary.state !== "idle") {
+      this.#replaceProfile(Object.freeze({ ...storedPrimary, state: "idle" }));
     }
 
     const server = createServer((request, response) => {
@@ -349,16 +394,22 @@ export class FangcunHost {
     }
 
     if (request.method === "GET" && path === "/api/core/chat") {
-      return send(200, { messages: this.#chat });
+      const requested = url.searchParams.get("companionId");
+      const companionId = requested ?? this.#companion.companionId;
+      if (!this.#findCompanion(companionId)) return send(404, { error: "companion_not_found" });
+      return send(200, { messages: this.#chats.get(companionId) ?? [], companionId });
     }
 
     if (request.method === "POST" && path === "/api/core/chat") {
       const body = await this.#readJson(request);
       if (!body.ok) return send(body.status, { error: body.error });
-      const outcome = this.#chatExchange((body.value as { text?: unknown }).text);
-      return outcome.ok
-        ? send(200, { reply: outcome.reply, state: outcome.state })
-        : send(outcome.status, { error: outcome.error });
+      const parsedChat = this.#parseChatRequest(body.value);
+      if (!parsedChat.ok) return send(parsedChat.status, { error: parsedChat.error });
+      // Legacy no-`companionId` form always talks to the primary companion.
+      const companionId = parsedChat.companionId ?? this.#companion.companionId;
+      if (!this.#findCompanion(companionId)) return send(404, { error: "companion_not_found" });
+      const outcome = this.#chatExchange(parsedChat.text, companionId);
+      return send(200, { reply: outcome.reply, state: outcome.state, companionId });
     }
 
     if (request.method === "POST" && path === "/api/core/companion/say") {
@@ -402,6 +453,54 @@ export class FangcunHost {
       return send(200, this.#petState());
     }
 
+    // Multi-companion social surfaces. `isMine` is always derived from the Host owner;
+    // the friend fixture is local demo data, and no mutation path exists for it.
+    if (request.method === "GET" && path === "/api/core/companions") {
+      return send(200, { companions: this.#companionViews() });
+    }
+
+    const companionRoute = /^\/api\/core\/companions\/([^/]+)$/.exec(path);
+    if (companionRoute) {
+      const rawCompanionId = companionRoute[1];
+      if (rawCompanionId === undefined) return send(400, { error: "invalid_companion_id" });
+      let companionId: string;
+      try {
+        companionId = decodeURIComponent(rawCompanionId);
+      } catch {
+        return send(400, { error: "invalid_companion_id" });
+      }
+      const profile = this.#findCompanion(companionId);
+      if (!profile) return send(404, { error: "companion_not_found" });
+      if (request.method === "GET") return send(200, this.#view(profile));
+      if (request.method !== "PATCH") return send(405, { error: "method_not_allowed" });
+      if (profile.ownerUserId !== this.#ownerUserId) return send(403, { error: "not_owner" });
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const parsed = validateCompanionPatch(body.value);
+      if (!parsed.ok) return send(400, { error: parsed.error });
+      const outcome = this.#updateCompanionProfile(profile, parsed.value);
+      if (!outcome.ok) return send(outcome.status, { error: outcome.error });
+      return send(200, outcome.view);
+    }
+
+    if (request.method === "GET" && path === "/api/core/items") {
+      return send(200, { items: ITEM_CATALOG });
+    }
+
+    if (request.method === "GET" && path === "/api/core/inventory") {
+      return send(200, { items: this.#userInventoryEntries() });
+    }
+
+    if (request.method === "POST" && path === "/api/core/inventory/give") {
+      const body = await this.#readJson(request);
+      if (!body.ok) return send(body.status, { error: body.error });
+      const parsed = validateGiveRequest(body.value);
+      if (!parsed.ok) return send(400, { error: parsed.error });
+      const outcome = this.#giveItem(parsed.value.companionId, parsed.value.itemId);
+      if (!outcome.ok) return send(outcome.status, { error: outcome.error });
+      return send(200, outcome.body);
+    }
+
     send(404, { error: "not_found" });
   }
 
@@ -425,6 +524,57 @@ export class FangcunHost {
     };
   }
 
+  #findCompanion(companionId: string): CompanionProfile | null {
+    return this.#companionProfiles.find((profile) => profile.companionId === companionId) ?? null;
+  }
+
+  #primaryProfile(): CompanionProfile {
+    const profile = this.#findCompanion(this.#companion.companionId);
+    if (!profile) throw new Error("primary companion profile is missing");
+    return profile;
+  }
+
+  #view(profile: CompanionProfile): CompanionView {
+    return companionView(profile, this.#ownerUserId);
+  }
+
+  #companionViews(): readonly CompanionView[] {
+    return Object.freeze(this.#companionProfiles.map((profile) => this.#view(profile)));
+  }
+
+  #replaceProfile(profile: CompanionProfile): void {
+    this.#companionProfiles = Object.freeze(this.#companionProfiles.map((current) =>
+      current.companionId === profile.companionId ? profile : current));
+  }
+
+  #replaceIn(id: string, profile: CompanionProfile, profiles: readonly CompanionProfile[] = this.#companionProfiles): readonly CompanionProfile[] {
+    return Object.freeze(profiles.map((current) => current.companionId === id ? profile : current));
+  }
+
+  /** Owned stacks only, in catalog order; a zero count disappears from the view. */
+  #userInventoryEntries(): readonly UserInventoryEntry[] {
+    return Object.freeze(ITEM_CATALOG.flatMap((item) => {
+      const count = this.#userItems.get(item.itemId) ?? 0;
+      return count > 0 ? [Object.freeze({ itemId: item.itemId, count })] : [];
+    }));
+  }
+
+  /** Persists companions + inventory + scale in one transaction; memory is applied after success. */
+  #saveSocial(
+    profiles: readonly CompanionProfile[] = this.#companionProfiles,
+    inventory: readonly UserInventoryEntry[] = this.#userInventoryEntries(),
+    scale: number = this.#petScale,
+  ): boolean {
+    const store = this.#store;
+    if (!store) return false;
+    try {
+      store.saveSocialState(profiles, inventory, scale);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** The single action list the PC panel renders: display names live here, not in JS. */
   #petState(): Readonly<{
     name: string;
@@ -435,14 +585,15 @@ export class FangcunHost {
     homeGrantActive: boolean;
     companionId: string;
   }> {
+    const primary = this.#primaryProfile();
     return Object.freeze({
-      name: this.#pet.name,
-      personaId: this.#pet.personaId,
-      scale: this.#pet.scale,
+      name: primary.name,
+      personaId: primary.personaId,
+      scale: this.#petScale,
       actions: PET_ACTIONS,
-      activeAction: this.#pet.activeAction,
+      activeAction: primary.activeAction,
       homeGrantActive: this.#grant !== null,
-      companionId: this.#companion.companionId,
+      companionId: primary.companionId,
     });
   }
 
@@ -452,27 +603,105 @@ export class FangcunHost {
    */
   #updatePet(patch: PetPatch): { ok: true } | { ok: false; status: number; error: string } {
     if (!this.#store) return { ok: false, status: 503, error: "host_stopping" };
-    const next: PetProfile = Object.freeze({
-      schemaVersion: 1,
-      name: patch.name ?? this.#pet.name,
-      personaId: patch.personaId ?? this.#pet.personaId,
-      scale: patch.scale ?? this.#pet.scale,
-      activeAction: patch.action ?? this.#pet.activeAction,
-      updatedAtMs: this.#now(),
+    const primary = this.#primaryProfile();
+    const nextScale = patch.scale ?? this.#petScale;
+    const nextProfile: CompanionProfile = Object.freeze({
+      ...primary,
+      name: patch.name ?? primary.name,
+      personaId: patch.personaId ?? primary.personaId,
+      activeAction: patch.action ?? primary.activeAction,
     });
-    try {
-      this.#store.savePetProfile(next);
-    } catch {
+    const nextProfiles = this.#replaceIn(primary.companionId, nextProfile);
+    if (!this.#saveSocial(nextProfiles, this.#userInventoryEntries(), nextScale)) {
       return { ok: false, status: 500, error: "pet_persist_failed" };
     }
+    this.#companionProfiles = nextProfiles;
+    this.#petScale = nextScale;
     const profileChanged = patch.name !== undefined || patch.personaId !== undefined || patch.scale !== undefined;
-    this.#pet = next;
     // Name/persona/scale have no dedicated wire message: re-announcing the existing
     // companion state tells replicas the companion record changed. Actions carry the
     // typed `companion_action` message because the tablet must play them.
     if (profileChanged) this.#setCompanionState(this.#companionState);
     if (patch.action !== undefined) this.#broadcastCompanionAction(patch.action);
     return { ok: true };
+  }
+
+  #updateCompanionProfile(
+    profile: CompanionProfile,
+    patch: CompanionPatch,
+  ): { ok: true; view: CompanionView } | { ok: false; status: number; error: string } {
+    if (!this.#store) return { ok: false, status: 503, error: "host_stopping" };
+    const nextProfile: CompanionProfile = Object.freeze({
+      ...profile,
+      name: patch.name ?? profile.name,
+      personality: patch.personality ?? profile.personality,
+      personaId: patch.personaId ?? profile.personaId,
+    });
+    const nextProfiles = this.#replaceIn(profile.companionId, nextProfile);
+    if (!this.#saveSocial(nextProfiles)) return { ok: false, status: 500, error: "companion_persist_failed" };
+    this.#companionProfiles = nextProfiles;
+    if (patch.name !== undefined || patch.personaId !== undefined) this.#setCompanionState(this.#companionState);
+    return { ok: true, view: this.#view(nextProfile) };
+  }
+
+  /**
+   * Transfers one owned item into a companion bag. Only owned companions accept items;
+   * the user stack, the companion bag and the profile list are persisted atomically.
+   */
+  #giveItem(
+    companionId: string,
+    itemId: string,
+  ): { ok: true; body: Readonly<{ companion: CompanionView; inventory: Readonly<{ items: readonly UserInventoryEntry[] }> }> }
+    | { ok: false; status: number; error: string } {
+    if (!this.#store) return { ok: false, status: 503, error: "host_stopping" };
+    const profile = this.#findCompanion(companionId);
+    if (!profile) return { ok: false, status: 404, error: "companion_not_found" };
+    if (profile.ownerUserId !== this.#ownerUserId) return { ok: false, status: 403, error: "not_owner" };
+    const ownedCount = this.#userItems.get(itemId) ?? 0;
+    if (ownedCount < 1) return { ok: false, status: 409, error: "item_not_owned" };
+    const added = addItemToCompanion(profile.items, itemId);
+    if (!added.ok) return { ok: false, status: 409, error: added.error };
+    const nextProfile: CompanionProfile = Object.freeze({ ...profile, items: added.items });
+    const nextProfiles = this.#replaceIn(profile.companionId, nextProfile);
+    const nextItems = new Map(this.#userItems);
+    if (ownedCount > 1) nextItems.set(itemId, ownedCount - 1);
+    else nextItems.delete(itemId);
+    const nextInventory = this.#inventoryEntries(nextItems);
+    if (!this.#saveSocial(nextProfiles, nextInventory)) return { ok: false, status: 500, error: "social_persist_failed" };
+    this.#companionProfiles = nextProfiles;
+    this.#userItems = nextItems;
+    // Lightweight refresh signal for open replicas; inventory has no wire type of its own.
+    this.#setCompanionState(this.#companionState);
+    return { ok: true, body: Object.freeze({ companion: this.#view(nextProfile), inventory: Object.freeze({ items: nextInventory }) }) };
+  }
+
+  #inventoryEntries(items: ReadonlyMap<string, number>): readonly UserInventoryEntry[] {
+    return Object.freeze(ITEM_CATALOG.flatMap((item) => {
+      const count = items.get(item.itemId) ?? 0;
+      return count > 0 ? [Object.freeze({ itemId: item.itemId, count })] : [];
+    }));
+  }
+
+  /**
+   * Strict chat request: only `{text, companionId?}`; omitted companionId keeps the
+   * legacy primary-companion behaviour. Unknown fields are rejected.
+   */
+  #parseChatRequest(value: unknown): { ok: true; text: string; companionId: string | null } | { ok: false; status: number; error: string } {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return { ok: false, status: 400, error: "invalid_chat_request" };
+    const input = value as Record<string, unknown>;
+    for (const key of Object.keys(input)) {
+      if (key !== "text" && key !== "companionId") return { ok: false, status: 400, error: "invalid_chat_request" };
+    }
+    const rawText = input.text;
+    if (typeof rawText !== "string") return { ok: false, status: 400, error: "invalid_chat_text" };
+    const text = rawText.trim();
+    if (text.length < 1 || text.length > CHAT_MAX_TEXT_LENGTH) return { ok: false, status: 400, error: "invalid_chat_text" };
+    const rawCompanionId = input.companionId;
+    if (rawCompanionId !== undefined
+      && (typeof rawCompanionId !== "string" || rawCompanionId.length < 1 || rawCompanionId.length > 128)) {
+      return { ok: false, status: 400, error: "invalid_chat_request" };
+    }
+    return { ok: true, text, companionId: rawCompanionId ?? null };
   }
 
   #broadcastCompanionAction(actionId: CompanionActionId): void {
@@ -495,6 +724,9 @@ export class FangcunHost {
 
   #setCompanionState(state: CompanionStateName): void {
     this.#companionState = state;
+    // Keep the primary profile's runtime `state` field in sync for the social views.
+    const primary = this.#findCompanion(this.#companion.companionId);
+    if (primary && primary.state !== state) this.#replaceProfile(Object.freeze({ ...primary, state }));
     this.#broadcast({
       protocolVersion: 1,
       type: "companion_state",
@@ -505,36 +737,40 @@ export class FangcunHost {
     });
   }
 
-  #say(text: string): void {
+  #say(text: string, companionId: string = this.#companion.companionId): void {
     this.#broadcast({
       protocolVersion: 1,
       type: "companion_say",
       worldId: this.#worldId,
-      companionId: this.#companion.companionId,
+      companionId,
       text,
       expiresAtMs: this.#now() + 8000,
     });
   }
 
-  #appendChat(role: ChatMessage["role"], text: string): void {
-    this.#chat.push(Object.freeze({ role, text, atMs: this.#now() }));
-    if (this.#chat.length > CHAT_HISTORY_LIMIT) this.#chat.splice(0, this.#chat.length - CHAT_HISTORY_LIMIT);
+  #appendChat(companionId: string, role: ChatMessage["role"], text: string): void {
+    let log = this.#chats.get(companionId);
+    if (log === undefined) {
+      log = [];
+      this.#chats.set(companionId, log);
+    }
+    log.push(Object.freeze({ role, text, atMs: this.#now() }));
+    if (log.length > CHAT_HISTORY_LIMIT) log.splice(0, log.length - CHAT_HISTORY_LIMIT);
   }
 
   /**
-   * One PC chat turn: append the user message, compose the companion reply and
-   * broadcast it. The tablet only renders companion speech, so `companion_say`
-   * carries the reply (never the user's own text).
+   * One PC chat turn for one companion: append the user message, compose the reply and
+   * broadcast it. The tablet renders companion speech, so `companion_say` carries the
+   * reply (never the user's own text) with that companion's id.
    */
-  #chatExchange(rawText: unknown): { ok: true; reply: string; state: CompanionStateName } | { ok: false; status: number; error: string } {
-    if (typeof rawText !== "string") return { ok: false, status: 400, error: "invalid_chat_text" };
-    const text = rawText.trim();
-    if (text.length < 1 || text.length > CHAT_MAX_TEXT_LENGTH) return { ok: false, status: 400, error: "invalid_chat_text" };
-    this.#appendChat("user", text);
+  #chatExchange(text: string, companionId: string): Readonly<{ reply: string; state: CompanionStateName }> {
+    const profile = this.#findCompanion(companionId);
+    if (!profile) throw new Error("chat companion is missing");
+    this.#appendChat(companionId, "user", text);
     const { reply } = composeCompanionReply(text);
-    this.#appendChat("companion", reply);
-    this.#say(reply);
-    return { ok: true, reply, state: this.#companionState };
+    this.#appendChat(companionId, "companion", reply);
+    this.#say(reply, companionId);
+    return Object.freeze({ reply, state: profile.state });
   }
 
   /** MCP/agent speech hook: broadcast a line without inventing a chat turn for it. */
@@ -542,7 +778,7 @@ export class FangcunHost {
     if (typeof rawText !== "string") return { ok: false, status: 400, error: "invalid_companion_say" };
     const text = rawText.trim();
     if (text.length < 1 || text.length > COMPANION_SAY_MAX_TEXT_LENGTH) return { ok: false, status: 400, error: "invalid_companion_say" };
-    this.#appendChat("companion", text);
+    this.#appendChat(this.#companion.companionId, "companion", text);
     this.#say(text);
     return { ok: true };
   }

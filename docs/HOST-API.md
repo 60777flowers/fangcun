@@ -175,7 +175,28 @@ PC 检视页默认**只读**，允许查看、暂停/恢复 companion 和 undo�
 | GET | `/api/core/pet` | 返回 `{name, personaId, scale, actions:[{id,displayName}], activeAction, homeGrantActive, companionId}`；`actions` 即前端渲染的唯一动作清单 |
 | PATCH / POST | `/api/core/pet` | 严格 body：任意 `{name?, personaId?, scale?, action?}` 子集；拒绝未知字段（`additionalProperties`）；`name` 1–24 字符（trim 后）、`personaId` 1–64、`scale` 0.5–3、`action` 必须是 `actions[].id` 之一（未知 action 返回 `400 unknown_pet_action`） |
 
-桌宠配置持久化在 SQLite `meta` 表的 `petProfile` 键，Host 重启后保留；`PATCH` 分支直接访问 Host 生效，浏览器经代理时统一用 `POST`（代理只转发 POST body）。动作触发广播 `companion_action`；名称/persona/scale 变更以一条 `companion_state` 重新广播告知 replica。
+桌宠配置持久化：`name/personaId/activeAction` 存在主 companion 档案（`meta['companionProfiles']`），`scale` 存在 `meta['petScale']`；旧版单宠物行 `meta['petProfile']` 只在升级后首次启动时读取一次用于迁移，Host 重启后保留。`PATCH` 分支直接访问 Host 生效，浏览器经代理时统一用 `POST`（代理只转发 POST body）。动作触发广播 `companion_action`；名称/persona/scale 变更以一条 `companion_state` 重新广播告知 replica。
+
+**多宠物 / 好友 / 背包（2026-11 社交模型，v0）**
+
+- 数据是 companion 档案列表（v0 seed 2 条，模型允许 N 条，防御上限 64）：`{companionId, name, ownerUserId, personaId, personality(1–60 字符), avatarModelId, state, activeAction, items:[itemId]}`；`isMine` 在读取时由 `ownerUserId === Host owner` 派生，**永不落库**。`state` 是运行时展示字段，Host 重启时主宠物重置为 `idle`。
+- seed：`fish-1`（owner = 本地用户，主桌宠）与 `fish-friend-1`（owner = `friend-demo`，personality 例如“慢热，喜欢收集石头”）。**`friend-demo` 是本地演示 fixture，不是真实远端用户；不做联网、账号或好友发现，也不存在远端同步路径。**
+- 好友宠物只读：写操作返回 `403 not_owner`，且没有任何针对非本人宠物的变更端点。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/core/companions` | `{companions:[...]}`，每一项含派生的 `isMine` |
+| GET | `/api/core/companions/{id}` | 单个档案（含 `items`）或 `404 companion_not_found`；`items` 即“悬停预览好友宠物背包”的只读数据 |
+| PATCH | `/api/core/companions/{id}` | 仅 `isMine:true` 可写；body 任意 `{name?, personality?, personaId?}` 子集，未知字段拒绝；好友宠物 `403 not_owner` |
+| GET | `/api/core/items` | 只读 item catalog：`{items:[{itemId, displayName, description, icon}]}` |
+| GET | `/api/core/inventory` | 本地用户背包 `{items:[{itemId, count}]}`；只列 `count>0`，按 catalog 顺序 |
+| POST | `/api/core/inventory/give` | 严格 body `{companionId, itemId}`；把 1 件物品从用户背包转进**本人**宠物背包 |
+
+item 规则（v0）：catalog 是冻结常量、恰好 1 件 `v0-iron-basin`（displayName `v0体验版小铁盆`，icon `basin`）；新增物品 = 在 catalog 加一条。用户新档 seed `1× v0-iron-basin`。`maxCompanionItems = 2`（常量、可扩展）；v0 宠物背包**不允许重复 itemId**（一个槽 = 一种物品）。`POST /inventory/give` 拒绝矩阵：非法 body/未知字段 `400 invalid_give_request`、未知 item `400 unknown_item`、未知宠物 `404 companion_not_found`、非本人宠物 `403 not_owner`、用户没有该物品 `409 item_not_owned`、宠物背包已满 `409 companion_inventory_full`、物品已在宠物背包 `409 item_already_held`。成功返回 `{companion, inventory:{items}}`。v0 **没有**把物品从宠物收回给用户的端点。
+
+持久化：`meta['companionProfiles']`、`meta['userInventory']`、`meta['petScale']` 在同一次 `BEGIN IMMEDIATE` 事务原子写入（不会出现“扣了用户背包但宠物没收到”），Host 重启后保留；读取对存档 fail closed。转移成功后广播一条 `companion_state`（复用既有帧、state 不变）作为打开面板的轻量刷新信号。
+
+聊天按宠物隔离：`GET /api/core/chat?companionId=...` → `{messages, companionId}`；`POST /api/core/chat {companionId?, text}` → `{reply, state, companionId}`。省略 `companionId` 时仍指向主 companion（`fish-1`），旧 UI/测试行为不变；未知 `companionId` → `404 companion_not_found`；聊天仅内存保存（每宠物 30 条），不持久化。
 
 ### 4.4 MCP（本机）
 
@@ -290,7 +311,7 @@ type Actor = "player" | "ai" | "system";
 | `home_candidate` | `candidateId, plotId, aabb, baseRev, expiresAtMs, summary` | AI 选址候选 |
 | `plot_granted` | `grantId, plotId, companionId, aabb, blockAllowlist[], maxBlocksPerPlan, maxBlocksPerDay, issuedAtMs, expiresAtMs` | 用户批准后 |
 | `plot_revoked` | `grantId, revokedAtMs, reason?` | 收回 |
-| `companion_state` | `companionId, state, currentPlanId?, bubbleText?, updatedAtMs` | `idle/observing/planning/awaiting_approval/building/cooldown/paused` |
+| `companion_state` | `companionId, state, currentPlanId?, bubbleText?, updatedAtMs` | `idle/observing/planning/awaiting_approval/building/cooldown/paused`；实现中也作为 pet/背包变更后的轻量刷新信号（state 可不变） |
 | `companion_say` | `companionId, text, expiresAtMs` | ≤80 字；不含 TTS |
 | `companion_action` | `companionId, actionId, expiresAtMs` | 桌宠一次性动作；`actionId ∈ {stand, sit, lie, wave, jump, look_around}`，客户端播放/保持到 `expiresAtMs`；由 `PATCH\|POST /api/core/pet` 的 `action` 字段触发（未知 id 被 Host 拒绝）；名称/persona/scale 变更不新增消息，只重新广播 `companion_state` |
 | `undo_result` | `requestId, accepted, code?, rev?` | 撤销结果；成功时另有 `commit` |
@@ -381,7 +402,8 @@ PRAGMA busy_timeout = 5000;
 CREATE TABLE meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
-); -- schemaVersion, worldId, createdAt, worldSchemaHash, blockCatalogHash
+); -- schemaVersion, worldId, createdAt, worldSchemaHash, blockCatalogHash,
+   -- companionProfiles, userInventory, petScale（旧版 petProfile 仅迁移时读）
 
 CREATE TABLE world (
   id TEXT PRIMARY KEY,

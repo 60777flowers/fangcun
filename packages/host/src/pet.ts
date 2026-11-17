@@ -6,12 +6,14 @@ import {
 } from "@fangcun/protocol";
 
 /**
- * Desktop-pet profile: the PC inspector configures it, the Host owns it durably and
- * the tablet renders the companion from it. Action ids are the protocol's stable wire
- * ids ({@link COMPANION_ACTION_IDS}); display names never travel on the wire, so the
- * only action list the UI renders is the one `GET /api/core/pet` returns.
+ * Desktop-pet configuration shared by the `/api/core/pet` endpoints and the
+ * multi-companion model in `companions.ts`.
  *
- * All text here is untrusted display data: it can never affect world authority.
+ * The action ids are the protocol's stable wire ids ({@link COMPANION_ACTION_IDS});
+ * display names never travel on the wire, so the only action list the UI renders is
+ * the one `GET /api/core/pet` returns. `name`, `personaId` and `activeAction` are now
+ * stored on the primary companion profile; this module owns the action catalog, the
+ * shared name/scale bounds and the one-time migration of the legacy single-pet row.
  */
 
 export const PET_NAME_MIN_LENGTH = 1;
@@ -41,33 +43,12 @@ if (PET_ACTIONS.length !== COMPANION_ACTION_IDS.length
   throw new TypeError("pet action catalog disagrees with COMPANION_ACTION_IDS");
 }
 
-/** `schemaVersion` is store-only; the HTTP views below never expose it. */
-export type PetProfile = Readonly<{
-  schemaVersion: 1;
-  name: string;
-  personaId: string;
-  scale: number;
-  activeAction: CompanionActionId;
-  updatedAtMs: number;
-}>;
-
 export type PetPatch = Readonly<{
   name?: string;
   personaId?: string;
   scale?: number;
   action?: CompanionActionId;
 }>;
-
-export function defaultPetProfile(personaId: string, nowMs: number): PetProfile {
-  return Object.freeze({
-    schemaVersion: 1,
-    name: DEFAULT_PET_NAME,
-    personaId,
-    scale: 1,
-    activeAction: "stand",
-    updatedAtMs: nowMs,
-  });
-}
 
 const PET_PATCH_FIELDS: ReadonlySet<string> = new Set(["name", "personaId", "scale", "action"]);
 
@@ -107,8 +88,20 @@ export function validatePetPatch(value: unknown): ValidationResult<PetPatch> {
   return { ok: true, value: Object.freeze(patch) };
 }
 
-/** Parses a persisted profile, failing closed on a corrupt row instead of inventing state. */
-export function parseStoredPetProfile(value: unknown): PetProfile {
+/**
+ * Legacy single-pet row (`meta['petProfile']`), read once when upgrading a store whose
+ * companions predate the multi-companion model. New writes use `meta['companionProfiles']`.
+ */
+export type LegacyPetProfile = Readonly<{
+  schemaVersion: 1;
+  name: string;
+  personaId: string;
+  scale: number;
+  activeAction: CompanionActionId;
+  updatedAtMs: number;
+}>;
+
+export function parseLegacyPetProfile(value: unknown): LegacyPetProfile {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("corrupt stored pet profile");
   const input = value as Record<string, unknown>;
   if (input.schemaVersion !== 1) throw new TypeError(`unsupported stored pet profile schema ${String(input.schemaVersion)}`);
@@ -123,4 +116,17 @@ export function parseStoredPetProfile(value: unknown): PetProfile {
   const updatedAtMs = input.updatedAtMs;
   if (typeof updatedAtMs !== "number" || !Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0) throw new TypeError("corrupt stored pet timestamp");
   return Object.freeze({ schemaVersion: 1, name, personaId, scale, activeAction, updatedAtMs });
+}
+
+export function petScaleDocument(scale: number): Readonly<{ schemaVersion: 1; scale: number }> {
+  return Object.freeze({ schemaVersion: 1, scale });
+}
+
+export function parseStoredPetScale(value: unknown): number {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("corrupt stored pet scale");
+  const input = value as Record<string, unknown>;
+  if (input.schemaVersion !== 1) throw new TypeError(`unsupported stored pet scale schema ${String(input.schemaVersion)}`);
+  const scale = input.scale;
+  if (typeof scale !== "number" || !Number.isFinite(scale) || scale < PET_SCALE_MIN || scale > PET_SCALE_MAX) throw new TypeError("corrupt stored pet scale");
+  return scale;
 }
