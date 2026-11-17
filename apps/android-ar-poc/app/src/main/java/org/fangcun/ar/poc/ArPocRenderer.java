@@ -445,7 +445,12 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
         float yaw = (float) (Math.sin(seconds * (busy ? 2.2 : 0.45)) * 18.0);
 
         Matrix.setIdentityM(characterModel, 0);
-        Matrix.translateM(characterModel, 0, COMPANION_X, COMPANION_Y + bob, COMPANION_Z);
+        // Preview mode centres the avatar on the camera ray so its silhouette and scale are
+        // easy to judge without an anchor.
+        float offsetX = previewMode ? 0f : COMPANION_X;
+        float offsetY = previewMode ? 0f : COMPANION_Y;
+        float offsetZ = previewMode ? 0f : COMPANION_Z;
+        Matrix.translateM(characterModel, 0, offsetX, offsetY + bob, offsetZ);
         Matrix.rotateM(characterModel, 0, 180f + yaw, 0f, 1f, 0f);
         Matrix.scaleM(characterModel, 0, model.scale(), model.scale(), model.scale());
         Matrix.translateM(characterModel, 0, model.offsetX(), model.offsetY(), model.offsetZ());

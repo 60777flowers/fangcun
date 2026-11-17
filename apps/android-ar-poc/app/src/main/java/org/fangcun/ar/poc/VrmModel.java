@@ -16,7 +16,7 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
+import java.nio.ShortBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -36,11 +36,11 @@ final class VrmModel {
         final FloatBuffer positions;
         final FloatBuffer normals;
         final FloatBuffer uvs;
-        final IntBuffer indices;
+        final ShortBuffer indices;
         final int indexCount;
         final int textureId;
 
-        Primitive(FloatBuffer positions, FloatBuffer normals, FloatBuffer uvs, IntBuffer indices, int indexCount, int textureId) {
+        Primitive(FloatBuffer positions, FloatBuffer normals, FloatBuffer uvs, ShortBuffer indices, int indexCount, int textureId) {
             this.positions = positions;
             this.normals = normals;
             this.uvs = uvs;
@@ -98,13 +98,12 @@ final class VrmModel {
                     return null;
                 }
             } else if (chunkType == 0x004E4942) {
-                glb.position(bodyStart);
-                ByteBuffer slice = ByteBuffer.allocate(chunkLength).order(ByteOrder.LITTLE_ENDIAN);
-                byte[] binBytes = new byte[chunkLength];
-                glb.get(binBytes);
-                slice.put(binBytes);
-                slice.position(0);
-                bin = slice;
+                // Keep a view over the original bytes: copying an 18 MB BIN chunk twice was
+                // enough to run the app out of heap on the GL thread.
+                ByteBuffer whole = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+                whole.position(bodyStart);
+                whole.limit(bodyStart + chunkLength);
+                bin = whole.slice().order(ByteOrder.LITTLE_ENDIAN);
             }
             offset = bodyStart + chunkLength;
         }
@@ -155,6 +154,22 @@ final class VrmModel {
                     ? readIndices(gltf, bin, primitive.getInt("indices"))
                     : sequentialIndices(vertexCount);
                 if (indexArray.length == 0) continue;
+                if (vertexCount > 65_535) {
+                    Log.w(TAG, "primitive has too many vertices for 16-bit indices; skipped");
+                    continue;
+                }
+                // Cheap validation keeps a malformed or misread file from making the GPU
+                // fetch out of bounds, which surfaces as a driver SIGSEGV.
+                int maxIndex = 0;
+                for (int value : indexArray) if (value > maxIndex) maxIndex = value;
+                if (maxIndex >= vertexCount) {
+                    Log.w(TAG, "index " + maxIndex + " out of range for " + vertexCount + " vertices; skipped");
+                    continue;
+                }
+                if (!allFinite(positions)) {
+                    Log.w(TAG, "non-finite vertex positions; skipped");
+                    continue;
+                }
 
                 for (int vertex = 0; vertex < vertexCount; vertex += 1) {
                     float x = positions[vertex * 3];
@@ -175,8 +190,7 @@ final class VrmModel {
                     direct(uvs),
                     directIndices(indexArray),
                     indexArray.length,
-                    textureId));
-            }
+                    textureId));            }
         }
 
         if (model.primitives.isEmpty()) throw new IllegalStateException("no triangle primitives");
@@ -226,7 +240,9 @@ final class VrmModel {
             GLES20.glEnableVertexAttribArray(uvHandle);
             GLES20.glVertexAttribPointer(uvHandle, 2, GLES20.GL_FLOAT, false, 0, primitive.uvs);
             primitive.indices.position(0);
-            GLES20.glDrawElements(GLES20.GL_TRIANGLES, primitive.indexCount, GLES20.GL_UNSIGNED_INT, primitive.indices);
+            // 16-bit indices only: GLES2 needs OES_element_index_uint for 32-bit indices and
+            // drivers hard-crash instead of erroring when it is missing.
+            GLES20.glDrawElements(GLES20.GL_TRIANGLES, primitive.indexCount, GLES20.GL_UNSIGNED_SHORT, primitive.indices);
         }
         GLES20.glDisableVertexAttribArray(positionHandle);
         GLES20.glDisableVertexAttribArray(normalHandle);
@@ -286,12 +302,13 @@ final class VrmModel {
         int[] ids = new int[1];
         GLES20.glGenTextures(1, ids, 0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0]);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR_MIPMAP_LINEAR);
+        // NPOT-safe parameters: no mipmaps and clamped wrapping, which GLES2 requires for
+        // non-power-of-two textures.
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_REPEAT);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_REPEAT);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0);
-        GLES20.glGenerateMipmap(GLES20.GL_TEXTURE_2D);
         bitmap.recycle();
         return ids[0];
     }
@@ -308,7 +325,9 @@ final class VrmModel {
         int stride = view.optInt("byteStride", components * 4);
         int start = viewOffset + accessorOffset;
         float[] out = new float[count * components];
-        ByteBuffer slice = bin.duplicate();
+        // duplicate() is not required to inherit the byte order, so set it explicitly;
+        // big-endian reads produced garbage positions and indices.
+        ByteBuffer slice = bin.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         for (int index = 0; index < count; index += 1) {
             slice.position(start + index * stride);
             for (int part = 0; part < components; part += 1) {
@@ -328,7 +347,7 @@ final class VrmModel {
         JSONObject view = bufferViews.getJSONObject(bufferViewIndex);
         int start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0);
         int[] out = new int[count];
-        ByteBuffer slice = bin.duplicate();
+        ByteBuffer slice = bin.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         for (int index = 0; index < count; index += 1) {
             int position = start;
             if (componentType == 5125) {
@@ -361,9 +380,16 @@ final class VrmModel {
         return buffer;
     }
 
-    private static IntBuffer directIndices(int[] values) {
-        IntBuffer buffer = ByteBuffer.allocateDirect(values.length * 4).order(ByteOrder.nativeOrder()).asIntBuffer();
-        buffer.put(values);
+    private static boolean allFinite(float[] values) {
+        for (float value : values) {
+            if (Float.isNaN(value) || Float.isInfinite(value)) return false;
+        }
+        return true;
+    }
+
+    private static ShortBuffer directIndices(int[] values) {
+        ShortBuffer buffer = ByteBuffer.allocateDirect(values.length * 2).order(ByteOrder.nativeOrder()).asShortBuffer();
+        for (int index = 0; index < values.length; index += 1) buffer.put((short) values[index]);
         buffer.position(0);
         return buffer;
     }
