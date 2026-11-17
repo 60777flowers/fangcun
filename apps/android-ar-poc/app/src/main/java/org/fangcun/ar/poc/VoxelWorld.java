@@ -17,6 +17,12 @@ final class VoxelWorld {
     static final int BUILD_MIN_Y = 4;
 
     private static final String[] BLOCK_IDS = {"grass", "dirt", "stone", "planks", "log", "leaves", "sand", "glass"};
+
+    // Per-face brightness so voxel edges stay readable without any lighting model.
+    private static final float SHADE_TOP = 1.0f;
+    private static final float SHADE_BOTTOM = 0.42f;
+    private static final float SHADE_X = 0.76f;
+    private static final float SHADE_Z = 0.58f;
     private static final float[][] BLOCK_COLORS = {
         {0.51f, 0.62f, 0.38f, 1f},  // grass
         {0.54f, 0.39f, 0.27f, 1f},  // dirt
@@ -150,33 +156,33 @@ final class VoxelWorld {
                 for (int x = ORIGIN; x < ORIGIN + SIZE; x += 1) {
                     byte code = blocks[index(x, y, z)];
                     if (code == 0) continue;
-                    float[] color = BLOCK_COLORS[code - 1];
+                    float[] base = BLOCK_COLORS[code - 1];
                     float x0 = x * s, x1 = (x + 1) * s;
                     float y0 = y * s, y1 = (y + 1) * s;
                     float z0 = z * s, z1 = (z + 1) * s;
                     if (!isSolid(x, y + 1, z)) {
                         p = quad(positions, p, x0, y1, z0, x0, y1, z1, x1, y1, z1, x1, y1, z0);
-                        c = colorQuad(colors, c, color);
+                        c = colorQuad(colors, c, base, SHADE_TOP);
                     }
                     if (!isSolid(x, y - 1, z)) {
                         p = quad(positions, p, x0, y0, z0, x1, y0, z0, x1, y0, z1, x0, y0, z1);
-                        c = colorQuad(colors, c, color);
+                        c = colorQuad(colors, c, base, SHADE_BOTTOM);
                     }
                     if (!isSolid(x + 1, y, z)) {
                         p = quad(positions, p, x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0);
-                        c = colorQuad(colors, c, color);
+                        c = colorQuad(colors, c, base, SHADE_X);
                     }
                     if (!isSolid(x - 1, y, z)) {
                         p = quad(positions, p, x0, y0, z0, x0, y1, z0, x0, y1, z1, x0, y0, z1);
-                        c = colorQuad(colors, c, color);
+                        c = colorQuad(colors, c, base, SHADE_X);
                     }
                     if (!isSolid(x, y, z + 1)) {
                         p = quad(positions, p, x0, y0, z1, x0, y1, z1, x1, y1, z1, x1, y0, z1);
-                        c = colorQuad(colors, c, color);
+                        c = colorQuad(colors, c, base, SHADE_Z);
                     }
                     if (!isSolid(x, y, z - 1)) {
                         p = quad(positions, p, x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0);
-                        c = colorQuad(colors, c, color);
+                        c = colorQuad(colors, c, base, SHADE_Z);
                     }
                 }
             }
@@ -184,14 +190,38 @@ final class VoxelWorld {
         return new Mesh(Arrays.copyOf(positions, p), Arrays.copyOf(colors, c), p / 3);
     }
 
-    private static int quad(float[] out, int offset, float... vertices) {
-        System.arraycopy(vertices, 0, out, offset, vertices.length);
-        return offset + vertices.length;
+    /**
+     * Emits two triangles (six vertices) from four corners given in winding order.
+     * Rendering uses GL_TRIANGLES, so a quad must be expanded here; emitting four
+     * vertices would desynchronise the position and colour arrays.
+     */
+    private static int quad(float[] out, int offset,
+                            float ax, float ay, float az,
+                            float bx, float by, float bz,
+                            float cx, float cy, float cz,
+                            float dx, float dy, float dz) {
+        offset = vertex(out, offset, ax, ay, az);
+        offset = vertex(out, offset, bx, by, bz);
+        offset = vertex(out, offset, cx, cy, cz);
+        offset = vertex(out, offset, ax, ay, az);
+        offset = vertex(out, offset, cx, cy, cz);
+        offset = vertex(out, offset, dx, dy, dz);
+        return offset;
     }
 
-    private static int colorQuad(float[] out, int offset, float[] color) {
+    private static int vertex(float[] out, int offset, float x, float y, float z) {
+        out[offset] = x;
+        out[offset + 1] = y;
+        out[offset + 2] = z;
+        return offset + 3;
+    }
+
+    private static int colorQuad(float[] out, int offset, float[] color, float shade) {
         for (int vertex = 0; vertex < 6; vertex += 1) {
-            System.arraycopy(color, 0, out, offset, 4);
+            out[offset] = color[0] * shade;
+            out[offset + 1] = color[1] * shade;
+            out[offset + 2] = color[2] * shade;
+            out[offset + 3] = color[3];
             offset += 4;
         }
         return offset;
