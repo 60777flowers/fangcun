@@ -65,10 +65,13 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private volatile int hintVoxelX = Integer.MIN_VALUE;
     private volatile int hintVoxelZ = Integer.MIN_VALUE;
 
-    private static final float COMPANION_X = 0.14f;
-    private static final float COMPANION_Y = 0.22f;
-    private static final float COMPANION_Z = -0.10f;
+    private static final float COMPANION_X = 0.10f;
+    /** Feet rest on the terrain surface: one 3 cm terrain block. */
+    private static final float COMPANION_Y = 0.03f;
+    private static final float COMPANION_Z = 0.06f;
     private static final float PREVIEW_DISTANCE = 0.55f;
+    /** Two voxels tall, so the character reads at the same scale as the built blocks. */
+    private static final float COMPANION_HEIGHT_METERS = 0.06f;
     private final float[] characterModel = new float[16];
     private final float[] characterMvp = new float[16];
     private final float[] characterViewA = new float[16];
@@ -78,7 +81,6 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
 
     /** Replaceable companion asset: drop another .vrm/.glb here to change the character. */
     private static final String COMPANION_ASSET = "models/companion/default.vrm";
-    private static final float COMPANION_HEIGHT_METERS = 0.18f;
     private VrmModel vrm;
     private int vrmProgram;
     private int vrmPositionHandle;
@@ -440,8 +442,8 @@ final class ArPocRenderer implements GLSurfaceView.Renderer {
     private void drawCompanionModel(VrmModel model) {
         double seconds = System.currentTimeMillis() / 1000.0;
         boolean busy = "building".equals(companionState) || "planning".equals(companionState);
-        double bobRate = busy ? 6.0 : 1.5;
-        float bob = (float) (Math.sin(seconds * bobRate) * (busy ? 0.016 : 0.008));
+        // Grounded by default: the avatar stands on the terrain and only hops while building.
+        float bob = busy ? (float) (Math.abs(Math.sin(seconds * 5.0)) * 0.008) : 0f;
         float yaw = (float) (Math.sin(seconds * (busy ? 2.2 : 0.45)) * 18.0);
 
         Matrix.setIdentityM(characterModel, 0);

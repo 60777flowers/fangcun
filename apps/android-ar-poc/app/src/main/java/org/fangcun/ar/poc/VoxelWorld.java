@@ -14,7 +14,7 @@ final class VoxelWorld {
     static final int SIZE = 16;
     static final int ORIGIN = -8;
     static final float VOXEL_METERS = 0.03f;
-    static final int BUILD_MIN_Y = 4;
+    static final int BUILD_MIN_Y = 1; // must track WorldSpec.terrainTopY
 
     private static final String[] BLOCK_IDS = {"grass", "dirt", "stone", "planks", "log", "leaves", "sand", "glass"};
 
