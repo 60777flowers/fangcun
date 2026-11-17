@@ -48,6 +48,7 @@ public final class ArPocActivity extends Activity {
 
     private final VoxelWorld world = new VoxelWorld();
     private final ExecutorService hostExecutor = Executors.newSingleThreadExecutor();
+    private android.content.SharedPreferences prefs;
     private HostClient hostClient;
     private String arStatus = "Starting…";
     private String hostStatus = "Not connected";
@@ -55,6 +56,7 @@ public final class ArPocActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences("fangcun", MODE_PRIVATE);
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
         getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN, android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
@@ -130,12 +132,21 @@ public final class ArPocActivity extends Activity {
                 arView.markWorldDirty();
                 setHostStatus("Synced · rev " + rev + " · " + world.countBlocks() + " blocks");
             }
+
+            @Override public void onPaired(String token, String worldId) {
+                prefs.edit().putString("token", token).putString("worldId", worldId).apply();
+            }
         });
 
         String preset = getIntent().getStringExtra("code");
+        String savedToken = prefs.getString("token", null);
+        String savedWorld = prefs.getString("worldId", null);
         if (preset != null && !preset.isEmpty()) {
             codeField.setText(preset);
             connectToHost();
+        } else if (savedToken != null && savedWorld != null) {
+            setHostStatus("Reconnecting with the saved session…");
+            hostExecutor.execute(() -> hostClient.connectWithToken(savedToken, savedWorld));
         }
         renderStatus();
     }

@@ -23,6 +23,9 @@ final class HostClient {
         void onWorldLoaded(int rev);
 
         void onCommitApplied(int rev);
+
+        /** Called once a pairing succeeded so the caller can persist the credential. */
+        void onPaired(String token, String worldId);
     }
 
     private final String host;
@@ -45,17 +48,28 @@ final class HostClient {
     /** Pairs with the one-time code and opens the replica socket. Blocking; call off the UI thread. */
     void connect(String pairingCode) {
         String token;
+        String pairedWorldId;
         try {
             JSONObject response = postJson("/api/pair", new JSONObject()
                 .put("code", pairingCode.trim().toUpperCase(java.util.Locale.ROOT))
                 .put("clientId", clientId));
             token = response.getString("token");
-            worldId = response.getString("worldId");
+            pairedWorldId = response.getString("worldId");
         } catch (IOException | JSONException error) {
             listener.onStatus("Pairing failed: " + describe(error));
             return;
         }
+        listener.onPaired(token, pairedWorldId);
+        openSocket(token, pairedWorldId);
+    }
 
+    /** Reuses a saved credential; the Host closes the socket if the token is no longer valid. */
+    void connectWithToken(String token, String targetWorldId) {
+        openSocket(token, targetWorldId);
+    }
+
+    private void openSocket(String token, String targetWorldId) {
+        worldId = targetWorldId;
         WebSocketClient client = new WebSocketClient();
         try {
             client.connect(host, port, "/api/ws", new WebSocketClient.Listener() {
