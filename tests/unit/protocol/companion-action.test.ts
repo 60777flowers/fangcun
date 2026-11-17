@@ -1,12 +1,12 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import {
   COMPANION_ACTION_IDS,
   isCompanionActionId,
   validateCompanionActionMessage,
   validateServerMessage,
-} from "../src/index.ts";
-import { decodeServerMessageFrame, encodeServerMessageFrame } from "../src/codec.ts";
+} from "../../../packages/protocol/src/index.ts";
+import { decodeServerMessageFrame, encodeServerMessageFrame } from "../../../packages/protocol/src/codec.ts";
 
 const action = {
   protocolVersion: 1,
@@ -52,3 +52,4 @@ test("companion_action rejects unknown fields and malformed envelopes", () => {
   assert.equal(validateCompanionActionMessage({ ...action, protocolVersion: 2 }).ok, false);
   assert.equal(encodeServerMessageFrame({ ...action, actionId: "dance" } as never).ok, false, "the codec refuses an unknown action id");
 });
+

@@ -64,7 +64,12 @@ export class HostStore {
   constructor(dbPath: string, now: () => number = Date.now) {
     this.#db = new DatabaseSync(dbPath);
     this.#now = now;
-    this.#migrate();
+    try {
+      this.#migrate();
+    } catch (error) {
+      this.#db.close();
+      throw error;
+    }
   }
 
   #migrate(): void {
@@ -72,41 +77,48 @@ export class HostStore {
     this.#db.exec("PRAGMA synchronous = FULL");
     this.#db.exec("PRAGMA foreign_keys = ON");
     this.#db.exec("PRAGMA busy_timeout = 5000");
-    this.#db.exec(`
-      CREATE TABLE IF NOT EXISTS meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS world (
-        id TEXT PRIMARY KEY,
-        rev INTEGER NOT NULL,
-        blocks BLOB NOT NULL,
-        updated_at_ms INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS commits (
-        rev INTEGER PRIMARY KEY,
-        tx_id TEXT NOT NULL UNIQUE,
-        actor TEXT NOT NULL,
-        world_id TEXT NOT NULL,
-        ops_json TEXT NOT NULL,
-        at_ms INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS grant (
-        grant_id TEXT PRIMARY KEY,
-        plot_id TEXT NOT NULL UNIQUE,
-        grant_rev INTEGER NOT NULL,
-        json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS companion (
-        companion_id TEXT PRIMARY KEY,
-        json TEXT NOT NULL
-      );
-    `);
-    const version = this.#db.prepare("SELECT value FROM meta WHERE key = 'schemaVersion'").get() as { value?: string } | undefined;
-    if (!version) {
-      this.#db.prepare("INSERT INTO meta(key, value) VALUES ('schemaVersion', '1')").run();
-    } else if (version.value !== "1") {
-      throw new TypeError(`unsupported store schema ${String(version.value)}`);
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.exec(`
+        CREATE TABLE IF NOT EXISTS meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS world (
+          id TEXT PRIMARY KEY,
+          rev INTEGER NOT NULL,
+          blocks BLOB NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS commits (
+          rev INTEGER PRIMARY KEY,
+          tx_id TEXT NOT NULL UNIQUE,
+          actor TEXT NOT NULL,
+          world_id TEXT NOT NULL,
+          ops_json TEXT NOT NULL,
+          at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS grant (
+          grant_id TEXT PRIMARY KEY,
+          plot_id TEXT NOT NULL UNIQUE,
+          grant_rev INTEGER NOT NULL,
+          json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS companion (
+          companion_id TEXT PRIMARY KEY,
+          json TEXT NOT NULL
+        );
+      `);
+      const version = this.#db.prepare("SELECT value FROM meta WHERE key = 'schemaVersion'").get() as { value?: string } | undefined;
+      if (!version) {
+        this.#db.prepare("INSERT INTO meta(key, value) VALUES ('schemaVersion', '1')").run();
+      } else if (version.value !== "1") {
+        throw new TypeError(`unsupported store schema ${String(version.value)}`);
+      }
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
     }
   }
 

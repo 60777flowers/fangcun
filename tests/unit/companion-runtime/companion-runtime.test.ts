@@ -1,8 +1,8 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { WORLD_SPEC } from "@fangcun/world-schema";
 import { applyTransaction, createEmptyWorld, createSeedWorld, getBlock } from "@fangcun/voxel-core";
-import { findHomeCandidates, findHomeCandidate, buildStarterHomePlan, checkHomeAutoCommitEligibility, isEligibleForHomeAutoCommit, nextCompanionTick, type HashCanonicalDiff } from "../src/index.ts";
+import { findHomeCandidates, findHomeCandidate, buildStarterHomePlan, checkHomeAutoCommitEligibility, isEligibleForHomeAutoCommit, nextCompanionTick, type HashCanonicalDiff } from "../../../packages/companion-runtime/src/index.ts";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
 
 const companion: CompanionInstance = { schemaVersion: 1, companionId: "fish-1", ownerUserId: "local-user", worldId: "world-1", personaId: "playful-fish", state: "idle", autonomyEnabled: true, createdAt: "2026-11-16T12:00:00.000Z" };
@@ -71,3 +71,4 @@ test("paused companion emits no construction; a granted empty plot receives one 
   assert.equal(decision.intents[0]?.kind, "build_home");
   assert.equal(nextCompanionTick(companion, world, grant, true).reason, "already-active");
 });
+

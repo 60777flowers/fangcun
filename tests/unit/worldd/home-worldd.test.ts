@@ -1,9 +1,9 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { createEmptyWorld, createSeedWorld } from "@fangcun/voxel-core";
 import { buildStarterHomePlan, findHomeCandidates, type HashCanonicalDiff } from "@fangcun/companion-runtime";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
-import { WorldAuthority } from "../src/index.ts";
+import { WorldAuthority } from "../../../packages/worldd/src/index.ts";
 
 const hash: HashCanonicalDiff = async () => `sha256:${"a".repeat(64)}`;
 const companion: CompanionInstance = { schemaVersion: 1, companionId: "fish-1", ownerUserId: "local-user", worldId: "home-world", personaId: "playful-fish", state: "idle", autonomyEnabled: true, createdAt: "2026-11-16T12:00:00.000Z" };
@@ -46,3 +46,4 @@ test("world authority rejects untrusted issuer, owner mismatch, stale plan and t
   const badOwner = await authority.commitHomePlan(plan, { authenticatedOwnerUserId: "attacker" }, { trackingReady: true });
   assert.equal(badOwner.reason, "grant_missing");
 });
+

@@ -14,14 +14,14 @@
     "typecheck": "npm run build && tsc -p tsconfig.tests.json --pretty false",
     "build": "tsc -b --pretty false --force",
     "pretest": "npm run build",
-    "test": "node --experimental-strip-types --test packages/ar-provider/test/*.test.ts packages/companion-schema/test/*.test.ts packages/companion-runtime/test/*.test.ts packages/world-schema/test/*.test.ts packages/protocol/test/*.test.ts packages/voxel-core/test/*.test.ts packages/worldd/test/*.test.ts packages/host/test/*.test.ts packages/mcp/test/*.test.ts",
+    "test": "node --experimental-strip-types --test tests/unit/**/*.test.ts tests/contracts/**/*.test.mjs",
+    "test:unit": "node --experimental-strip-types --test tests/unit/**/*.test.ts",
+    "test:contracts": "node --test tests/contracts/**/*.test.mjs",
+    "test:browser": "node tests/browser/test-simulator.mjs && node tests/browser/test-core-ui.mjs",
     "host": "npm run build && node scripts/run-host.mjs",
     "mcp": "npm run build && node scripts/mcp-server.mjs",
     "simulator": "npm run build && node scripts/serve-simulator.mjs",
     "atlas": "node scripts/build-block-atlas.mjs",
-    "test:simulator": "node scripts/test-simulator.mjs",
-    "test:core-api": "node scripts/test-core-api.mjs",
-    "test:core-ui": "node scripts/test-core-ui.mjs",
     "demo:companion": "npm run build && node scripts/demo-companion.mjs"
   },
   "devDependencies": {

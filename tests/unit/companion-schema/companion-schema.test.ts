@@ -1,7 +1,7 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { WORLD_SPEC } from "@fangcun/world-schema";
-import { isInsidePlot, validateCompanionInstance, validateHomePlotGrant, validatePersonaCard, validateVisitEvent, validateVisitInvitation } from "../src/index.ts";
+import { isInsidePlot, validateCompanionInstance, validateHomePlotGrant, validatePersonaCard, validateVisitEvent, validateVisitInvitation } from "../../../packages/companion-schema/src/index.ts";
 
 const persona = { schemaVersion: 1, personaId: "playful-fish", version: 1, displayName: "大肥鱼", personaText: "调皮、温暖。", toneTags: ["playful"], allowedEmotes: ["wave", "happy"], memoryPolicy: "session-only" };
 const instance = { schemaVersion: 1, companionId: "fish-1", ownerUserId: "local-user", worldId: "world-1", personaId: "playful-fish", state: "idle", autonomyEnabled: true, createdAt: "2026-11-16T12:00:00.000Z" };
@@ -42,3 +42,4 @@ test("future visit contracts support scoped async messages but never write grant
   assert.equal(validateVisitEvent({ ...event, payload: { text: "x".repeat(281) } }).ok, false);
   assert.equal(validateVisitEvent({ ...event, approvalId: "write-token" }).ok, false);
 });
+

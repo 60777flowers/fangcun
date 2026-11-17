@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,9 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { applyTransaction, createSeedWorld, getBlock } from "@fangcun/voxel-core";
 import { COMPANION_ACTION_IDS, validateCompanionActionMessage } from "@fangcun/protocol";
-import { FangcunHost } from "../src/index.ts";
-import { addItemToCompanion } from "../src/items.ts";
-import { HostStore } from "../src/persistence.ts";
+import { FangcunHost } from "../../../packages/host/src/index.ts";
+import { addItemToCompanion } from "../../../packages/host/src/items.ts";
+import { HostStore } from "../../../packages/host/src/persistence.ts";
 
 function tempDb(): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "fangcun-host-"));
@@ -1064,4 +1064,5 @@ test("autonomy respects tracking readiness by delegating to the world authority"
     await host.stop();
   }
 });
+
 

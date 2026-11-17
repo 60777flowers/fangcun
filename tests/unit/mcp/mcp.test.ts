@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { BLOCK_IDS, WORLD_CELL_COUNT, WORLD_SPEC, type BlockId, type Coord } from "@fangcun/world-schema";
 import {
@@ -8,7 +8,7 @@ import {
   McpServer,
   TOOL_DEFINITIONS,
   resolveHostUrl,
-} from "../src/index.ts";
+} from "../../../packages/mcp/src/index.ts";
 
 type StubRequest = Readonly<{ url: string; method: string; body: unknown }>;
 type StubReply = Readonly<{ status: number; body: unknown }>;
@@ -529,3 +529,4 @@ test("resolveHostUrl defaults to loopback and rejects unusable values", () => {
     else process.env.FANGCUN_HOST = previous;
   }
 });
+

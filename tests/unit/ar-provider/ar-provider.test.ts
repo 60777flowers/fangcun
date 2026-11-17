@@ -1,6 +1,6 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { canWriteWorld, choosePreferredMode, confirmRelocalization, createInitialTracking, detectCapabilities, mapNativeTimestampToJs, updateTracking, type CapabilityProbe } from "../src/index.ts";
+import { canWriteWorld, choosePreferredMode, confirmRelocalization, createInitialTracking, detectCapabilities, mapNativeTimestampToJs, updateTracking, type CapabilityProbe } from "../../../packages/ar-provider/src/index.ts";
 
 const matrix = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 const baseProbe = { secureContext: true, cameraAvailable: true, cameraPermission: "granted" as const, webxrImmersiveArSupported: false, webxrHitTestSupported: false, webxrAnchorsSupported: false, markerProviderReady: false };
@@ -73,3 +73,4 @@ test("provider switches, malformed transforms, and non-rigid matrices fail close
   const nonRigid = updateTracking(initial, { state: "running", pose: { ...markerPose, matrix: scaled } });
   assert.equal(nonRigid.state, "tracking-lost");
 });
+

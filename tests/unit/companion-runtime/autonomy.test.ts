@@ -1,6 +1,6 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { createAutonomyState, reduceAutonomy } from "../src/autonomy.ts";
+import { createAutonomyState, reduceAutonomy } from "../../../packages/companion-runtime/src/autonomy.ts";
 
 test("autonomy reducer observes, proposes home, plans and requests auto commit without writing", () => {
   let state = createAutonomyState(true);
@@ -41,3 +41,4 @@ test("pause/cancel/tracking loss invalidate late results and never emit direct c
   assert.equal(lost.state.trackingReady, false);
   assert.equal(lost.effects.some((effect) => effect.kind === "request_auto_commit"), false);
 });
+

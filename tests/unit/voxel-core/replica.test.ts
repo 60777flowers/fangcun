@@ -1,7 +1,7 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { createEmptyWorld, getBlock } from "../src/index.ts";
-import { applyCommit } from "../src/replica.ts";
+import { createEmptyWorld, getBlock } from "../../../packages/voxel-core/src/index.ts";
+import { applyCommit } from "../../../packages/voxel-core/src/replica.ts";
 
 test("replica applies only the next commit; ACKs are outside this API", () => {
   const world = createEmptyWorld("replica");
@@ -24,3 +24,4 @@ test("replica does not partially apply a commit with a before-value conflict", (
   assert.equal(result.status, "resync_required");
   assert.equal(getBlock(world, { x: 0, y: 4, z: 0 }), null);
 });
+

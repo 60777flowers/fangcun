@@ -1,8 +1,8 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { validateClientIntent } from "@fangcun/protocol";
 import { createEmptyWorld, getBlock } from "@fangcun/voxel-core";
-import { WorldAuthority } from "../src/index.ts";
+import { WorldAuthority } from "../../../packages/worldd/src/index.ts";
 
 function intent(seq: number, baseRev: number, x: number, blockId = "planks") {
   const parsed = validateClientIntent({ protocolVersion: 1, type: "intent", worldId: "test", clientId: "phone", seq, baseRev, operation: { type: "place", at: { x, y: 4, z: 0 }, blockId } });
@@ -49,3 +49,4 @@ test("authority rejects stale revisions, seq reuse and player modifications in p
   if (below.ok) assert.equal(authority.handleIntent(below.value).ack.reason, "protected_terrain");
   assert.equal(getBlock(authority.snapshot, { x: 0, y: 4, z: 0 }), "planks");
 });
+

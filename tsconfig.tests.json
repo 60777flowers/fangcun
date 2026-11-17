@@ -8,6 +8,6 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["packages/**/test/**/*.ts"],
+  "include": ["tests/unit/**/*.test.ts"],
   "exclude": ["**/node_modules/**", "**/dist/**"]
 }

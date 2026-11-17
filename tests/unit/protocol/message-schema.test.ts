@@ -1,10 +1,10 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import protocolSchema from "../schema/protocol-v1.json" with { type: "json" };
+import protocolSchema from "../../../packages/protocol/schema/protocol-v1.json" with { type: "json" };
 import { BLOCK_IDS, WORLD_CELL_COUNT } from "@fangcun/world-schema";
-import { validateClientMessage, validateServerMessage } from "../src/index.ts";
-import { decodeClientMessageFrame, decodeServerMessageFrame, encodeClientMessageFrame, encodeServerMessageFrame } from "../src/codec.ts";
+import { validateClientMessage, validateServerMessage } from "../../../packages/protocol/src/index.ts";
+import { decodeClientMessageFrame, decodeServerMessageFrame, encodeClientMessageFrame, encodeServerMessageFrame } from "../../../packages/protocol/src/codec.ts";
 
 const hello = { protocolVersion: 1, type: "hello", worldId: "w", clientId: "phone", credential: "one-time", lastAppliedRev: 0 };
 const ack = { protocolVersion: 1, type: "ack", worldId: "w", seq: 1, accepted: true, committedRev: 0 };
@@ -81,3 +81,4 @@ test("protocol JSON Schema block enums mirror the catalog", () => {
   const catalogSnapshot = { ...snapshot, blocks: [...BLOCK_IDS, ...Array<null>(WORLD_CELL_COUNT - BLOCK_IDS.length).fill(null)] };
   assert.equal(validateJsonSchema({ ...welcome, snapshot: catalogSnapshot }), true, "a snapshot may contain every catalog block id");
 });
+

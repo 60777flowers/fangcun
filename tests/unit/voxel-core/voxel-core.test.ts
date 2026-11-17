@@ -1,7 +1,7 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { WORLD_SPEC } from "@fangcun/world-schema";
-import { applyTransaction, countBlocks, createEmptyWorld, createSeedWorld, getBlock, worldStateFromObject, worldStateToObject } from "../src/index.ts";
+import { applyTransaction, countBlocks, createEmptyWorld, createSeedWorld, getBlock, worldStateFromObject, worldStateToObject } from "../../../packages/voxel-core/src/index.ts";
 
 const BUILD_Y = WORLD_SPEC.terrainTopY;
 
@@ -65,3 +65,4 @@ test("base revision and terrain policy are enforced before any write", () => {
   assert.deepEqual(applyTransaction(world, [{ type: "break", at: { x: 0, y: 0, z: 0 }, expectedBlock: "grass" }], { baseRev: 0, actor: "player" }), { ok: false, code: "protected_terrain", operationIndex: 0 });
   assert.deepEqual(applyTransaction(world, [{ type: "break", at: { x: 0, y: 0, z: 0 }, expectedBlock: "grass" }], { baseRev: 0, actor: "ai" }), { ok: false, code: "protected_terrain", operationIndex: 0 });
 });
+

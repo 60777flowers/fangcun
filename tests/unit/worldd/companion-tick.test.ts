@@ -1,10 +1,10 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createSeedWorld } from "@fangcun/voxel-core";
 import { WORLD_SPEC } from "@fangcun/world-schema";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
-import { WorldAuthority } from "../src/index.ts";
+import { WorldAuthority } from "../../../packages/worldd/src/index.ts";
 
 const ownerUserId = "tick-owner";
 const nowMs = Date.parse("2026-11-17T00:00:00.000Z");
@@ -82,3 +82,4 @@ test("companion tick is inert when tracking or owner binding is missing", async 
   assert.equal(attacker.status, "rejected");
   assert.equal(attacker.reason, "owner_mismatch");
 });
+

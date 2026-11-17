@@ -1,6 +1,6 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { BLOCK_DEFS, BLOCK_IDS, WORLD_CELL_COUNT, WORLD_SPEC, coordToIndex, indexToCoord, isBlockId, isInBounds } from "../src/index.ts";
+import { BLOCK_DEFS, BLOCK_IDS, WORLD_CELL_COUNT, WORLD_SPEC, coordToIndex, indexToCoord, isBlockId, isInBounds } from "../../../packages/world-schema/src/index.ts";
 
 // The v1 catalog ids in their pinned order. Durable stores encode a block id as
 // BLOCK_IDS.indexOf(id) + 1, so these positions must never move.
@@ -46,3 +46,4 @@ test("catalog appends eight decorative ids after the pinned v1 ids", () => {
     assert.equal(isBlockId(id), true);
   }
 });
+

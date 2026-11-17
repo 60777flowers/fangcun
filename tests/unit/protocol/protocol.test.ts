@@ -1,7 +1,7 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { BLOCK_IDS } from "@fangcun/world-schema";
-import { validateClientIntent, validateCommitMessage } from "../src/index.ts";
+import { validateClientIntent, validateCommitMessage } from "../../../packages/protocol/src/index.ts";
 
 test("client intent is validated and copied into canonical shape", () => {
   const result = validateClientIntent({ protocolVersion: 1, type: "intent", worldId: "w", clientId: "c", seq: 1, baseRev: 0, operation: { type: "place", at: { x: 0, y: 4, z: 0 }, blockId: "planks" } });
@@ -38,3 +38,4 @@ test("commit requires a valid revision and bounded non-empty atomic operation li
     { type: "place", at: { x: 0, y: 4, z: 0 }, blockId: "glass" },
   ] }).ok, false, "duplicate cells must be rejected");
 });
+

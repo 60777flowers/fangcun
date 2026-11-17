@@ -1,6 +1,6 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { decodeClientIntentFrame, decodeCommitFrame, encodeClientIntentFrame, encodeCommitFrame } from "../src/codec.ts";
+import { decodeClientIntentFrame, decodeCommitFrame, encodeClientIntentFrame, encodeCommitFrame } from "../../../packages/protocol/src/codec.ts";
 
 const intent = { protocolVersion: 1, type: "intent", worldId: "w", clientId: "c", seq: 1, baseRev: 0, operation: { type: "place", at: { x: 0, y: 4, z: 0 }, blockId: "planks" } } as const;
 
@@ -23,3 +23,4 @@ test("decoder rejects oversized, malformed, extra-field and out-of-range frames"
   assert.equal(decodeClientIntentFrame(JSON.stringify({ ...intent, extra: "no" })).ok, false);
   assert.equal(decodeClientIntentFrame(JSON.stringify({ ...intent, operation: { ...intent.operation, at: { x: 8, y: 4, z: 0 } } })).ok, false);
 });
+

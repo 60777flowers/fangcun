@@ -1,10 +1,10 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { validateClientIntent } from "@fangcun/protocol";
 import { createSeedWorld } from "@fangcun/voxel-core";
 import { buildStarterHomePlan, findHomeCandidates, type HashCanonicalDiff } from "@fangcun/companion-runtime";
 import type { CompanionInstance, HomePlotGrant } from "@fangcun/companion-schema";
-import { WorldAuthority } from "../src/index.ts";
+import { WorldAuthority } from "../../../packages/worldd/src/index.ts";
 
 const hash: HashCanonicalDiff = async () => `sha256:${"a".repeat(64)}`;
 const owner = "owner-1";
@@ -66,3 +66,4 @@ test("concurrent player edit while hash validation is pending makes the home pla
   assert.equal(result.reason, "stale_revision");
   assert.equal(authority.snapshot.rev, 1);
 });
+
